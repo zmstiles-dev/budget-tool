@@ -1,0 +1,33 @@
+date,description,amount,category,merchant,payment_method,type
+2026-01-30,Maddie Paycheck,4534.42,Income,Maddie Paycheck,Direct Deposit,income
+2026-01-09,Zach Paycheck 1,2270.01,Income,Zach Paycheck 1,Direct Deposit,income
+2026-01-23,Zach Paycheck 2,2510.69,Income,Zach Paycheck 2,Direct Deposit,income
+2026-01-05,Gifts Reimbursement,-20.00,Gifts,Zelle - Greg Stiles,Checking Account,expense
+2026-01-05,GD Battery Replacement,182.19,Car Maintenance,Higher Standards Auto,Check,expense
+2026-01-17,Gym Membership,10.00,Gym,Planet Fitness,Checking Account,expense
+2026-01-02,Lunch,36.99,Restaurants,Sushi Remix,CFF,expense
+2026-01-08,Dinner,14.84,Restaurants,Pizza Hut,CFF,expense
+2026-01-09,Cookies,13.86,Restaurants,Chef Sergey's Bakery,CFF,expense
+2026-01-03,Maggie Donation,102.41,CRU Donation,CRU,Ven X,expense
+2026-01-03,Groceries,89.71,Groceries,Costco,Ven X,expense
+2026-01-03,ACV Shampoo Creatine,63.56,Pharmacy,Costco,Ven X,expense
+2026-01-03,Groceries,35.26,Groceries,Meijer,Ven X,expense
+2026-01-03,Groceries,34.12,Groceries,Aldi,Ven X,expense
+2026-01-05,GD Battery,138.37,Car Maintenance,Autozone,Ven X,expense
+2026-01-05,Medical Bills Refund,-68.25,Medical Bills,Mid Michigan Health,Ven X,expense
+2026-01-06,Tithe,812.00,Tithe,Midland Free,Ven X,expense
+2026-01-07,Insurance,181.80,Insurance,State Farm,Ven X,expense
+2026-01-08,Rebeca Donation,39.00,Rebeca Donation,Children International,Ven X,expense
+2026-01-09,Lincoln Gas,37.72,Gasoline,Speedway,Ven X,expense
+2026-01-12,Groceries,38.77,Groceries,Aldi,Ven X,expense
+2026-01-12,Matcha,11.99,Groceries,Amazon,Ven X,expense
+2026-01-12,Razor Head Cable,53.95,Shopping,Amazon,Ven X,expense
+2026-01-12,AirPods case,7.94,Shopping,Amazon,Ven X,expense
+2026-01-12,Battery Core Refund,-22.00,Car Maintenance,Autozone,Ven X,expense
+2026-01-16,Groceries,6.28,Groceries,Aldi,Ven X,expense
+2026-01-17,Women's Conference,50.00,Miscellaneous,Midland Free,Ven X,expense
+2026-01-16,Groceries,52.25,Groceries,Costco,Ven X,expense
+2026-01-16,Groceries,27.72,Groceries,Aldi,Ven X,expense
+2026-01-16,Internet Bill,85.00,Internet,Spectrum,Ven X,expense
+2026-01-16,Lincoln Gas,35.65,Gasoline,Meijer,Ven X,expense
+2026-01-16,Groceries,49.98,Groceries,Meijer,Ven X,expense
