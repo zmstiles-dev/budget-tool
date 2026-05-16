@@ -77,6 +77,11 @@
                 <select id="monthFilter"></select>
             </div>
 
+            <div id="monthlySummary" style="display:flex;justify-content:space-between;padding:20px;background:linear-gradient(135deg,#667eea,#764ba2);border-radius:12px;margin-bottom:20px;color:white;">
+                <div style="text-align:center;"><div style="font-size:0.9rem;opacity:0.9;">Monthly Income</div><div id="monthSummaryIncome" style="font-size:1.8rem;font-weight:700;">$0.00</div></div>
+                <div style="text-align:center;"><div style="font-size:0.9rem;opacity:0.9;">Monthly Spent</div><div id="monthSummarySpent" style="font-size:1.8rem;font-weight:700;">$0.00</div></div>
+                <div style="text-align:center;"><div style="font-size:0.9rem;opacity:0.9;">Monthly Saved</div><div id="monthSummarySaved" style="font-size:1.8rem;font-weight:700;">$0.00</div></div>
+            </div>
             <div class="grid" style="grid-template-columns: 1fr 1fr; gap: 20px; margin-bottom: 20px;">
                 <div>
                     <div class="card" style="margin-bottom: 20px;">
@@ -92,6 +97,7 @@
                 </div>
                 <div class="card">
                     <h3>Monthly Budget</h3>
+                    <div id="monthlyBudgetTotals" style="margin-bottom:15px;padding:15px;background:#f8f9fa;border-radius:8px;"></div>
                     <div class="filters" style="margin-bottom:15px;">
                         <span style="font-size:0.9rem;">Copy from:</span>
                         <select id="copyBudgetFrom" style="padding:6px;border:1px solid #ddd;border-radius:4px;">
@@ -123,6 +129,11 @@
                 <select id="yearFilter"></select>
             </div>
 
+            <div id="yearlySummary" style="display:flex;justify-content:space-between;padding:20px;background:linear-gradient(135deg,#667eea,#764ba2);border-radius:12px;margin-bottom:20px;color:white;">
+                <div style="text-align:center;"><div style="font-size:0.9rem;opacity:0.9;">Yearly Income</div><div id="summaryIncome" style="font-size:1.8rem;font-weight:700;">$0.00</div></div>
+                <div style="text-align:center;"><div style="font-size:0.9rem;opacity:0.9;">Yearly Spent</div><div id="summarySpent" style="font-size:1.8rem;font-weight:700;">$0.00</div></div>
+                <div style="text-align:center;"><div style="font-size:0.9rem;opacity:0.9;">Yearly Saved</div><div id="summarySaved" style="font-size:1.8rem;font-weight:700;">$0.00</div></div>
+            </div>
             <div class="grid" style="grid-template-columns: 1fr 1fr; gap: 20px; margin-bottom: 20px;">
                 <div>
                     <div class="card" style="margin-bottom: 20px;">
@@ -577,6 +588,7 @@
             const month = document.getElementById('monthFilter').value;
             const monthData = getMonthData(month);
             const list = document.getElementById('monthlyBudgetList');
+            const totalsDiv = document.getElementById('monthlyBudgetTotals');
 
             populateBudgetCopyDropdown();
 
@@ -586,26 +598,47 @@
                 catTotals[cat] = (catTotals[cat] || 0) + Math.abs(t.amount);
             });
 
+            let totalBudget = 0;
+            let totalActual = 0;
             const budgetCats = Object.keys(budgets);
+            budgetCats.forEach(cat => {
+                const budget = budgets[cat][month] !== undefined ? budgets[cat][month] : 0;
+                totalBudget += budget;
+                totalActual += catTotals[cat] || 0;
+            });
+
+            const totalRemaining = totalBudget - totalActual;
+            const totalPct = totalBudget > 0 ? (totalActual / totalBudget) * 100 : 0;
+
+            totalsDiv.innerHTML = `
+                <div style="display:flex;justify-content:space-between;font-size:1.1rem;margin-bottom:10px;">
+                    <span>Total Budget: <strong>$${totalBudget.toFixed(2)}</strong></span>
+                    <span>Total Spent: <strong>$${totalActual.toFixed(2)}</strong></span>
+                </div>
+                <div style="display:flex;justify-content:space-between;font-size:1.1rem;">
+                    <span>Surplus: <strong style="color:${totalRemaining >= -0.01 ? '#27ae60' : '#e74c3c'}">${totalRemaining >= -0.01 ? '+' : ''}$${Math.abs(totalRemaining).toFixed(2)}</strong></span>
+                    <span style="color:#666">${totalPct.toFixed(1)}% used</span>
+                </div>
+            `;
             list.innerHTML = budgetCats.map(cat => {
                 const budget = budgets[cat][month] !== undefined ? budgets[cat][month] : 0;
                 const actual = catTotals[cat] || 0;
                 const remaining = budget - actual;
-                const pct = budget > 0 ? Math.min((actual / budget) * 100, 100) : 0;
+                const pct = budget > 0 ? (actual / budget) * 100 : 0;
                 return `
-                    <div class="budget-item">
-                        <div>
+                    <div class="budget-item" style="flex-direction:column;gap:5px;">
+                        <div style="display:flex;justify-content:space-between;align-items:center;">
                             <div>${cat}</div>
-                            <div style="font-size:0.85rem;color:#666">
-                                Budget: <input type="number" class="budget-input" data-cat="${cat}" data-month="${month}" value="${budget}" style="width:80px;padding:4px;border:1px solid #ddd;border-radius:4px;"> 
-                                | Actual: $${actual.toFixed(2)}
-                            </div>
-                            <div class="progress-bar">
-                                <div class="fill ${pct > 100 ? 'over' : ''}" style="width:${pct}%"></div>
+                            <div class="remaining ${remaining >= 0 ? 'under' : 'over'}">
+                                ${remaining >= 0 ? '+' : ''}$${remaining.toFixed(2)}
                             </div>
                         </div>
-                        <div class="remaining ${remaining >= 0 ? 'under' : 'over'}">
-                            ${remaining >= 0 ? '+' : ''}$${remaining.toFixed(2)}
+                        <div style="font-size:0.85rem;color:#666">
+                            Budget: <input type="number" class="budget-input" data-cat="${cat}" data-month="${month}" value="${budget}" style="width:80px;padding:4px;border:1px solid #ddd;border-radius:4px;"> 
+                            | Actual: $${actual.toFixed(2)}
+                        </div>
+                        <div class="progress-bar" style="width:100%;">
+                            <div class="fill ${pct > 100 ? 'over' : ''}" style="width:${Math.min(pct, 100)}%"></div>
                         </div>
                     </div>
                 `;
@@ -677,18 +710,18 @@
                 });
                 const actual = catTotals[cat] || 0;
                 const remaining = budget - actual;
-                const pct = budget > 0 ? Math.min((actual / budget) * 100, 100) : 0;
+                const pct = budget > 0 ? (actual / budget) * 100 : 0;
                 return `
-                    <div class="budget-item">
-                        <div>
+                    <div class="budget-item" style="flex-direction:column;gap:5px;">
+                        <div style="display:flex;justify-content:space-between;align-items:center;">
                             <div>${cat}</div>
-                            <div style="font-size:0.85rem;color:#666">Budget: $${budget.toFixed(2)} | Actual: $${actual.toFixed(2)}</div>
-                            <div class="progress-bar">
-                                <div class="fill ${pct > 100 ? 'over' : ''}" style="width:${pct}%"></div>
+                            <div class="remaining ${remaining >= -0.01 ? 'under' : 'over'}">
+                                ${remaining >= -0.01 ? '+' : ''}$${Math.abs(remaining).toFixed(2)}
                             </div>
                         </div>
-                        <div class="remaining ${remaining >= -0.01 ? 'under' : 'over'}">
-                            ${remaining >= -0.01 ? '+' : ''}$${Math.abs(remaining).toFixed(2)}
+                        <div style="font-size:0.85rem;color:#666">Budget: $${budget.toFixed(2)} | Actual: $${actual.toFixed(2)}</div>
+                        <div class="progress-bar" style="width:100%;">
+                            <div class="fill ${pct > 100 ? 'over' : ''}" style="width:${Math.min(pct, 100)}%"></div>
                         </div>
                     </div>
                 `;
@@ -702,6 +735,32 @@
             renderYearlyBudget();
             renderMonthlyIncome();
             renderYearlyIncome();
+            renderYearlySummary();
+            renderMonthlySummary();
+        }
+
+        function renderYearlySummary() {
+            const year = document.getElementById('yearFilter').value;
+            const yearTransactions = transactions.filter(t => t.date.startsWith(year));
+            const income = yearTransactions.filter(t => t.category === 'Income').reduce((sum, t) => sum + Math.abs(t.amount), 0);
+            const spent = yearTransactions.filter(t => t.category !== 'Income' && t.type !== 'income').reduce((sum, t) => sum + Math.abs(t.amount), 0);
+            const saved = income - spent;
+            document.getElementById('summaryIncome').textContent = '$' + income.toFixed(2);
+            document.getElementById('summarySpent').textContent = '$' + spent.toFixed(2);
+            document.getElementById('summarySaved').textContent = '$' + saved.toFixed(2);
+            document.getElementById('summarySaved').style.color = saved >= 0 ? '#27ae60' : '#e74c3c';
+        }
+
+        function renderMonthlySummary() {
+            const month = document.getElementById('monthFilter').value;
+            const monthTransactions = transactions.filter(t => t.date.startsWith(month));
+            const income = monthTransactions.filter(t => t.category === 'Income').reduce((sum, t) => sum + Math.abs(t.amount), 0);
+            const spent = monthTransactions.filter(t => t.category !== 'Income' && t.type !== 'income').reduce((sum, t) => sum + Math.abs(t.amount), 0);
+            const saved = income - spent;
+            document.getElementById('monthSummaryIncome').textContent = '$' + income.toFixed(2);
+            document.getElementById('monthSummarySpent').textContent = '$' + spent.toFixed(2);
+            document.getElementById('monthSummarySaved').textContent = '$' + saved.toFixed(2);
+            document.getElementById('monthSummarySaved').style.color = saved >= 0 ? '#27ae60' : '#e74c3c';
         }
 
         function renderMonthlyIncome() {
@@ -727,7 +786,7 @@
 
         function renderYearlyIncome() {
             const year = document.getElementById('yearFilter').value;
-            const incomeData = transactions.filter(t => t.date.startsWith(year) && (t.type === 'income' || t.amount < 0));
+            const incomeData = transactions.filter(t => t.date.startsWith(year) && t.category === 'Income');
             const total = incomeData.reduce((sum, t) => sum + Math.abs(t.amount), 0);
             
             const incomeByType = {};
