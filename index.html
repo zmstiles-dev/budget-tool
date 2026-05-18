@@ -60,6 +60,33 @@
         .progress-bar .fill { height: 100%; background: #3498db; transition: width 0.3s; }
         .progress-bar .fill.over { background: #e74c3c; }
         .hidden { display: none; }
+        .category-group { margin-bottom: 20px; border: 1px solid #eee; border-radius: 8px; overflow: hidden; }
+        .category-group-header { display: flex;justify-content:space-between;align-items:center;padding:15px;background:#f8f9fa;cursor:pointer; }
+        .category-group-header:hover { background:#f0f0f0; }
+        .category-group-title { font-weight:600;font-size:1.1rem; }
+        .category-group-actions { display:flex;gap:10px; }
+        .category-group-actions button { padding:4px 10px;font-size:0.85rem; }
+        .category-group-content { padding:15px; }
+        .category-item { display:flex;justify-content:space-between;align-items:center;padding:12px;border-bottom:1px solid #eee; }
+        .category-item:last-child { border-bottom:none; }
+        .category-info { display:flex;align-items:center;gap:10px; }
+        .category-color { width:16px;height:16px;border-radius:50%;flex-shrink:0; }
+        .category-name { font-weight:500; }
+        .category-type { font-size:0.8rem;padding:2px 8px;border-radius:4px;background:#ecf0f1;color:#666; }
+        .category-type.expense { background:#fce4e4;color:#c0392b; }
+        .category-type.income { background:#e8f5e9;color:#27ae60; }
+        .category-type.cumulative { background:#fff3cd;color:#856404; }
+        .category-actions { display:flex;gap:8px; }
+        .category-actions button { padding:4px 10px;font-size:0.85rem; }
+        .color-picker { display:flex;gap:8px;flex-wrap:wrap;margin-top:10px; }
+        .color-option { width:32px;height:32px;border-radius:50%;cursor:pointer;border:3px solid transparent;transition:all 0.2s; }
+        .color-option:hover { transform:scale(1.1); }
+        .color-option.selected { border-color:#333;transform:scale(1.1); }
+        .btn-danger { background:#e74c3c;color:white; }
+        .btn-danger:hover { background:#c0392b; }
+        .empty-state { text-align:center;padding:40px;color:#666; }
+        .toggle-switch { display:flex;align-items:center;gap:10px; }
+        .toggle-switch input { width:auto; }
     </style>
 </head>
 <body>
@@ -68,6 +95,7 @@
             <h2>Budget Tracker</h2>
             <div class="nav-item active" data-tab="monthly">Monthly</div>
             <div class="nav-item" data-tab="yearly">Yearly</div>
+            <div class="nav-item" data-tab="categories">Categories</div>
             <div class="nav-item" data-tab="import">Import</div>
         </nav>
 
@@ -155,6 +183,16 @@
             </div>
         </div>
 
+        <div id="categories" class="panel">
+            <div class="card">
+                <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:20px;">
+                    <h3>Budget Categories</h3>
+                    <button class="btn btn-primary" onclick="showAddGroupModal()">Add Group</button>
+                </div>
+                <div id="categoriesList"></div>
+            </div>
+        </div>
+
         <div id="import" class="panel">
             <div class="card">
                 <h3>Import Transactions</h3>
@@ -175,16 +213,7 @@
                     <button class="btn btn-primary" onclick="document.getElementById('dataFileInput').click()" style="margin-left: 10px;">Import Data</button>
                     <input type="file" id="dataFileInput" accept=".json" hidden onchange="importData(this)">
                 </div>
-                <div style="margin-top: 20px; padding-top: 20px; border-top: 1px solid #eee;">
-                    <h4 style="margin-bottom:10px">Add Category</h4>
-                    <div style="display:flex;gap:10px;align-items:center">
-                        <input type="text" id="newCategoryName" placeholder="Category name" style="padding:8px;border:1px solid #ddd;border-radius:6px;">
-                        <select id="newCategoryType" style="padding:8px;border:1px solid #ddd;border-radius:6px;">
-                            <option value="expense">Expense</option>
-                            <option value="income">Income</option>
-                        </select>
-                        <button class="btn btn-success" onclick="addCategory()">Add</button>
-</div>
+                
         </div>
         </main>
     </div>
@@ -217,20 +246,101 @@
         </div>
     </div>
 
+    <div class="modal" id="categoryFormModal">
+        <div class="modal-content">
+            <h2 id="categoryFormTitle">Add Category</h2>
+            <div class="form-group">
+                <label>Category Name</label>
+                <input type="text" id="categoryFormName" placeholder="Enter category name">
+            </div>
+            <div class="form-group">
+                <label>Group</label>
+                <select id="categoryFormGroup">
+                    <option value="">Ungrouped</option>
+                </select>
+                <input type="text" id="categoryFormNewGroup" placeholder="Or create new group" style="margin-top:5px;display:none;">
+            </div>
+            <div class="form-group">
+                <label>Type</label>
+                <select id="categoryFormType">
+                    <option value="expense">Expense</option>
+                    <option value="income">Income</option>
+                </select>
+            </div>
+            <div class="form-group">
+                <label>Color</label>
+                <div class="color-picker" id="colorPicker"></div>
+            </div>
+            <div class="form-group" id="cumulativeFields" style="display:none;">
+                <label style="display:inline-flex;align-items:center;gap:5px;cursor:pointer;">
+                    <input type="checkbox" id="categoryFormIsCumulative" style="width:auto;margin:0;">
+                    Cumulative Budget Category
+                </label>
+                <div id="cumulativeOptions" style="margin-top:10px;display:none;">
+                    <div style="margin-bottom:10px;">
+                        <label>Monthly Amount to Add to Bank</label>
+                        <input type="number" id="categoryFormCumulativeAmount" placeholder="0.00" step="0.01">
+                    </div>
+                    <div>
+                        <label>Initial Bank Balance (optional)</label>
+                        <input type="number" id="categoryFormInitialBank" placeholder="0.00" step="0.01">
+                    </div>
+                </div>
+            </div>
+            <input type="hidden" id="categoryFormEditIndex">
+            <div style="display: flex; gap: 10px; justify-content: flex-end; margin-top: 20px;">
+                <button class="btn btn-secondary" onclick="closeCategoryFormModal()">Cancel</button>
+                <button class="btn btn-primary" onclick="saveCategoryForm()">Save</button>
+            </div>
+        </div>
+    </div>
+
+    <div class="modal" id="groupFormModal">
+        <div class="modal-content">
+            <h2 id="groupFormTitle">Add Group</h2>
+            <div class="form-group">
+                <label>Group Name</label>
+                <input type="text" id="groupFormName" placeholder="Enter group name">
+            </div>
+            <input type="hidden" id="groupFormEditIndex">
+            <div style="display: flex; gap: 10px; justify-content: flex-end; margin-top: 20px;">
+                <button class="btn btn-secondary" onclick="closeGroupFormModal()">Cancel</button>
+                <button class="btn btn-primary" onclick="saveGroupForm()">Save</button>
+            </div>
+        </div>
+    </div>
+
+    <div class="modal" id="confirmModal">
+        <div class="modal-content">
+            <h2 id="confirmTitle">Confirm</h2>
+            <p id="confirmMessage"></p>
+            <div style="display: flex; gap: 10px; justify-content: flex-end; margin-top: 20px;">
+                <button class="btn btn-secondary" onclick="closeConfirmModal()">Cancel</button>
+                <button class="btn btn-danger" id="confirmAction">Confirm</button>
+            </div>
+        </div>
+    </div>
+
     <script>
         const STORAGE_KEY = 'budget_merchant_defaults';
         const TRANS_DATA_KEY = 'budget_transactions';
         const CAT_DATA_KEY = 'budget_categories';
         const BUDGET_DATA_KEY = 'budget_budgets';
+        const CAT_GROUPS_KEY = 'budget_category_groups';
+        const CAT_COLORS_KEY = 'budget_category_colors';
 
         let transactions = [];
         let categories = [];
         let budgets = {};
+        let categoryGroups = [];
+        let categoryColors = {};
         let merchantDefaults = {};
         let pendingImport = [];
         let pendingImportBudgets = {};
         let currentTransactionIndex = 0;
         let monthlyChart, yearlyChart;
+
+        const categoryColorPalette = ['#3498db', '#e74c3c', '#2ecc71', '#f39c12', '#9b59b6', '#1abc9c', '#34495e', '#e67e22', '#c0392b', '#27ae60', '#2980b9', '#8e44ad', '#e91e63', '#00bcd4', '#ff5722', '#795548', '#607d8b', '#9c27b0', '#4caf50', '#ff9800', '#03a9f4', '#f44336', '#ffc107', '#cddc39', '#009688', '#673ab7', '#3f51b5', '#2196f3', '#ffeb3b', '#8bc34a', '#263238', '#9e9e9e', '#f06292', '#ba68c8', '#9575cd', '#7986cb', '#64b5f6', '#4fc3f7', '#4dd0e1', '#4db6ac', '#81c784', '#aed581', '#dce775', '#fff176', '#ffd54f', '#ffb74d', '#ff8a65', '#a1887f', '#90a4ae', '#f48fb1', '#ce93d8', '#b39ddb', '#9fa8da', '#82b1ff', '#81d4fa', '#80deea', '#80cbc4', '#a5d6a7', '#c5e1a5', '#dce775', '#e6ee9c', '#fff59d', '#ffe082', '#ffcc80', '#ffab91', '#bcaaa4', '#cfd8dc'];
 
         const defaultTransactions = [
             {date:'2026-01-30',description:'Maddie Paycheck',amount:4534.42,category:'Income',merchant:'Maddie Paycheck',payment_method:'Direct Deposit',type:'income'},
@@ -268,47 +378,25 @@
         ];
 
         const defaultCategories = [
-            {name:'Income',type:'income'},
-            {name:'Gifts',type:'expense'},
-            {name:'Car Maintenance',type:'expense'},
-            {name:'Gym',type:'expense'},
-            {name:'Restaurants',type:'expense'},
-            {name:'CRU Donation',type:'expense'},
-            {name:'Groceries',type:'expense'},
-            {name:'Pharmacy',type:'expense'},
-            {name:'Medical Bills',type:'expense'},
-            {name:'Tithe',type:'expense'},
-            {name:'Insurance',type:'expense'},
-            {name:'Rebeca Donation',type:'expense'},
-            {name:'Gasoline',type:'expense'},
-            {name:'Shopping',type:'expense'},
-            {name:'Miscellaneous',type:'expense'},
-            {name:'Internet',type:'expense'}
+            {name:'Income',type:'income',group:null,color:'#27ae60',isCumulative:false,cumulativeAmount:0,bankBalances:{}},
+            {name:'Gifts',type:'expense',group:null,color:'#e74c3c',isCumulative:false,cumulativeAmount:0,bankBalances:{}},
+            {name:'Car Maintenance',type:'expense',group:null,color:'#3498db',isCumulative:false,cumulativeAmount:0,bankBalances:{}},
+            {name:'Gym',type:'expense',group:null,color:'#9b59b6',isCumulative:false,cumulativeAmount:0,bankBalances:{}},
+            {name:'Restaurants',type:'expense',group:null,color:'#e67e22',isCumulative:false,cumulativeAmount:0,bankBalances:{}},
+            {name:'CRU Donation',type:'expense',group:null,color:'#f39c12',isCumulative:false,cumulativeAmount:0,bankBalances:{}},
+            {name:'Groceries',type:'expense',group:null,color:'#2ecc71',isCumulative:false,cumulativeAmount:0,bankBalances:{}},
+            {name:'Pharmacy',type:'expense',group:null,color:'#1abc9c',isCumulative:false,cumulativeAmount:0,bankBalances:{}},
+            {name:'Medical Bills',type:'expense',group:null,color:'#c0392b',isCumulative:false,cumulativeAmount:0,bankBalances:{}},
+            {name:'Tithe',type:'expense',group:null,color:'#2980b9',isCumulative:false,cumulativeAmount:0,bankBalances:{}},
+            {name:'Insurance',type:'expense',group:null,color:'#8e44ad',isCumulative:false,cumulativeAmount:0,bankBalances:{}},
+            {name:'Rebeca Donation',type:'expense',group:null,color:'#34495e',isCumulative:false,cumulativeAmount:0,bankBalances:{}},
+            {name:'Gasoline',type:'expense',group:null,color:'#d35400',isCumulative:false,cumulativeAmount:0,bankBalances:{}},
+            {name:'Shopping',type:'expense',group:null,color:'#16a085',isCumulative:false,cumulativeAmount:0,bankBalances:{}},
+            {name:'Miscellaneous',type:'expense',group:null,color:'#7f8c8d',isCumulative:false,cumulativeAmount:0,bankBalances:{}},
+            {name:'Internet',type:'expense',group:null,color:'#95a5a6',isCumulative:false,cumulativeAmount:0,bankBalances:{}}
         ];
 
-        const categoryColors = {
-            'Income': '#27ae60',
-            'Gifts': '#e74c3c',
-            'Car Maintenance': '#3498db',
-            'Gym': '#9b59b6',
-            'Restaurants': '#e67e22',
-            'CRU Donation': '#f39c12',
-            'Groceries': '#2ecc71',
-            'Pharmacy': '#1abc9c',
-            'Medical Bills': '#c0392b',
-            'Tithe': '#2980b9',
-            'Insurance': '#8e44ad',
-            'Rebeca Donation': '#34495e',
-            'Gasoline': '#d35400',
-            'Shopping': '#16a085',
-            'Miscellaneous': '#7f8c8d',
-            'Internet': '#95a5a6',
-            'Uncategorized': '#bdc3c7'
-        };
-
-        const defaultCategoryColors = [
-            '#3498db', '#e74c3c', '#2ecc71', '#f39c12', '#9b59b6', '#1abc9c', '#34495e', '#e67e22', '#c0392b', '#27ae60', '#2980b9', '#8e44ad'
-        ];
+        const defaultCategoryGroups = [];
 
         const defaultBudgets = {
             'Groceries': {'2026-01': 400},
@@ -333,6 +421,8 @@
             const storedCat = localStorage.getItem(CAT_DATA_KEY);
             const storedBudget = localStorage.getItem(BUDGET_DATA_KEY);
             const storedMerchants = localStorage.getItem(STORAGE_KEY);
+            const storedGroups = localStorage.getItem(CAT_GROUPS_KEY);
+            const storedColors = localStorage.getItem(CAT_COLORS_KEY);
 
             if (storedTrans && storedTrans !== '[]') {
                 transactions = JSON.parse(storedTrans);
@@ -340,9 +430,25 @@
 
             if (storedCat) {
                 categories = JSON.parse(storedCat);
+                categories = migrateCategories(categories);
             } else {
                 categories = defaultCategories;
                 localStorage.setItem(CAT_DATA_KEY, JSON.stringify(categories));
+            }
+
+            if (storedGroups) {
+                categoryGroups = JSON.parse(storedGroups);
+            } else if (categoryGroups.length > 0) {
+                localStorage.setItem(CAT_GROUPS_KEY, JSON.stringify(categoryGroups));
+            }
+
+            if (storedColors) {
+                categoryColors = JSON.parse(storedColors);
+            } else {
+                categories.forEach(cat => {
+                    categoryColors[cat.name] = cat.color;
+                });
+                localStorage.setItem(CAT_COLORS_KEY, JSON.stringify(categoryColors));
             }
 
             if (storedBudget) {
@@ -379,21 +485,416 @@
             populateDateFilters();
             populateCategoryFilters();
             applyImportedBudgets({});
+            initializeCumulativeBanks();
+            populateCategoryGroupDropdown();
             renderAll();
+        }
+
+        function migrateCategories(cats) {
+            return cats.map(cat => {
+                if (cat.isCumulative === undefined) {
+                    cat.isCumulative = false;
+                }
+                if (cat.cumulativeAmount === undefined) {
+                    cat.cumulativeAmount = 0;
+                }
+                if (cat.bankBalances === undefined) {
+                    cat.bankBalances = {};
+                }
+                if (cat.group === undefined) {
+                    cat.group = null;
+                }
+                if (cat.color === undefined) {
+                    const usedColors = Object.values(categoryColors);
+                    cat.color = categoryColorPalette.find(c => !usedColors.includes(c)) || categoryColorPalette[0];
+                }
+                return cat;
+            });
+        }
+
+        function initializeCumulativeBanks() {
+            const months = new Set();
+            transactions.forEach(t => {
+                if (t.date && t.date.length >= 7) {
+                    months.add(t.date.substring(0, 7));
+                }
+            });
+            Object.values(budgets).forEach(catBudgets => {
+                Object.keys(catBudgets).forEach(month => months.add(month));
+            });
+            const sortedMonths = Array.from(months).sort();
+
+            sortedMonths.forEach(month => {
+                categories.forEach(cat => {
+                    if (cat.isCumulative && budgets[cat.name] && budgets[cat.name][month] !== undefined) {
+                        cat.bankBalances[month] = budgets[cat.name][month];
+                    }
+                });
+            });
+            saveCategories();
+        }
+
+        function saveCategories() {
+            localStorage.setItem(CAT_DATA_KEY, JSON.stringify(categories));
+            localStorage.setItem(CAT_GROUPS_KEY, JSON.stringify(categoryGroups));
+            categories.forEach(cat => {
+                categoryColors[cat.name] = cat.color;
+            });
+            localStorage.setItem(CAT_COLORS_KEY, JSON.stringify(categoryColors));
+        }
+
+        function addCumulativeBankAmounts(month) {
+            if (!month) return;
+            let changed = false;
+            categories.forEach(cat => {
+                if (cat.isCumulative && cat.bankBalances[month] === undefined) {
+                    if (budgets[cat.name] && budgets[cat.name][month] !== undefined) {
+                        cat.bankBalances[month] = budgets[cat.name][month];
+                    } else {
+                        const prevMonth = getPreviousMonth(month);
+                        const prevBalance = prevMonth ? (cat.bankBalances[prevMonth] || 0) : 0;
+                        cat.bankBalances[month] = prevBalance + cat.cumulativeAmount;
+                    }
+                    changed = true;
+                }
+            });
+            if (changed) {
+                saveCategories();
+            }
+        }
+
+        function getPreviousMonth(monthStr) {
+            const [year, month] = monthStr.split('-');
+            const prevMonth = parseInt(month) - 1;
+            if (prevMonth === 0) {
+                return (parseInt(year) - 1) + '-12';
+            }
+            return year + '-' + prevMonth.toString().padStart(2, '0');
+        }
+
+        function getCategoryColor(catName) {
+            const cat = categories.find(c => c.name === catName);
+            return cat ? cat.color : (categoryColors[catName] || null);
         }
 
         function loadSampleData() {
             transactions = defaultTransactions;
             categories = defaultCategories;
             budgets = defaultBudgets;
+            categoryGroups = defaultCategoryGroups;
             merchantDefaults = {};
             saveData();
             localStorage.setItem(STORAGE_KEY, JSON.stringify(merchantDefaults));
+            saveCategories();
             populateDateFilters();
             populateCategoryFilters();
             renderAll();
             alert('Sample data loaded!');
         }
+
+        function renderCategories() {
+            const list = document.getElementById('categoriesList');
+            const grouped = {};
+            const ungrouped = [];
+
+            categories.forEach(cat => {
+                const group = cat.group || 'Ungrouped';
+                if (!grouped[group]) grouped[group] = [];
+                grouped[group].push(cat);
+            });
+
+            const groups = Object.keys(grouped).sort((a, b) => {
+                if (a === 'Ungrouped') return 1;
+                if (b === 'Ungrouped') return -1;
+                return a.localeCompare(b);
+            });
+
+            if (groups.length === 0) {
+                list.innerHTML = '<div class="empty-state">No categories yet. Add a category to get started.</div>';
+                return;
+            }
+
+            list.innerHTML = groups.map(group => `
+                <div class="category-group">
+                    <div class="category-group-header" onclick="toggleGroup(this)">
+                        <div class="category-group-title">${group}</div>
+                        <div class="category-group-actions">
+                            <button class="btn btn-primary" onclick="event.stopPropagation(); showAddCategoryModal('${group}')">Add Category</button>
+                            <button class="btn btn-secondary" onclick="event.stopPropagation(); showEditGroupModal('${group}')">Edit</button>
+                            ${group !== 'Ungrouped' ? `<button class="btn btn-danger" onclick="event.stopPropagation(); confirmDeleteGroup('${group}')">Delete</button>` : ''}
+                        </div>
+                    </div>
+                    <div class="category-group-content">
+                        ${grouped[group].map(cat => `
+                            <div class="category-item">
+                                <div class="category-info">
+                                    <div class="category-color" style="background:${cat.color}"></div>
+                                    <span class="category-name">${cat.name}</span>
+                                    <span class="category-type ${cat.type}">${cat.type === 'income' ? 'Income' : 'Expense'}</span>${cat.isCumulative ? '<span class="category-type cumulative">Cumulative</span>' : ''}
+                                </div>
+                                <div class="category-actions">
+                                    <button class="btn btn-secondary" onclick="showEditCategoryModal(${categories.indexOf(cat)})">Edit</button>
+                                    <button class="btn btn-danger" onclick="confirmDeleteCategory(${categories.indexOf(cat)})">Delete</button>
+                                </div>
+                            </div>
+                        `).join('')}
+                    </div>
+                </div>
+            `).join('');
+        }
+
+        function toggleGroup(header) {
+            const content = header.nextElementSibling;
+            content.style.display = content.style.display === 'none' ? 'block' : 'none';
+        }
+
+        function showAddGroupModal() {
+            document.getElementById('groupFormTitle').textContent = 'Add Group';
+            document.getElementById('groupFormName').value = '';
+            document.getElementById('groupFormEditIndex').value = '';
+            document.getElementById('groupFormModal').classList.add('active');
+        }
+
+        function showEditGroupModal(groupName) {
+            const index = categoryGroups.indexOf(groupName);
+            document.getElementById('groupFormTitle').textContent = 'Edit Group';
+            document.getElementById('groupFormName').value = groupName;
+            document.getElementById('groupFormEditIndex').value = index;
+            document.getElementById('groupFormModal').classList.add('active');
+        }
+
+        function closeGroupFormModal() {
+            document.getElementById('groupFormModal').classList.remove('active');
+        }
+
+        function saveGroupForm() {
+            const name = document.getElementById('groupFormName').value.trim();
+            const editIndex = document.getElementById('groupFormEditIndex').value;
+
+            if (!name) {
+                alert('Please enter a group name');
+                return;
+            }
+
+            if (editIndex !== '' && editIndex !== '-1') {
+                const oldName = categoryGroups[parseInt(editIndex)];
+                categoryGroups[parseInt(editIndex)] = name;
+                categories.forEach(cat => {
+                    if (cat.group === oldName) {
+                        cat.group = name;
+                    }
+                });
+            } else {
+                if (categoryGroups.includes(name)) {
+                    alert('Group already exists');
+                    return;
+                }
+                categoryGroups.push(name);
+            }
+
+            saveCategories();
+            renderCategories();
+            populateCategoryGroupDropdown();
+            closeGroupFormModal();
+        }
+
+        function confirmDeleteGroup(groupName) {
+            document.getElementById('confirmTitle').textContent = 'Delete Group';
+            document.getElementById('confirmMessage').textContent = `Are you sure you want to delete the group "${groupName}"? Categories will be moved to Ungrouped.`;
+            document.getElementById('confirmAction').onclick = () => deleteGroup(groupName);
+            document.getElementById('confirmModal').classList.add('active');
+        }
+
+        function deleteGroup(groupName) {
+            categories.forEach(cat => {
+                if (cat.group === groupName) {
+                    cat.group = null;
+                }
+            });
+            const index = categoryGroups.indexOf(groupName);
+            if (index > -1) {
+                categoryGroups.splice(index, 1);
+            }
+            saveCategories();
+            renderCategories();
+            populateCategoryGroupDropdown();
+            closeConfirmModal();
+        }
+
+        function showAddCategoryModal(presetGroup = '') {
+            document.getElementById('categoryFormTitle').textContent = 'Add Category';
+            document.getElementById('categoryFormName').value = '';
+            document.getElementById('categoryFormType').value = 'expense';
+            document.getElementById('categoryFormGroup').value = presetGroup || '';
+            document.getElementById('categoryFormNewGroup').value = '';
+            document.getElementById('categoryFormNewGroup').style.display = 'none';
+            document.getElementById('categoryFormIsCumulative').checked = false;
+            document.getElementById('cumulativeFields').style.display = 'block';
+            document.getElementById('cumulativeOptions').style.display = 'none';
+            document.getElementById('categoryFormCumulativeAmount').value = '';
+            document.getElementById('categoryFormInitialBank').value = '';
+            document.getElementById('categoryFormEditIndex').value = '';
+            initColorPicker('');
+            document.getElementById('categoryFormModal').classList.add('active');
+        }
+
+        function showEditCategoryModal(index) {
+            const cat = categories[index];
+            document.getElementById('categoryFormTitle').textContent = 'Edit Category';
+            document.getElementById('categoryFormName').value = cat.name;
+            document.getElementById('categoryFormType').value = cat.type;
+            document.getElementById('categoryFormGroup').value = cat.group || '';
+            document.getElementById('categoryFormNewGroup').value = '';
+            document.getElementById('categoryFormNewGroup').style.display = 'none';
+            document.getElementById('categoryFormIsCumulative').checked = cat.isCumulative;
+            document.getElementById('cumulativeFields').style.display = 'block';
+            document.getElementById('cumulativeOptions').style.display = cat.isCumulative ? 'block' : 'none';
+            document.getElementById('categoryFormCumulativeAmount').value = cat.cumulativeAmount || '';
+            const currentMonth = document.getElementById('monthFilter').value;
+            document.getElementById('categoryFormInitialBank').value = cat.bankBalances[currentMonth] || '';
+            document.getElementById('categoryFormEditIndex').value = index;
+            initColorPicker(cat.color);
+            document.getElementById('categoryFormModal').classList.add('active');
+        }
+
+        function closeCategoryFormModal() {
+            document.getElementById('categoryFormModal').classList.remove('active');
+        }
+
+        function initColorPicker(selectedColor) {
+            const picker = document.getElementById('colorPicker');
+            picker.innerHTML = categoryColorPalette.map(color => `
+                <div class="color-option ${color === selectedColor ? 'selected' : ''}" 
+                     style="background:${color}" 
+                     data-color="${color}"
+                     onclick="selectColor('${color}')"></div>
+            `).join('');
+        }
+
+        function selectColor(color) {
+            document.querySelectorAll('.color-option').forEach(opt => {
+                opt.classList.toggle('selected', opt.dataset.color === color);
+            });
+        }
+
+        function getSelectedColor() {
+            const selected = document.querySelector('.color-option.selected');
+            return selected ? selected.dataset.color : categoryColorPalette[0];
+        }
+
+        function saveCategoryForm() {
+            const name = document.getElementById('categoryFormName').value.trim();
+            const type = document.getElementById('categoryFormType').value;
+            let group = document.getElementById('categoryFormGroup').value;
+            const newGroup = document.getElementById('categoryFormNewGroup').value.trim();
+            const isCumulative = document.getElementById('categoryFormIsCumulative').checked;
+            const cumulativeAmount = parseFloat(document.getElementById('categoryFormCumulativeAmount').value) || 0;
+            const initialBank = parseFloat(document.getElementById('categoryFormInitialBank').value) || 0;
+            const editIndex = document.getElementById('categoryFormEditIndex').value;
+            const color = getSelectedColor();
+
+            if (!name) {
+                alert('Please enter a category name');
+                return;
+            }
+
+            if (newGroup) {
+                if (!categoryGroups.includes(newGroup)) {
+                    categoryGroups.push(newGroup);
+                }
+                group = newGroup;
+            }
+
+            const currentMonth = document.getElementById('monthFilter').value;
+
+            if (editIndex !== '' && editIndex !== '-1') {
+                const idx = parseInt(editIndex);
+                const oldCat = categories[idx];
+                if (oldCat.name !== name && categories.find(c => c.name === name)) {
+                    alert('Category name already exists');
+                    return;
+                }
+                categories[idx] = {
+                    name: name,
+                    type: type,
+                    group: group || null,
+                    color: color,
+                    isCumulative: isCumulative,
+                    cumulativeAmount: cumulativeAmount,
+                    bankBalances: oldCat.bankBalances || {}
+                };
+                if (isCumulative && initialBank > 0) {
+                    categories[idx].bankBalances[currentMonth] = initialBank;
+                }
+                delete budgets[oldCat.name];
+                budgets[name] = {};
+            } else {
+                if (categories.find(c => c.name === name)) {
+                    alert('Category already exists');
+                    return;
+                }
+                const newCat = {
+                    name: name,
+                    type: type,
+                    group: group || null,
+                    color: color,
+                    isCumulative: isCumulative,
+                    cumulativeAmount: cumulativeAmount,
+                    bankBalances: {}
+                };
+                if (isCumulative && initialBank > 0) {
+                    newCat.bankBalances[currentMonth] = initialBank;
+                }
+                categories.push(newCat);
+                budgets[name] = {};
+            }
+
+            saveCategories();
+            saveData();
+            populateCategoryFilters();
+            renderCategories();
+            closeCategoryFormModal();
+            renderAll();
+        }
+
+        function confirmDeleteCategory(index) {
+            const cat = categories[index];
+            document.getElementById('confirmTitle').textContent = 'Delete Category';
+            document.getElementById('confirmMessage').textContent = `Are you sure you want to delete the category "${cat.name}"? This will also remove any budget data for this category.`;
+            document.getElementById('confirmAction').onclick = () => deleteCategory(index);
+            document.getElementById('confirmModal').classList.add('active');
+        }
+
+        function deleteCategory(index) {
+            const cat = categories[index];
+            delete budgets[cat.name];
+            categories.splice(index, 1);
+            saveCategories();
+            saveData();
+            populateCategoryFilters();
+            renderCategories();
+            closeConfirmModal();
+            renderAll();
+        }
+
+        function closeConfirmModal() {
+            document.getElementById('confirmModal').classList.remove('active');
+        }
+
+        function populateCategoryGroupDropdown() {
+            const select = document.getElementById('categoryFormGroup');
+            select.innerHTML = '<option value="">Ungrouped</option>' + 
+                categoryGroups.map(g => `<option value="${g}">${g}</option>`).join('');
+        }
+
+        document.getElementById('categoryFormGroup').addEventListener('change', function() {
+            const newGroupInput = document.getElementById('categoryFormNewGroup');
+            newGroupInput.style.display = this.value === '' ? 'block' : 'none';
+        });
+
+        document.getElementById('categoryFormIsCumulative').addEventListener('change', function() {
+            document.getElementById('cumulativeOptions').style.display = this.checked ? 'block' : 'none';
+        });
 
         function populateDateFilters() {
             const months = new Set();
@@ -445,10 +946,35 @@
         function populateCategoryFilters() {
             const transFilter = document.getElementById('transCategoryFilter');
             const modalSelect = document.getElementById('modalCategory');
+            const monthFilter = document.getElementById('monthFilter');
+            const currentMonth = monthFilter && monthFilter.value ? monthFilter.value : null;
+            const currentSelection = transFilter ? transFilter.value : 'all';
+            
+            let filteredCategories = categories;
+            
+            if (currentMonth && transactions.length > 0) {
+                const monthTransactions = transactions.filter(t => t.date.startsWith(currentMonth) && t.type !== 'income');
+                const usedCategories = new Set();
+                monthTransactions.forEach(t => {
+                    if (t.category) {
+                        const catName = t.category.trim();
+                        usedCategories.add(catName);
+                    }
+                });
+                if (usedCategories.size > 0) {
+                    filteredCategories = categories.filter(c => {
+                        const catName = c.name ? c.name.trim() : '';
+                        return usedCategories.has(catName);
+                    });
+                }
+            }
+            
             const options = '<option value="">Select Category</option>' +
-                categories.map(c => `<option value="${c.name}">${c.name}</option>`).join('');
+                filteredCategories.map(c => `<option value="${c.name}">${c.name}</option>`).join('');
             transFilter.innerHTML = '<option value="all">All Categories</option>' + options;
-            modalSelect.innerHTML = options;
+            if (transFilter) transFilter.value = currentSelection;
+            modalSelect.innerHTML = '<option value="">Select Category</option>' +
+                categories.map(c => `<option value="${c.name}">${c.name}</option>`).join('');
         }
 
         function getFilteredTransactions() {
@@ -535,8 +1061,8 @@
 
             const sortedYearKeys = Object.keys(yearTotals).sort((a, b) => yearTotals[b] - yearTotals[a]);
 
-            const monthColors = sortedCatKeys.map((cat, i) => categoryColors[cat] || defaultCategoryColors[i % defaultCategoryColors.length]);
-            const yearColors = sortedYearKeys.map((cat, i) => categoryColors[cat] || defaultCategoryColors[i % defaultCategoryColors.length]);
+            const monthColors = sortedCatKeys.map((cat, i) => getCategoryColor(cat) || categoryColorPalette[i % categoryColorPalette.length]);
+            const yearColors = sortedYearKeys.map((cat, i) => getCategoryColor(cat) || categoryColorPalette[i % categoryColorPalette.length]);
 
             if (monthlyChart) monthlyChart.destroy();
             monthlyChart = new Chart(document.getElementById('monthlyChart'), {
@@ -602,9 +1128,16 @@
             let totalActual = 0;
             const budgetCats = Object.keys(budgets);
             budgetCats.forEach(cat => {
-                const budget = budgets[cat][month] !== undefined ? budgets[cat][month] : 0;
-                totalBudget += budget;
-                totalActual += catTotals[cat] || 0;
+                const catInfo = categories.find(c => c.name === cat);
+                if (catInfo && catInfo.isCumulative) {
+                    const bank = catInfo.bankBalances[month] || 0;
+                    totalBudget += bank;
+                    totalActual += catTotals[cat] || 0;
+                } else {
+                    const budget = budgets[cat][month] !== undefined ? budgets[cat][month] : 0;
+                    totalBudget += budget;
+                    totalActual += catTotals[cat] || 0;
+                }
             });
 
             const totalRemaining = totalBudget - totalActual;
@@ -620,22 +1153,49 @@
                     <span style="color:#666">${totalPct.toFixed(1)}% used</span>
                 </div>
             `;
-            list.innerHTML = budgetCats.map(cat => {
-                const budget = budgets[cat][month] !== undefined ? budgets[cat][month] : 0;
+            list.innerHTML = budgetCats.filter(cat => {
+                const catInfo = categories.find(c => c.name === cat);
+                const isCumulative = catInfo && catInfo.isCumulative;
                 const actual = catTotals[cat] || 0;
-                const remaining = budget - actual;
-                const pct = budget > 0 ? (actual / budget) * 100 : 0;
+                let budget = 0;
+                if (isCumulative) {
+                    budget = catInfo.bankBalances[month] || 0;
+                } else {
+                    budget = budgets[cat][month] !== undefined ? budgets[cat][month] : 0;
+                }
+                return actual > 0 || budget > 0;
+            }).map(cat => {
+                const catInfo = categories.find(c => c.name === cat);
+                const isCumulative = catInfo && catInfo.isCumulative;
+                const actual = catTotals[cat] || 0;
+                let budget, remaining, pct, budgetInput;
+
+                if (isCumulative) {
+                    const bank = catInfo.bankBalances[month] || 0;
+                    budget = bank;
+                    remaining = budget - actual;
+                    pct = budget > 0 ? (actual / budget) * 100 : 0;
+                    budgetInput = `<span style="font-weight:600;color:#856404;">Bank: $${budget.toFixed(2)}</span>`;
+                } else {
+                    budget = budgets[cat][month] !== undefined ? budgets[cat][month] : 0;
+                    remaining = budget - actual;
+                    pct = budget > 0 ? (actual / budget) * 100 : 0;
+                    budgetInput = `Budget: <input type="number" class="budget-input" data-cat="${cat}" data-month="${month}" value="${budget}" style="width:80px;padding:4px;border:1px solid #ddd;border-radius:4px;">`;
+                }
+
                 return `
                     <div class="budget-item" style="flex-direction:column;gap:5px;">
                         <div style="display:flex;justify-content:space-between;align-items:center;">
-                            <div>${cat}</div>
+                            <div>
+                                ${cat}
+                                ${isCumulative ? '<span class="category-type cumulative" style="margin-left:8px;font-size:0.7rem;">Cumulative</span>' : ''}
+                            </div>
                             <div class="remaining ${remaining >= 0 ? 'under' : 'over'}">
                                 ${remaining >= 0 ? '+' : ''}$${remaining.toFixed(2)}
                             </div>
                         </div>
                         <div style="font-size:0.85rem;color:#666">
-                            Budget: <input type="number" class="budget-input" data-cat="${cat}" data-month="${month}" value="${budget}" style="width:80px;padding:4px;border:1px solid #ddd;border-radius:4px;"> 
-                            | Actual: $${actual.toFixed(2)}
+                            ${budgetInput} | Actual: $${actual.toFixed(2)}
                         </div>
                         <div class="progress-bar" style="width:100%;">
                             <div class="fill ${pct > 100 ? 'over' : ''}" style="width:${Math.min(pct, 100)}%"></div>
@@ -649,8 +1209,14 @@
                     const cat = e.target.dataset.cat;
                     const monthKey = e.target.dataset.month;
                     const value = parseFloat(e.target.value) || 0;
-                    if (!budgets[cat]) budgets[cat] = {};
-                    budgets[cat][monthKey] = value;
+                    const catInfo = categories.find(c => c.name === cat);
+                    if (catInfo && catInfo.isCumulative) {
+                        catInfo.bankBalances[monthKey] = value;
+                        saveCategories();
+                    } else {
+                        if (!budgets[cat]) budgets[cat] = {};
+                        budgets[cat][monthKey] = value;
+                    }
                     saveData();
                     renderBudget();
                     renderYearlyBudget();
@@ -670,6 +1236,8 @@
                 monthsWithData.add(month);
             });
 
+            const sortedMonths = Array.from(monthsWithData).sort();
+
             const catTotals = {};
             yearData.forEach(t => {
                 const cat = t.category || 'Uncategorized';
@@ -681,12 +1249,20 @@
             const budgetCats = Object.keys(budgets);
 
             budgetCats.forEach(cat => {
-                let budget = 0;
-                monthsWithData.forEach(month => {
-                    budget += budgets[cat][month] || 0;
-                });
-                totalBudget += budget;
-                totalActual += catTotals[cat] || 0;
+                const catInfo = categories.find(c => c.name === cat);
+                if (catInfo && catInfo.isCumulative) {
+                    const janMonth = year + '-01';
+                    const janBank = catInfo.bankBalances[janMonth] || 0;
+                    totalBudget += janBank + (11 * catInfo.cumulativeAmount);
+                    totalActual += catTotals[cat] || 0;
+                } else {
+                    let budget = 0;
+                    sortedMonths.forEach(month => {
+                        budget += budgets[cat][month] || 0;
+                    });
+                    totalBudget += budget;
+                    totalActual += catTotals[cat] || 0;
+                }
             });
 
             const totalRemaining = totalBudget - totalActual;
@@ -703,23 +1279,53 @@
                 </div>
             `;
             
-            list.innerHTML = budgetCats.map(cat => {
+            list.innerHTML = budgetCats.filter(cat => {
+                const catInfo = categories.find(c => c.name === cat);
+                const isCumulative = catInfo && catInfo.isCumulative;
                 let budget = 0;
-                monthsWithData.forEach(month => {
-                    budget += budgets[cat][month] || 0;
-                });
+                if (isCumulative) {
+                    const janMonth = year + '-01';
+                    const janBank = catInfo.bankBalances[janMonth] || 0;
+                    budget = janBank + (11 * catInfo.cumulativeAmount);
+                } else {
+                    sortedMonths.forEach(month => {
+                        budget += budgets[cat][month] || 0;
+                    });
+                }
+                const actual = catTotals[cat] || 0;
+                return actual > 0 || budget > 0;
+            }).map(cat => {
+                const catInfo = categories.find(c => c.name === cat);
+                const isCumulative = catInfo && catInfo.isCumulative;
+                let budget = 0;
+                if (isCumulative) {
+                    const janMonth = year + '-01';
+                    const janBank = catInfo.bankBalances[janMonth] || 0;
+                    budget = janBank + (11 * catInfo.cumulativeAmount);
+                } else {
+                    sortedMonths.forEach(month => {
+                        budget += budgets[cat][month] || 0;
+                    });
+                }
                 const actual = catTotals[cat] || 0;
                 const remaining = budget - actual;
                 const pct = budget > 0 ? (actual / budget) * 100 : 0;
+                const catTransactions = isCumulative ? yearData.filter(t => t.category === cat) : [];
+                const transactionDebug = isCumulative ? catTransactions.map(t => `<div style="font-size:0.7rem;color:#999;padding-left:10px;">${t.date} ${t.description}: $${Math.abs(t.amount).toFixed(2)}</div>`).join('') : '';
                 return `
                     <div class="budget-item" style="flex-direction:column;gap:5px;">
                         <div style="display:flex;justify-content:space-between;align-items:center;">
-                            <div>${cat}</div>
+                            <div>
+                                ${cat}
+                                ${isCumulative ? '<span class="category-type cumulative" style="margin-left:8px;font-size:0.7rem;">Cumulative</span>' : ''}
+                            </div>
                             <div class="remaining ${remaining >= -0.01 ? 'under' : 'over'}">
                                 ${remaining >= -0.01 ? '+' : ''}$${Math.abs(remaining).toFixed(2)}
                             </div>
                         </div>
-                        <div style="font-size:0.85rem;color:#666">Budget: $${budget.toFixed(2)} | Actual: $${actual.toFixed(2)}</div>
+                        <div style="font-size:0.85rem;color:#666">${isCumulative ? 'Bank' : 'Budget'}: $${budget.toFixed(2)} | Actual: $${actual.toFixed(2)}</div>
+                        <!-- ${isCumulative ? `<div style="font-size:0.75rem;color:#999;margin-top:2px;">Jan ${year} Bank $${(catInfo.bankBalances[year + '-01'] || 0).toFixed(2)} + (11 × $${catInfo.cumulativeAmount.toFixed(2)}) = $${budget.toFixed(2)}</div>` : ''} -->
+                        <!-- ${transactionDebug} -->
                         <div class="progress-bar" style="width:100%;">
                             <div class="fill ${pct > 100 ? 'over' : ''}" style="width:${Math.min(pct, 100)}%"></div>
                         </div>
@@ -729,6 +1335,7 @@
         }
 
         function renderAll() {
+            populateCategoryFilters();
             renderTransactions();
             renderCharts();
             renderBudget();
@@ -737,6 +1344,7 @@
             renderYearlyIncome();
             renderYearlySummary();
             renderMonthlySummary();
+            renderCategories();
         }
 
         function renderYearlySummary() {
@@ -864,6 +1472,11 @@
             document.getElementById(id).addEventListener('change', renderAll);
         });
 
+        document.getElementById('monthFilter').addEventListener('change', function() {
+            addCumulativeBankAmounts(this.value);
+            renderAll();
+        });
+
         const dropZone = document.getElementById('dropZone');
         const fileInput = document.getElementById('fileInput');
 
@@ -891,6 +1504,7 @@
                     saveData();
                     populateDateFilters();
                     populateCategoryFilters();
+                    initializeCumulativeBanks();
                     renderAll();
                     alert(`Import complete! Processed ${processedFiles} files with ${totalTransactions} total transactions.`);
                     document.getElementById('importPreview').classList.add('hidden');
@@ -909,7 +1523,9 @@
                         const importedCategories = [...new Set(fileTransactions.map(t => t.category).filter(c => c && c !== 'Uncategorized'))];
                         importedCategories.forEach(catName => {
                             if (!categories.find(c => c.name === catName)) {
-                                categories.push({ name: catName, type: 'expense' });
+                                const usedColors = categories.map(c => c.color);
+                                const availableColor = categoryColorPalette.find(c => !usedColors.includes(c)) || categoryColorPalette[categories.length % categoryColorPalette.length];
+                                categories.push({ name: catName, type: 'expense', group: null, color: availableColor, isCumulative: false, cumulativeAmount: 0, bankBalances: {} });
                             }
                         });
                         
@@ -940,6 +1556,7 @@
             let inIncome = false;
             let currentMonth = '';
             let expensesBudgetDone = false;
+            let skipNextRow = false;
 
             const monthFromFileName = fileName.match(/([A-Za-z]+)\s+(\d{4})/);
             if (monthFromFileName) {
@@ -965,10 +1582,10 @@
                 const row = rows[i];
                 const col0 = row[0] || '';
 
-                if (col0.toLowerCase().includes('income budget')) { inIncome = true; inExpenses = false; continue; }
-                if (col0.toLowerCase().includes('expenses budget')) { inExpenses = true; inIncome = false; continue; }
+                if (col0.toLowerCase().includes('income budget')) { inIncome = true; inExpenses = false; skipNextRow = true; continue; }
+                if (col0.toLowerCase().includes('expenses budget')) { inExpenses = true; inIncome = false; skipNextRow = true; continue; }
 
-                if (looksLikeHeader(row)) continue;
+                if (skipNextRow) { skipNextRow = false; continue; }
 
                 const hasTransactionData = (row[7] && row[8]) || (row[6] && row[9]);
                 const isBlank = !col0 && !row[0] && !row[1] && !row[6] && !row[7] && !row[8] && !row[9];
@@ -1095,7 +1712,9 @@
             const importedCategories = [...new Set(pendingImport.map(t => t.category).filter(c => c && c !== 'Uncategorized'))];
             importedCategories.forEach(catName => {
                 if (!categories.find(c => c.name === catName)) {
-                    categories.push({ name: catName, type: 'expense' });
+                    const usedColors = categories.map(c => c.color);
+                    const availableColor = categoryColorPalette.find(c => !usedColors.includes(c)) || categoryColorPalette[categories.length % categoryColorPalette.length];
+                    categories.push({ name: catName, type: 'expense', group: null, color: availableColor, isCumulative: false, cumulativeAmount: 0, bankBalances: {} });
                 }
             });
             transactions = [...transactions, ...pendingImport];
@@ -1106,6 +1725,7 @@
             document.getElementById('importPreview').classList.add('hidden');
             populateDateFilters();
             populateCategoryFilters();
+            initializeCumulativeBanks();
             renderAll();
             alert('Import complete! ' + (importedCategories.length > 0 ? importedCategories.length + ' new categories added.' : ''));
         }
@@ -1160,9 +1780,8 @@
         }
 
         function clearAllData() {
-            if (confirm('Are you sure you want to clear all data? This cannot be undone.')) {
+            if (confirm('Are you sure you want to clear all transactions and budgets? Your categories, groups, and colors will be preserved.')) {
                 localStorage.removeItem(TRANS_DATA_KEY);
-                localStorage.removeItem(CAT_DATA_KEY);
                 localStorage.removeItem(BUDGET_DATA_KEY);
                 localStorage.removeItem(STORAGE_KEY);
                 location.reload();
@@ -1225,12 +1844,12 @@
                 alert('Category already exists');
                 return;
             }
-            const usedColors = Object.values(categoryColors);
-            const availableColor = defaultCategoryColors.find(c => !usedColors.includes(c)) || defaultCategoryColors[Object.keys(categoryColors).length % defaultCategoryColors.length];
-            categories.push({ name: name, type: type });
-            categoryColors[name] = availableColor;
-            localStorage.setItem(CAT_DATA_KEY, JSON.stringify(categories));
+            const usedColors = categories.map(c => c.color);
+            const availableColor = categoryColorPalette.find(c => !usedColors.includes(c)) || categoryColorPalette[0];
+            categories.push({ name: name, type: type, group: null, color: availableColor, isCumulative: false, cumulativeAmount: 0, bankBalances: {} });
+            saveCategories();
             populateCategoryFilters();
+            renderCategories();
             document.getElementById('newCategoryName').value = '';
             alert('Category "' + name + '" added!');
         }
