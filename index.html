@@ -73,6 +73,8 @@
         .category-color { width:16px;height:16px;border-radius:50%;flex-shrink:0; }
         .category-name { font-weight:500; }
         .category-type { font-size:0.8rem;padding:2px 8px;border-radius:4px;background:#ecf0f1;color:#666; }
+        .category-type.expense { background:#fce4e4;color:#c0392b; }
+        .category-type.income { background:#e8f5e9;color:#27ae60; }
         .category-type.cumulative { background:#fff3cd;color:#856404; }
         .category-actions { display:flex;gap:8px; }
         .category-actions button { padding:4px 10px;font-size:0.85rem; }
@@ -628,7 +630,7 @@
                                 <div class="category-info">
                                     <div class="category-color" style="background:${cat.color}"></div>
                                     <span class="category-name">${cat.name}</span>
-                                    ${cat.isCumulative ? '<span class="category-type cumulative">Cumulative</span>' : `<span class="category-type">${cat.type}</span>`}
+                                    <span class="category-type ${cat.type}">${cat.type === 'income' ? 'Income' : 'Expense'}</span>${cat.isCumulative ? '<span class="category-type cumulative">Cumulative</span>' : ''}
                                 </div>
                                 <div class="category-actions">
                                     <button class="btn btn-secondary" onclick="showEditCategoryModal(${categories.indexOf(cat)})">Edit</button>
@@ -944,10 +946,35 @@
         function populateCategoryFilters() {
             const transFilter = document.getElementById('transCategoryFilter');
             const modalSelect = document.getElementById('modalCategory');
+            const monthFilter = document.getElementById('monthFilter');
+            const currentMonth = monthFilter && monthFilter.value ? monthFilter.value : null;
+            const currentSelection = transFilter ? transFilter.value : 'all';
+            
+            let filteredCategories = categories;
+            
+            if (currentMonth && transactions.length > 0) {
+                const monthTransactions = transactions.filter(t => t.date.startsWith(currentMonth) && t.type !== 'income');
+                const usedCategories = new Set();
+                monthTransactions.forEach(t => {
+                    if (t.category) {
+                        const catName = t.category.trim();
+                        usedCategories.add(catName);
+                    }
+                });
+                if (usedCategories.size > 0) {
+                    filteredCategories = categories.filter(c => {
+                        const catName = c.name ? c.name.trim() : '';
+                        return usedCategories.has(catName);
+                    });
+                }
+            }
+            
             const options = '<option value="">Select Category</option>' +
-                categories.map(c => `<option value="${c.name}">${c.name}</option>`).join('');
+                filteredCategories.map(c => `<option value="${c.name}">${c.name}</option>`).join('');
             transFilter.innerHTML = '<option value="all">All Categories</option>' + options;
-            modalSelect.innerHTML = options;
+            if (transFilter) transFilter.value = currentSelection;
+            modalSelect.innerHTML = '<option value="">Select Category</option>' +
+                categories.map(c => `<option value="${c.name}">${c.name}</option>`).join('');
         }
 
         function getFilteredTransactions() {
@@ -1126,7 +1153,18 @@
                     <span style="color:#666">${totalPct.toFixed(1)}% used</span>
                 </div>
             `;
-            list.innerHTML = budgetCats.map(cat => {
+            list.innerHTML = budgetCats.filter(cat => {
+                const catInfo = categories.find(c => c.name === cat);
+                const isCumulative = catInfo && catInfo.isCumulative;
+                const actual = catTotals[cat] || 0;
+                let budget = 0;
+                if (isCumulative) {
+                    budget = catInfo.bankBalances[month] || 0;
+                } else {
+                    budget = budgets[cat][month] !== undefined ? budgets[cat][month] : 0;
+                }
+                return actual > 0 || budget > 0;
+            }).map(cat => {
                 const catInfo = categories.find(c => c.name === cat);
                 const isCumulative = catInfo && catInfo.isCumulative;
                 const actual = catTotals[cat] || 0;
@@ -1241,7 +1279,22 @@
                 </div>
             `;
             
-            list.innerHTML = budgetCats.map(cat => {
+            list.innerHTML = budgetCats.filter(cat => {
+                const catInfo = categories.find(c => c.name === cat);
+                const isCumulative = catInfo && catInfo.isCumulative;
+                let budget = 0;
+                if (isCumulative) {
+                    const janMonth = year + '-01';
+                    const janBank = catInfo.bankBalances[janMonth] || 0;
+                    budget = janBank + (11 * catInfo.cumulativeAmount);
+                } else {
+                    sortedMonths.forEach(month => {
+                        budget += budgets[cat][month] || 0;
+                    });
+                }
+                const actual = catTotals[cat] || 0;
+                return actual > 0 || budget > 0;
+            }).map(cat => {
                 const catInfo = categories.find(c => c.name === cat);
                 const isCumulative = catInfo && catInfo.isCumulative;
                 let budget = 0;
@@ -1257,6 +1310,8 @@
                 const actual = catTotals[cat] || 0;
                 const remaining = budget - actual;
                 const pct = budget > 0 ? (actual / budget) * 100 : 0;
+                const catTransactions = isCumulative ? yearData.filter(t => t.category === cat) : [];
+                const transactionDebug = isCumulative ? catTransactions.map(t => `<div style="font-size:0.7rem;color:#999;padding-left:10px;">${t.date} ${t.description}: $${Math.abs(t.amount).toFixed(2)}</div>`).join('') : '';
                 return `
                     <div class="budget-item" style="flex-direction:column;gap:5px;">
                         <div style="display:flex;justify-content:space-between;align-items:center;">
@@ -1269,7 +1324,8 @@
                             </div>
                         </div>
                         <div style="font-size:0.85rem;color:#666">${isCumulative ? 'Bank' : 'Budget'}: $${budget.toFixed(2)} | Actual: $${actual.toFixed(2)}</div>
-                        ${isCumulative ? `<div style="font-size:0.75rem;color:#999;margin-top:2px;">Jan ${year} Bank $${(catInfo.bankBalances[year + '-01'] || 0).toFixed(2)} + (11 × $${catInfo.cumulativeAmount.toFixed(2)}) = $${budget.toFixed(2)}</div>` : ''}
+                        <!-- ${isCumulative ? `<div style="font-size:0.75rem;color:#999;margin-top:2px;">Jan ${year} Bank $${(catInfo.bankBalances[year + '-01'] || 0).toFixed(2)} + (11 × $${catInfo.cumulativeAmount.toFixed(2)}) = $${budget.toFixed(2)}</div>` : ''} -->
+                        <!-- ${transactionDebug} -->
                         <div class="progress-bar" style="width:100%;">
                             <div class="fill ${pct > 100 ? 'over' : ''}" style="width:${Math.min(pct, 100)}%"></div>
                         </div>
@@ -1279,6 +1335,7 @@
         }
 
         function renderAll() {
+            populateCategoryFilters();
             renderTransactions();
             renderCharts();
             renderBudget();
@@ -1499,6 +1556,7 @@
             let inIncome = false;
             let currentMonth = '';
             let expensesBudgetDone = false;
+            let skipNextRow = false;
 
             const monthFromFileName = fileName.match(/([A-Za-z]+)\s+(\d{4})/);
             if (monthFromFileName) {
@@ -1524,10 +1582,10 @@
                 const row = rows[i];
                 const col0 = row[0] || '';
 
-                if (col0.toLowerCase().includes('income budget')) { inIncome = true; inExpenses = false; continue; }
-                if (col0.toLowerCase().includes('expenses budget')) { inExpenses = true; inIncome = false; continue; }
+                if (col0.toLowerCase().includes('income budget')) { inIncome = true; inExpenses = false; skipNextRow = true; continue; }
+                if (col0.toLowerCase().includes('expenses budget')) { inExpenses = true; inIncome = false; skipNextRow = true; continue; }
 
-                if (looksLikeHeader(row)) continue;
+                if (skipNextRow) { skipNextRow = false; continue; }
 
                 const hasTransactionData = (row[7] && row[8]) || (row[6] && row[9]);
                 const isBlank = !col0 && !row[0] && !row[1] && !row[6] && !row[7] && !row[8] && !row[9];
