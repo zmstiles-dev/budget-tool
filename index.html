@@ -170,6 +170,14 @@
                     <select id="transCategoryFilter">
                         <option value="all">All Categories</option>
                     </select>
+                    <select id="transSortFilter">
+                        <option value="date-desc">Date (Newest)</option>
+                        <option value="date-asc">Date (Oldest)</option>
+                        <option value="amount-desc">Amount (Highest)</option>
+                        <option value="amount-asc">Amount (Lowest)</option>
+                        <option value="name-asc">Name (A-Z)</option>
+                        <option value="name-desc">Name (Z-A)</option>
+                    </select>
                 </div>
                 <div class="transactions-list" id="transactionsList"></div>
             </div>
@@ -296,6 +304,41 @@
                 <button class="btn btn-danger" id="deleteTransaction">Delete</button>
                 <button class="btn btn-secondary" id="splitTransaction">Split</button>
                 <button class="btn btn-success" id="saveTransaction">Approve</button>
+            </div>
+        </div>
+    </div>
+
+    <div class="modal" id="editTransactionModal">
+        <div class="modal-content">
+            <h2>Edit Transaction</h2>
+            <div class="form-group">
+                <label>Date</label>
+                <input type="date" id="editTransDate" style="width:100%;padding:8px;border:1px solid #ddd;border-radius:4px;">
+            </div>
+            <div class="form-group">
+                <label>Description</label>
+                <input type="text" id="editTransDescription" style="width:100%;padding:8px;border:1px solid #ddd;border-radius:4px;">
+            </div>
+            <div class="form-group">
+                <label>Merchant</label>
+                <input type="text" id="editTransMerchant" style="width:100%;padding:8px;border:1px solid #ddd;border-radius:4px;">
+            </div>
+            <div class="form-group">
+                <label>Amount</label>
+                <input type="number" step="0.01" id="editTransAmount" style="width:100%;padding:8px;border:1px solid #ddd;border-radius:4px;">
+            </div>
+            <div class="form-group">
+                <label>Category</label>
+                <select id="editTransCategory" style="width:100%;padding:8px;border:1px solid #ddd;border-radius:4px;"></select>
+            </div>
+            <div class="form-group">
+                <label>Account</label>
+                <input type="text" id="editTransAccount" style="width:100%;padding:8px;border:1px solid #ddd;border-radius:4px;">
+            </div>
+            <div style="display: flex; gap: 10px; justify-content: flex-end; margin-top: 20px;">
+                <button class="btn btn-danger" id="editTransDelete">Delete</button>
+                <button class="btn btn-secondary" id="editTransCancel">Cancel</button>
+                <button class="btn btn-success" id="editTransSave">Save</button>
             </div>
         </div>
     </div>
@@ -515,7 +558,7 @@
             });
         }
 
-        function initializeCumulativeBanks() {
+         function initializeCumulativeBanks() {
             const months = new Set();
             transactions.forEach(t => {
                 if (t.date && t.date.length >= 7) {
@@ -525,17 +568,33 @@
             Object.values(budgets).forEach(catBudgets => {
                 Object.keys(catBudgets).forEach(month => months.add(month));
             });
+            categories.forEach(cat => {
+                if (cat.isCumulative) {
+                    Object.keys(cat.bankBalances).forEach(month => months.add(month));
+                }
+            });
             const sortedMonths = Array.from(months).sort();
 
-            sortedMonths.forEach(month => {
-                categories.forEach(cat => {
-                    if (cat.isCumulative && budgets[cat.name] && budgets[cat.name][month] !== undefined) {
-                        cat.bankBalances[month] = budgets[cat.name][month];
+            categories.forEach(cat => {
+                if (!cat.isCumulative) return;
+                const existingMonths = Object.keys(cat.bankBalances)
+                    .filter(m => cat.bankBalances[m] !== undefined)
+                    .sort();
+                if (existingMonths.length === 0) return;
+                let balance = cat.bankBalances[existingMonths[0]];
+                const startIdx = sortedMonths.indexOf(existingMonths[0]);
+                for (let i = startIdx; i < sortedMonths.length; i++) {
+                    const month = sortedMonths[i];
+                    if (cat.bankBalances[month] !== undefined) {
+                        balance = cat.bankBalances[month];
+                    } else {
+                        balance += cat.cumulativeAmount;
+                        cat.bankBalances[month] = balance;
                     }
-                });
+                }
             });
             saveCategories();
-        }
+         }
 
         function saveCategories() {
             localStorage.setItem(CAT_DATA_KEY, JSON.stringify(categories));
@@ -546,25 +605,21 @@
             localStorage.setItem(CAT_COLORS_KEY, JSON.stringify(categoryColors));
         }
 
-        function addCumulativeBankAmounts(month) {
+         function addCumulativeBankAmounts(month) {
             if (!month) return;
             let changed = false;
             categories.forEach(cat => {
                 if (cat.isCumulative && cat.bankBalances[month] === undefined) {
-                    if (budgets[cat.name] && budgets[cat.name][month] !== undefined) {
-                        cat.bankBalances[month] = budgets[cat.name][month];
-                    } else {
-                        const prevMonth = getPreviousMonth(month);
-                        const prevBalance = prevMonth ? (cat.bankBalances[prevMonth] || 0) : 0;
-                        cat.bankBalances[month] = prevBalance + cat.cumulativeAmount;
-                    }
+                    const prevMonth = getPreviousMonth(month);
+                    const prevBalance = prevMonth ? (cat.bankBalances[prevMonth] || 0) : 0;
+                    cat.bankBalances[month] = prevBalance + cat.cumulativeAmount;
                     changed = true;
                 }
             });
             if (changed) {
                 saveCategories();
             }
-        }
+         }
 
         function getPreviousMonth(monthStr) {
             const [year, month] = monthStr.split('-');
@@ -1030,8 +1085,9 @@
             const typeFilter = document.getElementById('transTypeFilter').value;
             const catFilter = document.getElementById('transCategoryFilter').value;
             const monthFilter = document.getElementById('monthFilter').value;
+            const sortValue = document.getElementById('transSortFilter').value;
 
-            return transactions.filter(t => {
+            const filtered = transactions.filter(t => {
                 if (t.type === 'income') return false;
                 const tDate = t.date.substring(0, 7);
                 const tType = t.type || (t.amount >= 0 ? 'income' : 'expense');
@@ -1040,6 +1096,24 @@
                 if (monthFilter && tDate !== monthFilter) return false;
                 return true;
             });
+
+            const [field, dir] = sortValue.split('-');
+            filtered.sort((a, b) => {
+                if (field === 'date') {
+                    return dir === 'desc' ? b.date.localeCompare(a.date) : a.date.localeCompare(b.date);
+                } else if (field === 'amount') {
+                    const aVal = Math.abs(a.amount);
+                    const bVal = Math.abs(b.amount);
+                    return dir === 'desc' ? bVal - aVal : aVal - bVal;
+                } else if (field === 'name') {
+                    const aName = (a.description || '').toLowerCase();
+                    const bName = (b.description || '').toLowerCase();
+                    return dir === 'desc' ? bName.localeCompare(aName) : aName.localeCompare(bName);
+                }
+                return 0;
+            });
+
+            return filtered;
         }
 
         function getMonthData(yearMonth) {
@@ -1052,8 +1126,11 @@
 
         function renderTransactions() {
             const list = document.getElementById('transactionsList');
-            const filtered = getFilteredTransactions();
-            list.innerHTML = filtered.map(t => {
+            const filtered = getFilteredTransactions().map(t => ({
+                t,
+                idx: transactions.indexOf(t)
+            }));
+            list.innerHTML = filtered.map(({t, idx}) => {
                 const cat = (t.category || '').trim();
                 const isIncome = cat === 'Income';
                 const amountVal = parseFloat(t.amount);
@@ -1072,7 +1149,7 @@
                 }
                 
                 return `
-                <div class="transaction">
+                <div class="transaction" style="cursor:pointer;" onclick="openEditModal(${idx})">
                     <div>
                         <div class="date">${t.date}</div>
                         <div>${t.description}</div>
@@ -1089,6 +1166,61 @@
             `}).join('');
         }
 
+        let editingTransactionIndex = -1;
+
+        function openEditModal(index) {
+            editingTransactionIndex = index;
+            const t = transactions[index];
+            if (!t) return;
+
+            document.getElementById('editTransDate').value = t.date || '';
+            document.getElementById('editTransDescription').value = t.description || '';
+            document.getElementById('editTransMerchant').value = t.merchant || '';
+            document.getElementById('editTransAmount').value = parseFloat(t.amount).toFixed(2);
+            document.getElementById('editTransAccount').value = t.account || t.payment_method || '';
+
+            const categorySelect = document.getElementById('editTransCategory');
+            categorySelect.innerHTML = categories.map(c => `<option value="${c.name}">${c.name}</option>`).join('');
+            if (t.category && categories.find(c => c.name === t.category)) {
+                categorySelect.value = t.category;
+            }
+
+            document.getElementById('editTransactionModal').classList.add('active');
+        }
+
+        document.getElementById('editTransCancel').addEventListener('click', () => {
+            document.getElementById('editTransactionModal').classList.remove('active');
+        });
+
+        document.getElementById('editTransDelete').addEventListener('click', () => {
+            if (editingTransactionIndex < 0) return;
+            if (!confirm('Delete this transaction?')) return;
+            transactions.splice(editingTransactionIndex, 1);
+            saveTransactionsToStorage();
+            document.getElementById('editTransactionModal').classList.remove('active');
+            renderAll();
+        });
+
+        document.getElementById('editTransSave').addEventListener('click', () => {
+            if (editingTransactionIndex < 0) return;
+            const t = transactions[editingTransactionIndex];
+
+            t.date = document.getElementById('editTransDate').value || t.date;
+            t.description = document.getElementById('editTransDescription').value.trim() || t.description;
+            t.merchant = document.getElementById('editTransMerchant').value.trim();
+            t.amount = parseFloat(document.getElementById('editTransAmount').value) || t.amount;
+            t.category = document.getElementById('editTransCategory').value || t.category;
+            t.account = document.getElementById('editTransAccount').value.trim();
+            t.payment_method = t.account;
+
+            const isIncome = t.category === 'Income' || t.type === 'income';
+            t.type = isIncome ? 'income' : 'expense';
+
+            saveTransactionsToStorage();
+            document.getElementById('editTransactionModal').classList.add('active');
+            renderAll();
+        });
+
         function renderCharts() {
             const month = document.getElementById('monthFilter').value;
             const year = document.getElementById('yearFilter').value;
@@ -1098,7 +1230,9 @@
             const catTotals = {};
             monthData.forEach(t => {
                 const cat = t.category || 'Uncategorized';
-                catTotals[cat] = (catTotals[cat] || 0) + Math.abs(t.amount);
+                const catInfo = categories.find(c => c.name === cat);
+                const isIncome = cat === 'Income' || (catInfo && catInfo.type === 'income');
+                catTotals[cat] = (catTotals[cat] || 0) + (isIncome ? Math.abs(t.amount) : t.amount);
             });
 
             const sortedCatKeys = Object.keys(catTotals).sort((a, b) => catTotals[b] - catTotals[a]);
@@ -1106,7 +1240,9 @@
             const yearTotals = {};
             yearData.forEach(t => {
                 const cat = t.category || 'Uncategorized';
-                yearTotals[cat] = (yearTotals[cat] || 0) + Math.abs(t.amount);
+                const catInfo = categories.find(c => c.name === cat);
+                const isIncome = cat === 'Income' || (catInfo && catInfo.type === 'income');
+                yearTotals[cat] = (yearTotals[cat] || 0) + (isIncome ? Math.abs(t.amount) : t.amount);
             });
 
             const sortedYearKeys = Object.keys(yearTotals).sort((a, b) => yearTotals[b] - yearTotals[a]);
@@ -1171,7 +1307,9 @@
             const catTotals = {};
             monthData.forEach(t => {
                 const cat = t.category || 'Uncategorized';
-                catTotals[cat] = (catTotals[cat] || 0) + Math.abs(t.amount);
+                const catInfo = categories.find(c => c.name === cat);
+                const isIncome = cat === 'Income' || (catInfo && catInfo.type === 'income');
+                catTotals[cat] = (catTotals[cat] || 0) + (isIncome ? Math.abs(t.amount) : t.amount);
             });
 
             let totalBudget = 0;
@@ -1213,7 +1351,7 @@
                 } else {
                     budget = budgets[cat][month] !== undefined ? budgets[cat][month] : 0;
                 }
-                return actual > 0 || budget > 0;
+                return actual > 0 || budget > 0 || (isCumulative && budget !== 0);
             }).map(cat => {
                 const catInfo = categories.find(c => c.name === cat);
                 const isCumulative = catInfo && catInfo.isCumulative;
@@ -1224,12 +1362,12 @@
                     const bank = catInfo.bankBalances[month] || 0;
                     budget = bank;
                     remaining = budget - actual;
-                    pct = budget > 0 ? (actual / budget) * 100 : 0;
+                    pct = budget > 0 && actual > 0 ? (actual / budget) * 100 : 0;
                     budgetInput = `<span style="font-weight:600;color:#856404;">Bank: $${budget.toFixed(2)}</span>`;
                 } else {
                     budget = budgets[cat][month] !== undefined ? budgets[cat][month] : 0;
                     remaining = budget - actual;
-                    pct = budget > 0 ? (actual / budget) * 100 : 0;
+                    pct = budget > 0 && actual > 0 ? (actual / budget) * 100 : 0;
                     budgetInput = `Budget: <input type="number" class="budget-input" data-cat="${cat}" data-month="${month}" value="${budget}" style="width:80px;padding:4px;border:1px solid #ddd;border-radius:4px;">`;
                 }
 
@@ -1359,7 +1497,7 @@
                 }
                 const actual = catTotals[cat] || 0;
                 const remaining = budget - actual;
-                const pct = budget > 0 ? (actual / budget) * 100 : 0;
+                const pct = budget > 0 && actual > 0 ? (actual / budget) * 100 : 0;
                 const catTransactions = isCumulative ? yearData.filter(t => t.category === cat) : [];
                 const transactionDebug = isCumulative ? catTransactions.map(t => `<div style="font-size:0.7rem;color:#999;padding-left:10px;">${t.date} ${t.description}: $${Math.abs(t.amount).toFixed(2)}</div>`).join('') : '';
                 return `
@@ -1401,7 +1539,7 @@
             const year = document.getElementById('yearFilter').value;
             const yearTransactions = transactions.filter(t => t.date.startsWith(year));
             const income = yearTransactions.filter(t => t.category === 'Income').reduce((sum, t) => sum + Math.abs(t.amount), 0);
-            const spent = yearTransactions.filter(t => t.category !== 'Income' && t.type !== 'income').reduce((sum, t) => sum + Math.abs(t.amount), 0);
+            const spent = yearTransactions.filter(t => t.category !== 'Income' && t.type !== 'income').reduce((sum, t) => sum + t.amount, 0);
             const saved = income - spent;
             document.getElementById('summaryIncome').textContent = '$' + income.toFixed(2);
             document.getElementById('summarySpent').textContent = '$' + spent.toFixed(2);
@@ -1413,7 +1551,7 @@
             const month = document.getElementById('monthFilter').value;
             const monthTransactions = transactions.filter(t => t.date.startsWith(month));
             const income = monthTransactions.filter(t => t.category === 'Income').reduce((sum, t) => sum + Math.abs(t.amount), 0);
-            const spent = monthTransactions.filter(t => t.category !== 'Income' && t.type !== 'income').reduce((sum, t) => sum + Math.abs(t.amount), 0);
+            const spent = monthTransactions.filter(t => t.category !== 'Income' && t.type !== 'income').reduce((sum, t) => sum + t.amount, 0);
             const saved = income - spent;
             document.getElementById('monthSummaryIncome').textContent = '$' + income.toFixed(2);
             document.getElementById('monthSummarySpent').textContent = '$' + spent.toFixed(2);
@@ -1429,15 +1567,17 @@
             list.innerHTML = `
                 <div style="font-size:1.5rem;font-weight:600;color:#27ae60;margin-bottom:15px;">$${total.toFixed(2)}</div>
                 <div style="max-height:250px;overflow-y:auto;">
-                    ${incomeData.map(t => `
-                        <div style="display:flex;justify-content:space-between;padding:8px;border-bottom:1px solid #eee;">
+                    ${incomeData.map(t => {
+                        const idx = transactions.indexOf(t);
+                        return `
+                        <div style="display:flex;justify-content:space-between;padding:8px;border-bottom:1px solid #eee;cursor:pointer;" onclick="openEditModal(${idx})">
                             <div>
                                 <div style="font-size:0.85rem;color:#666;">${t.date}</div>
                                 <div>${t.description}</div>
                             </div>
                             <div style="font-weight:600;color:#27ae60;">$${t.amount.toFixed(2)}</div>
                         </div>
-                    `).join('')}
+                    `}).join('')}
                 </div>
             `;
         }
@@ -1482,6 +1622,8 @@
             const budgetCats = Object.keys(budgets);
             let copied = 0;
             budgetCats.forEach(cat => {
+                const catInfo = categories.find(c => c.name === cat);
+                if (catInfo && catInfo.isCumulative) return;
                 if (budgets[cat][sourceMonth] !== undefined) {
                     budgets[cat][targetMonth] = budgets[cat][sourceMonth];
                     copied++;
@@ -1518,7 +1660,7 @@
             });
         });
 
-        ['yearFilter', 'transTypeFilter', 'transCategoryFilter'].forEach(id => {
+        ['yearFilter', 'transTypeFilter', 'transCategoryFilter', 'transSortFilter'].forEach(id => {
             document.getElementById(id).addEventListener('change', renderAll);
         });
 
@@ -1679,14 +1821,14 @@
 
                 const defaultCat = getDefaultCategory(desc);
 
-                if (/payment.*card|online\s*pmt|mobile\s*pmt|online\s*pymt/i.test(desc)) continue;
+                if (/payment.*card|online\s*pmt|mobile\s*pmt|online\s*pymt|payment\s*thank\s*you/i.test(desc)) continue;
                 if (/remote\s*online\s*deposit/i.test(desc)) continue;
                 if (account === 'Checking Account' && /morgan\s*stanley/i.test(desc)) continue;
 
                 data.push({
                     date: parsedDate,
                     description: desc,
-                    amount: Math.abs(amount),
+                    amount: amount,
                     category: defaultCat || 'Restaurants',
                     merchant: desc,
                     payment_method: account,
