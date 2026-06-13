@@ -87,6 +87,22 @@
         .empty-state { text-align:center;padding:40px;color:#666; }
         .toggle-switch { display:flex;align-items:center;gap:10px; }
         .toggle-switch input { width:auto; }
+        .month-calendar { background:white;border:1px solid #ddd;border-radius:8px;padding:12px;box-shadow:0 2px 4px rgba(0,0,0,0.06);display:inline-block;min-width:280px; }
+        .month-calendar-header { display:flex;align-items:center;justify-content:space-between;margin-bottom:12px; }
+        .month-calendar-header #calYearLabel { font-size:1.1rem;font-weight:600;color:#2c3e50;min-width:60px;text-align:center; }
+        .month-cal-nav { background:none;border:1px solid #ddd;border-radius:6px;padding:4px 12px;cursor:pointer;font-size:1rem;color:#555;transition:all 0.15s; }
+        .month-cal-nav:hover { background:#f0f0f0;border-color:#bbb; }
+        .month-calendar-grid { display:grid;grid-template-columns:repeat(4,1fr);gap:6px; }
+        .month-calendar-grid button { padding:10px 4px;border:1px solid #eee;border-radius:6px;background:#fafafa;cursor:pointer;font-size:0.82rem;color:#444;transition:all 0.15s;text-align:center; }
+        .month-calendar-grid button:hover { background:#e8f0fe;border-color:#3498db; }
+        .month-calendar-grid button.selected { background:#3498db;color:white;border-color:#2980b9;font-weight:600; }
+        .month-calendar-grid button.no-data { color:#ccc;background:#f9f9f9; }
+        .month-calendar-grid button.no-data:hover { background:#f0f0f0;color:#999; }
+        .split-row { display:flex;gap:8px;align-items:center;margin-bottom:8px; }
+        .split-row select, .split-row input { padding:6px;border:1px solid #ddd;border-radius:4px;font-size:0.85rem; }
+        .split-row select { flex:2; }
+        .split-row input { flex:1; }
+        .split-row button { padding:4px 8px;font-size:0.8rem; }
     </style>
 </head>
 <body>
@@ -101,14 +117,21 @@
 
         <main class="main-content">
         <div id="monthly" class="panel active">
-            <div class="filters" style="margin-bottom: 20px;">
-                <select id="monthFilter"></select>
-            </div>
-
-            <div id="monthlySummary" style="display:flex;justify-content:space-between;padding:20px;background:linear-gradient(135deg,#667eea,#764ba2);border-radius:12px;margin-bottom:20px;color:white;">
-                <div style="text-align:center;"><div style="font-size:0.9rem;opacity:0.9;">Monthly Income</div><div id="monthSummaryIncome" style="font-size:1.8rem;font-weight:700;">$0.00</div></div>
-                <div style="text-align:center;"><div style="font-size:0.9rem;opacity:0.9;">Monthly Spent</div><div id="monthSummarySpent" style="font-size:1.8rem;font-weight:700;">$0.00</div></div>
-                <div style="text-align:center;"><div style="font-size:0.9rem;opacity:0.9;">Monthly Saved</div><div id="monthSummarySaved" style="font-size:1.8rem;font-weight:700;">$0.00</div></div>
+            <input type="hidden" id="monthFilter">
+            <div style="display:flex;gap:20px;align-items:stretch;margin-bottom:20px;">
+                <div class="month-calendar" style="align-self:stretch;display:flex;flex-direction:column;justify-content:center;">
+                    <div class="month-calendar-header">
+                        <button class="month-cal-nav" id="calPrevYear">&lt;</button>
+                        <span id="calYearLabel"></span>
+                        <button class="month-cal-nav" id="calNextYear">&gt;</button>
+                    </div>
+                    <div class="month-calendar-grid" id="calGrid"></div>
+                </div>
+                <div id="monthlySummary" style="flex:1;display:flex;justify-content:space-between;padding:20px;background:linear-gradient(135deg,#667eea,#764ba2);border-radius:12px;color:white;">
+                    <div style="text-align:center;"><div style="font-size:0.9rem;opacity:0.9;">Monthly Income</div><div id="monthSummaryIncome" style="font-size:1.8rem;font-weight:700;">$0.00</div></div>
+                    <div style="text-align:center;"><div style="font-size:0.9rem;opacity:0.9;">Monthly Spent</div><div id="monthSummarySpent" style="font-size:1.8rem;font-weight:700;">$0.00</div></div>
+                    <div style="text-align:center;"><div style="font-size:0.9rem;opacity:0.9;">Monthly Saved</div><div id="monthSummarySaved" style="font-size:1.8rem;font-weight:700;">$0.00</div></div>
+                </div>
             </div>
             <div class="grid" style="grid-template-columns: 1fr 1fr; gap: 20px; margin-bottom: 20px;">
                 <div>
@@ -200,20 +223,27 @@
                     <p>Drag & drop CSV file(s) here or click to browse</p>
                     <input type="file" id="fileInput" accept=".csv" multiple hidden>
                 </div>
+            </div>
+            <div class="card" style="margin-top: 20px;">
+                <h3>Import History</h3>
+                <div class="drop-zone" id="historyDropZone" style="margin-top: 10px;">
+                    <p>Drag & drop CSV file(s) here or click to browse</p>
+                    <input type="file" id="historyFileInput" accept=".csv" multiple hidden>
+                </div>
                 <div id="importPreview" class="hidden" style="margin-top: 20px;">
                     <h4>Preview</h4>
                     <div id="importStats" style="margin: 15px 0; padding: 15px; background: #f8f9fa; border-radius: 6px;"></div>
                     <button class="btn btn-primary" id="confirmImport">Import Transactions</button>
                 </div>
                 <div style="margin-top: 20px; padding-top: 20px; border-top: 1px solid #eee;">
-                    <button class="btn btn-secondary" onclick="clearAllData()">Clear All Data</button>
+                    <button class="btn btn-danger" onclick="clearAllData()">Clear All Data</button>
                 </div>
                 <div style="margin-top: 20px; padding-top: 20px; border-top: 1px solid #eee;">
                     <button class="btn btn-primary" onclick="exportData()">Export Data</button>
                     <button class="btn btn-primary" onclick="document.getElementById('dataFileInput').click()" style="margin-left: 10px;">Import Data</button>
                     <input type="file" id="dataFileInput" accept=".json" hidden onchange="importData(this)">
                 </div>
-                
+            </div>
         </div>
         </main>
     </div>
@@ -222,26 +252,42 @@
 
     <div class="modal" id="categoryModal">
         <div class="modal-content">
-            <h2>Categorize Transaction</h2>
+            <h2>Review Transaction <span id="reviewProgress" style="font-size:0.9rem;font-weight:400;color:#666;"></span></h2>
+            <div class="form-group">
+                <label>Account</label>
+                <div id="modalAccount" style="padding: 10px; background: #f8f9fa; border-radius: 4px; font-weight: 500;"></div>
+            </div>
             <div class="form-group">
                 <label>Description</label>
-                <div id="modalDescription" style="padding: 10px; background: #f8f9fa; border-radius: 4px;"></div>
+                <input type="text" id="modalDescription" style="width:100%;padding:8px;border:1px solid #ddd;border-radius:4px;">
+            </div>
+            <div class="form-group">
+                <label>Merchant</label>
+                <input type="text" id="modalMerchant" placeholder="Enter merchant name" style="width:100%;padding:8px;border:1px solid #ddd;border-radius:4px;">
             </div>
             <div class="form-group">
                 <label>Amount</label>
-                <div id="modalAmount" style="padding: 10px; background: #f8f9fa; border-radius: 4px;"></div>
+                <input type="number" step="0.01" id="modalAmount" style="width:100%;padding:8px;border:1px solid #ddd;border-radius:4px;">
             </div>
             <div class="form-group">
                 <label>Category</label>
-                <select id="modalCategory"></select>
+                <select id="modalCategory" style="width:100%;padding:8px;border:1px solid #ddd;border-radius:4px;"></select>
             </div>
-            <div class="form-group">
-                <label>Merchant (for auto-categorization)</label>
-                <input type="text" id="modalMerchant" placeholder="Enter merchant name">
+            <div id="splitSection" style="display:none;margin-top:15px;padding:15px;background:#f8f9fa;border-radius:8px;">
+                <h4 style="margin-bottom:10px;">Split Transaction</h4>
+                <div id="splitRows"></div>
+                <div style="display:flex;justify-content:space-between;align-items:center;margin-top:10px;">
+                    <span id="splitRemaining" style="font-size:0.9rem;color:#666;"></span>
+                    <div style="display:flex;gap:8px;">
+                        <button class="btn btn-secondary" id="addSplitRow" style="padding:5px 12px;font-size:0.85rem;">+ Add Split</button>
+                        <button class="btn btn-success" id="confirmSplit" style="padding:5px 12px;font-size:0.85rem;">Confirm Split</button>
+                    </div>
+                </div>
             </div>
-            <div style="display: flex; gap: 10px; justify-content: flex-end;">
-                <button class="btn btn-secondary" id="skipTransaction">Skip</button>
-                <button class="btn btn-success" id="saveTransaction">Save</button>
+            <div style="display: flex; gap: 10px; justify-content: flex-end; margin-top: 20px;">
+                <button class="btn btn-danger" id="deleteTransaction">Delete</button>
+                <button class="btn btn-secondary" id="splitTransaction">Split</button>
+                <button class="btn btn-success" id="saveTransaction">Approve</button>
             </div>
         </div>
     </div>
@@ -338,43 +384,58 @@
         let pendingImport = [];
         let pendingImportBudgets = {};
         let currentTransactionIndex = 0;
+
+        const accountMap = {
+            '4720': 'CFF',
+            '4004': 'CFU',
+            '9981': 'CSP',
+            '1963': 'CSP',
+            '0071': 'Ven X',
+            '71': 'Ven X',
+            '7418': 'Ven X',
+            '0820': 'Checking Account'
+        };
+
+        let newImportQueue = [];
+        let newImportIndex = 0;
+        let newImportAccount = '';
         let monthlyChart, yearlyChart;
 
         const categoryColorPalette = ['#3498db', '#e74c3c', '#2ecc71', '#f39c12', '#9b59b6', '#1abc9c', '#34495e', '#e67e22', '#c0392b', '#27ae60', '#2980b9', '#8e44ad', '#e91e63', '#00bcd4', '#ff5722', '#795548', '#607d8b', '#9c27b0', '#4caf50', '#ff9800', '#03a9f4', '#f44336', '#ffc107', '#cddc39', '#009688', '#673ab7', '#3f51b5', '#2196f3', '#ffeb3b', '#8bc34a', '#263238', '#9e9e9e', '#f06292', '#ba68c8', '#9575cd', '#7986cb', '#64b5f6', '#4fc3f7', '#4dd0e1', '#4db6ac', '#81c784', '#aed581', '#dce775', '#fff176', '#ffd54f', '#ffb74d', '#ff8a65', '#a1887f', '#90a4ae', '#f48fb1', '#ce93d8', '#b39ddb', '#9fa8da', '#82b1ff', '#81d4fa', '#80deea', '#80cbc4', '#a5d6a7', '#c5e1a5', '#dce775', '#e6ee9c', '#fff59d', '#ffe082', '#ffcc80', '#ffab91', '#bcaaa4', '#cfd8dc'];
 
         const defaultTransactions = [
-            {date:'2026-01-30',description:'Maddie Paycheck',amount:4534.42,category:'Income',merchant:'Maddie Paycheck',payment_method:'Direct Deposit',type:'income'},
-            {date:'2026-01-09',description:'Zach Paycheck 1',amount:2270.01,category:'Income',merchant:'Zach Paycheck 1',payment_method:'Direct Deposit',type:'income'},
-            {date:'2026-01-23',description:'Zach Paycheck 2',amount:2510.69,category:'Income',merchant:'Zach Paycheck 2',payment_method:'Direct Deposit',type:'income'},
-            {date:'2026-01-05',description:'Gifts Reimbursement',amount:-20.00,category:'Gifts',merchant:'Zelle - Greg Stiles',payment_method:'Checking Account',type:'expense'},
-            {date:'2026-01-05',description:'GD Battery Replacement',amount:182.19,category:'Car Maintenance',merchant:'Higher Standards Auto',payment_method:'Check',type:'expense'},
-            {date:'2026-01-17',description:'Gym Membership',amount:10.00,category:'Gym',merchant:'Planet Fitness',payment_method:'Checking Account',type:'expense'},
-            {date:'2026-01-02',description:'Lunch',amount:36.99,category:'Restaurants',merchant:'Sushi Remix',payment_method:'CFF',type:'expense'},
-            {date:'2026-01-08',description:'Dinner',amount:14.84,category:'Restaurants',merchant:'Pizza Hut',payment_method:'CFF',type:'expense'},
-            {date:'2026-01-09',description:'Cookies',amount:13.86,category:'Restaurants',merchant:"Chef Sergey",payment_method:'CFF',type:'expense'},
-            {date:'2026-01-03',description:'Maggie Donation',amount:102.41,category:'CRU Donation',merchant:'CRU',payment_method:'Ven X',type:'expense'},
-            {date:'2026-01-03',description:'Groceries',amount:89.71,category:'Groceries',merchant:'Costco',payment_method:'Ven X',type:'expense'},
-            {date:'2026-01-03',description:'ACV Shampoo Creatine',amount:63.56,category:'Pharmacy',merchant:'Costco',payment_method:'Ven X',type:'expense'},
-            {date:'2026-01-03',description:'Groceries',amount:35.26,category:'Groceries',merchant:'Meijer',payment_method:'Ven X',type:'expense'},
-            {date:'2026-01-03',description:'Groceries',amount:34.12,category:'Groceries',merchant:'Aldi',payment_method:'Ven X',type:'expense'},
-            {date:'2026-01-05',description:'GD Battery',amount:138.37,category:'Car Maintenance',merchant:'Autozone',payment_method:'Ven X',type:'expense'},
-            {date:'2026-01-05',description:'Medical Bills Refund',amount:-68.25,category:'Medical Bills',merchant:'Mid Michigan Health',payment_method:'Ven X',type:'expense'},
-            {date:'2026-01-06',description:'Tithe',amount:812.00,category:'Tithe',merchant:'Midland Free',payment_method:'Ven X',type:'expense'},
-            {date:'2026-01-07',description:'Insurance',amount:181.80,category:'Insurance',merchant:'State Farm',payment_method:'Ven X',type:'expense'},
-            {date:'2026-01-08',description:'Rebeca Donation',amount:39.00,category:'Rebeca Donation',merchant:'Children International',payment_method:'Ven X',type:'expense'},
-            {date:'2026-01-09',description:'Lincoln Gas',amount:37.72,category:'Gasoline',merchant:'Speedway',payment_method:'Ven X',type:'expense'},
-            {date:'2026-01-12',description:'Groceries',amount:38.77,category:'Groceries',merchant:'Aldi',payment_method:'Ven X',type:'expense'},
-            {date:'2026-01-12',description:'Matcha',amount:11.99,category:'Groceries',merchant:'Amazon',payment_method:'Ven X',type:'expense'},
-            {date:'2026-01-12',description:'Razor Head Cable',amount:53.95,category:'Shopping',merchant:'Amazon',payment_method:'Ven X',type:'expense'},
-            {date:'2026-01-12',description:'AirPods case',amount:7.94,category:'Shopping',merchant:'Amazon',payment_method:'Ven X',type:'expense'},
-            {date:'2026-01-12',description:'Battery Core Refund',amount:-22.00,category:'Car Maintenance',merchant:'Autozone',payment_method:'Ven X',type:'expense'},
-            {date:'2026-01-16',description:'Groceries',amount:6.28,category:'Groceries',merchant:'Aldi',payment_method:'Ven X',type:'expense'},
-            {date:'2026-01-17',description:'Women\'s Conference',amount:50.00,category:'Miscellaneous',merchant:'Midland Free',payment_method:'Ven X',type:'expense'},
-            {date:'2026-01-16',description:'Groceries',amount:52.25,category:'Groceries',merchant:'Costco',payment_method:'Ven X',type:'expense'},
-            {date:'2026-01-16',description:'Groceries',amount:27.72,category:'Groceries',merchant:'Aldi',payment_method:'Ven X',type:'expense'},
-            {date:'2026-01-16',description:'Internet Bill',amount:85.00,category:'Internet',merchant:'Spectrum',payment_method:'Ven X',type:'expense'},
-            {date:'2026-01-16',description:'Lincoln Gas',amount:35.65,category:'Gasoline',merchant:'Meijer',payment_method:'Ven X',type:'expense'},
-            {date:'2026-01-16',description:'Groceries',amount:49.98,category:'Groceries',merchant:'Meijer',payment_method:'Ven X',type:'expense'}
+            {date:'2026-01-30',description:'Maddie Paycheck',amount:4534.42,category:'Income',merchant:'Maddie Paycheck',payment_method:'Direct Deposit',account:'Direct Deposit',type:'income'},
+            {date:'2026-01-09',description:'Zach Paycheck 1',amount:2270.01,category:'Income',merchant:'Zach Paycheck 1',payment_method:'Direct Deposit',account:'Direct Deposit',type:'income'},
+            {date:'2026-01-23',description:'Zach Paycheck 2',amount:2510.69,category:'Income',merchant:'Zach Paycheck 2',payment_method:'Direct Deposit',account:'Direct Deposit',type:'income'},
+            {date:'2026-01-05',description:'Gifts Reimbursement',amount:-20.00,category:'Gifts',merchant:'Zelle - Greg Stiles',payment_method:'Checking Account',account:'Checking Account',type:'expense'},
+            {date:'2026-01-05',description:'GD Battery Replacement',amount:182.19,category:'Car Maintenance',merchant:'Higher Standards Auto',payment_method:'Check',account:'Check',type:'expense'},
+            {date:'2026-01-17',description:'Gym Membership',amount:10.00,category:'Gym',merchant:'Planet Fitness',payment_method:'Checking Account',account:'Checking Account',type:'expense'},
+            {date:'2026-01-02',description:'Lunch',amount:36.99,category:'Restaurants',merchant:'Sushi Remix',payment_method:'CFF',account:'CFF',type:'expense'},
+            {date:'2026-01-08',description:'Dinner',amount:14.84,category:'Restaurants',merchant:'Pizza Hut',payment_method:'CFF',account:'CFF',type:'expense'},
+            {date:'2026-01-09',description:'Cookies',amount:13.86,category:'Restaurants',merchant:"Chef Sergey",payment_method:'CFF',account:'CFF',type:'expense'},
+            {date:'2026-01-03',description:'Maggie Donation',amount:102.41,category:'CRU Donation',merchant:'CRU',payment_method:'Ven X',account:'Ven X',type:'expense'},
+            {date:'2026-01-03',description:'Groceries',amount:89.71,category:'Groceries',merchant:'Costco',payment_method:'Ven X',account:'Ven X',type:'expense'},
+            {date:'2026-01-03',description:'ACV Shampoo Creatine',amount:63.56,category:'Pharmacy',merchant:'Costco',payment_method:'Ven X',account:'Ven X',type:'expense'},
+            {date:'2026-01-03',description:'Groceries',amount:35.26,category:'Groceries',merchant:'Meijer',payment_method:'Ven X',account:'Ven X',type:'expense'},
+            {date:'2026-01-03',description:'Groceries',amount:34.12,category:'Groceries',merchant:'Aldi',payment_method:'Ven X',account:'Ven X',type:'expense'},
+            {date:'2026-01-05',description:'GD Battery',amount:138.37,category:'Car Maintenance',merchant:'Autozone',payment_method:'Ven X',account:'Ven X',type:'expense'},
+            {date:'2026-01-05',description:'Medical Bills Refund',amount:-68.25,category:'Medical Bills',merchant:'Mid Michigan Health',payment_method:'Ven X',account:'Ven X',type:'expense'},
+            {date:'2026-01-06',description:'Tithe',amount:812.00,category:'Tithe',merchant:'Midland Free',payment_method:'Ven X',account:'Ven X',type:'expense'},
+            {date:'2026-01-07',description:'Insurance',amount:181.80,category:'Insurance',merchant:'State Farm',payment_method:'Ven X',account:'Ven X',type:'expense'},
+            {date:'2026-01-08',description:'Rebeca Donation',amount:39.00,category:'Rebeca Donation',merchant:'Children International',payment_method:'Ven X',account:'Ven X',type:'expense'},
+            {date:'2026-01-09',description:'Lincoln Gas',amount:37.72,category:'Gasoline',merchant:'Speedway',payment_method:'Ven X',account:'Ven X',type:'expense'},
+            {date:'2026-01-12',description:'Groceries',amount:38.77,category:'Groceries',merchant:'Aldi',payment_method:'Ven X',account:'Ven X',type:'expense'},
+            {date:'2026-01-12',description:'Matcha',amount:11.99,category:'Groceries',merchant:'Amazon',payment_method:'Ven X',account:'Ven X',type:'expense'},
+            {date:'2026-01-12',description:'Razor Head Cable',amount:53.95,category:'Shopping',merchant:'Amazon',payment_method:'Ven X',account:'Ven X',type:'expense'},
+            {date:'2026-01-12',description:'AirPods case',amount:7.94,category:'Shopping',merchant:'Amazon',payment_method:'Ven X',account:'Ven X',type:'expense'},
+            {date:'2026-01-12',description:'Battery Core Refund',amount:-22.00,category:'Car Maintenance',merchant:'Autozone',payment_method:'Ven X',account:'Ven X',type:'expense'},
+            {date:'2026-01-16',description:'Groceries',amount:6.28,category:'Groceries',merchant:'Aldi',payment_method:'Ven X',account:'Ven X',type:'expense'},
+            {date:'2026-01-17',description:'Women\'s Conference',amount:50.00,category:'Miscellaneous',merchant:'Midland Free',payment_method:'Ven X',account:'Ven X',type:'expense'},
+            {date:'2026-01-16',description:'Groceries',amount:52.25,category:'Groceries',merchant:'Costco',payment_method:'Ven X',account:'Ven X',type:'expense'},
+            {date:'2026-01-16',description:'Groceries',amount:27.72,category:'Groceries',merchant:'Aldi',payment_method:'Ven X',account:'Ven X',type:'expense'},
+            {date:'2026-01-16',description:'Internet Bill',amount:85.00,category:'Internet',merchant:'Spectrum',payment_method:'Ven X',account:'Ven X',type:'expense'},
+            {date:'2026-01-16',description:'Lincoln Gas',amount:35.65,category:'Gasoline',merchant:'Meijer',payment_method:'Ven X',account:'Ven X',type:'expense'},
+            {date:'2026-01-16',description:'Groceries',amount:49.98,category:'Groceries',merchant:'Meijer',payment_method:'Ven X',account:'Ven X',type:'expense'}
         ];
 
         const defaultCategories = [
@@ -426,6 +487,7 @@
 
             if (storedTrans && storedTrans !== '[]') {
                 transactions = JSON.parse(storedTrans);
+                migrateTransactions();
             }
 
             if (storedCat) {
@@ -509,6 +571,15 @@
                     cat.color = categoryColorPalette.find(c => !usedColors.includes(c)) || categoryColorPalette[0];
                 }
                 return cat;
+            });
+        }
+
+        function migrateTransactions() {
+            transactions = transactions.map(t => {
+                if (t.account === undefined) {
+                    t.account = t.payment_method || '';
+                }
+                return t;
             });
         }
 
@@ -896,35 +967,77 @@
             document.getElementById('cumulativeOptions').style.display = this.checked ? 'block' : 'none';
         });
 
+        const monthShortNames = ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'];
+        let calendarYear = new Date().getFullYear();
+        let selectedMonth = '';
+        let availableMonths = new Set();
+
         function populateDateFilters() {
-            const months = new Set();
+            availableMonths.clear();
             const years = new Set();
 
             transactions.forEach(t => {
                 if (t.date && t.date.length >= 7) {
-                    const ym = t.date.substring(0, 7);
-                    months.add(ym);
+                    availableMonths.add(t.date.substring(0, 7));
                     years.add(t.date.substring(0, 4));
                 }
             });
 
-            const sortedMonths = Array.from(months).sort();
             const sortedYears = Array.from(years).sort().reverse();
-
-            const monthNames = ['', 'January', 'February', 'March', 'April', 'May', 'June', 'July', 'August', 'September', 'October', 'November', 'December'];
-
-            const monthOptions = sortedMonths.map(m => {
-                const [y, mm] = m.split('-');
-                return `<option value="${m}">${monthNames[parseInt(mm)]} ${y}</option>`;
-            }).join('');
+            const sortedMonths = Array.from(availableMonths).sort();
 
             const yearOptions = sortedYears.map(y => `<option value="${y}">${y}</option>`).join('');
-
-            document.getElementById('monthFilter').innerHTML = monthOptions;
             document.getElementById('yearFilter').innerHTML = yearOptions;
-            if (sortedMonths.length > 0) document.getElementById('monthFilter').value = sortedMonths[sortedMonths.length - 1];
             if (sortedYears.length > 0) document.getElementById('yearFilter').value = sortedYears[0];
+
+            if (sortedMonths.length > 0) {
+                selectedMonth = sortedMonths[sortedMonths.length - 1];
+                calendarYear = parseInt(selectedMonth.substring(0, 4));
+            } else {
+                selectedMonth = '';
+                calendarYear = new Date().getFullYear();
+            }
+
+            document.getElementById('monthFilter').value = selectedMonth;
+            renderCalendar();
         }
+
+        function renderCalendar() {
+            document.getElementById('calYearLabel').textContent = calendarYear;
+            const grid = document.getElementById('calGrid');
+            grid.innerHTML = '';
+
+            for (let m = 1; m <= 12; m++) {
+                const ym = calendarYear + '-' + String(m).padStart(2, '0');
+                const btn = document.createElement('button');
+                btn.textContent = monthShortNames[m - 1];
+                btn.type = 'button';
+                if (ym === selectedMonth) btn.classList.add('selected');
+                if (!availableMonths.has(ym)) btn.classList.add('no-data');
+                btn.addEventListener('click', () => selectMonth(ym));
+                grid.appendChild(btn);
+            }
+        }
+
+        function selectMonth(yearMonth) {
+            if (!availableMonths.has(yearMonth)) return;
+            selectedMonth = yearMonth;
+            calendarYear = parseInt(yearMonth.substring(0, 4));
+            document.getElementById('monthFilter').value = yearMonth;
+            renderCalendar();
+            addCumulativeBankAmounts(yearMonth);
+            renderAll();
+        }
+
+        document.getElementById('calPrevYear').addEventListener('click', () => {
+            calendarYear--;
+            renderCalendar();
+        });
+
+        document.getElementById('calNextYear').addEventListener('click', () => {
+            calendarYear++;
+            renderCalendar();
+        });
 
         function saveData() {
             localStorage.setItem(TRANS_DATA_KEY, JSON.stringify(transactions));
@@ -1034,6 +1147,7 @@
                             ${amountPrefix}$${Math.abs(amountVal).toFixed(2)}
                         </div>
                         <span class="category">${t.category || 'Uncategorized'}</span>
+                        ${t.account ? `<span style="color:#999;font-size:0.75rem;margin-left:6px;">${t.account}</span>` : ''}
                     </div>
                 </div>
             `}).join('');
@@ -1468,13 +1582,8 @@
             });
         });
 
-        ['monthFilter', 'yearFilter', 'transTypeFilter', 'transCategoryFilter'].forEach(id => {
+        ['yearFilter', 'transTypeFilter', 'transCategoryFilter'].forEach(id => {
             document.getElementById(id).addEventListener('change', renderAll);
-        });
-
-        document.getElementById('monthFilter').addEventListener('change', function() {
-            addCumulativeBankAmounts(this.value);
-            renderAll();
         });
 
         const dropZone = document.getElementById('dropZone');
@@ -1486,10 +1595,24 @@
         dropZone.addEventListener('drop', (e) => {
             e.preventDefault();
             dropZone.classList.remove('dragover');
+            handleNewImport(e.dataTransfer.files);
+        });
+
+        fileInput.addEventListener('change', (e) => handleNewImport(e.target.files));
+
+        const historyDropZone = document.getElementById('historyDropZone');
+        const historyFileInput = document.getElementById('historyFileInput');
+
+        historyDropZone.addEventListener('click', () => historyFileInput.click());
+        historyDropZone.addEventListener('dragover', (e) => { e.preventDefault(); historyDropZone.classList.add('dragover'); });
+        historyDropZone.addEventListener('dragleave', () => historyDropZone.classList.remove('dragover'));
+        historyDropZone.addEventListener('drop', (e) => {
+            e.preventDefault();
+            historyDropZone.classList.remove('dragover');
             handleFiles(e.dataTransfer.files);
         });
 
-        fileInput.addEventListener('change', (e) => handleFiles(e.target.files));
+        historyFileInput.addEventListener('change', (e) => handleFiles(e.target.files));
 
         function handleFiles(files) {
             if (!files || files.length === 0) return;
@@ -1547,6 +1670,86 @@
             document.getElementById('confirmImport').classList.add('hidden');
             
             processNextFile(0);
+        }
+
+        function parseBankStatement(rows, fileName) {
+            if (!rows || rows.length < 2) return { transactions: [], account: '' };
+
+            const header = rows[0].map(h => (h || '').toString().toLowerCase().trim());
+            let account = '';
+            let cardCol = -1;
+            let dateCol = -1;
+            let descCol = -1;
+            let amountCol = -1;
+            let debitCol = -1;
+            let creditCol = -1;
+
+            for (let i = 0; i < header.length; i++) {
+                const h = header[i];
+                if (h.includes('card no') || h.includes('card #')) cardCol = i;
+                if (h === 'transaction date' || h === 'posting date' || h === 'post date' || h === 'details') dateCol = i;
+                if (h.includes('description') || h.includes('memo')) descCol = i;
+                if (h === 'amount') amountCol = i;
+                if (h === 'debit') debitCol = i;
+                if (h === 'credit') creditCol = i;
+            }
+
+            if (cardCol >= 0) {
+                for (let i = 1; i < rows.length; i++) {
+                    const cardNum = (rows[i][cardCol] || '').toString().trim().replace(/^0+/, '');
+                    if (cardNum && accountMap[cardNum]) {
+                        account = accountMap[cardNum];
+                        break;
+                    }
+                }
+            }
+
+            if (!account) {
+                const fn = fileName.toLowerCase();
+                if (fn.includes('4720') || fn.includes('cff')) account = 'CFF';
+                else if (fn.includes('4004') || fn.includes('cfu')) account = 'CFU';
+                else if (fn.includes('9981') || fn.includes('1963') || fn.includes('csp')) account = 'CSP';
+                else if (fn.includes('0071') || fn.includes('7418') || fn.includes('ven')) account = 'Ven X';
+                else if (fn.includes('0820') || fn.includes('checking')) account = 'Checking Account';
+            }
+
+            const data = [];
+            for (let i = 1; i < rows.length; i++) {
+                const row = rows[i];
+                if (!row || row.every(c => !c || c.toString().trim() === '')) continue;
+
+                const dateRaw = dateCol >= 0 ? (row[dateCol] || '').toString().trim() : '';
+                const desc = descCol >= 0 ? (row[descCol] || '').toString().trim() : '';
+                let amount = 0;
+
+                if (amountCol >= 0) {
+                    amount = parseAmount(row[amountCol]);
+                } else if (debitCol >= 0 || creditCol >= 0) {
+                    const debit = debitCol >= 0 ? parseAmount(row[debitCol]) : 0;
+                    const credit = creditCol >= 0 ? parseAmount(row[creditCol]) : 0;
+                    amount = credit > 0 ? credit : -Math.abs(debit);
+                }
+
+                if (!dateRaw || !desc || amount === 0) continue;
+
+                const parsedDate = parseDate(dateRaw);
+                if (!parsedDate) continue;
+
+                const defaultCat = getDefaultCategory(desc);
+
+                data.push({
+                    date: parsedDate,
+                    description: desc,
+                    amount: Math.abs(amount),
+                    category: defaultCat || 'Uncategorized',
+                    merchant: desc,
+                    payment_method: account,
+                    account: account,
+                    type: amount < 0 ? 'expense' : 'income'
+                });
+            }
+
+            return { transactions: data, account: account };
         }
 
         function parseImportData(rows, fileName) {
@@ -1673,42 +1876,149 @@
             const t = pendingImport[index];
             currentTransactionIndex = index;
 
-            document.getElementById('modalDescription').textContent = t.description;
-            document.getElementById('modalAmount').textContent = `$${Math.abs(t.amount).toFixed(2)} (${t.type})`;
+            document.getElementById('reviewProgress').textContent = `(${index + 1} of ${pendingImport.length})`;
+            document.getElementById('modalAccount').textContent = t.account || t.payment_method || 'Unknown';
+            document.getElementById('modalDescription').value = t.description || '';
             document.getElementById('modalMerchant').value = t.merchant || '';
+            document.getElementById('modalAmount').value = Math.abs(t.amount).toFixed(2);
 
             const categorySelect = document.getElementById('modalCategory');
+            categorySelect.innerHTML = categories.map(c => `<option value="${c.name}">${c.name}</option>`).join('');
+
             if (t.merchant) {
                 const defaultCat = getDefaultCategory(t.merchant);
                 if (defaultCat) categorySelect.value = defaultCat;
             }
-            if (t.category && t.category !== 'Uncategorized' && !categorySelect.value) {
+            if (t.category && t.category !== 'Uncategorized') {
                 categorySelect.value = t.category;
             }
+
+            document.getElementById('splitSection').style.display = 'none';
+            document.getElementById('splitRows').innerHTML = '';
 
             document.getElementById('categoryModal').classList.add('active');
         }
 
-        document.getElementById('skipTransaction').addEventListener('click', () => {
-            showCategoryModal(currentTransactionIndex + 1);
-        });
-
         document.getElementById('saveTransaction').addEventListener('click', () => {
             const category = document.getElementById('modalCategory').value;
             const merchant = document.getElementById('modalMerchant').value;
+            const description = document.getElementById('modalDescription').value.trim();
+            const amount = parseFloat(document.getElementById('modalAmount').value);
 
-            if (category) {
-                pendingImport[currentTransactionIndex].category = category;
-            }
+            if (category) pendingImport[currentTransactionIndex].category = category;
             if (merchant) {
                 pendingImport[currentTransactionIndex].merchant = merchant;
                 saveMerchantDefault(merchant, category);
             }
+            if (description) pendingImport[currentTransactionIndex].description = description;
+            if (!isNaN(amount) && amount > 0) {
+                pendingImport[currentTransactionIndex].amount = amount;
+            }
 
             showCategoryModal(currentTransactionIndex + 1);
         });
 
+        document.getElementById('deleteTransaction').addEventListener('click', () => {
+            pendingImport.splice(currentTransactionIndex, 1);
+            if (pendingImport.length === 0) {
+                document.getElementById('categoryModal').classList.remove('active');
+                alert('All transactions removed.');
+            } else {
+                if (currentTransactionIndex >= pendingImport.length) currentTransactionIndex = pendingImport.length - 1;
+                showCategoryModal(currentTransactionIndex);
+            }
+        });
+
+        document.getElementById('splitTransaction').addEventListener('click', () => {
+            const section = document.getElementById('splitSection');
+            const isHidden = section.style.display === 'none';
+            section.style.display = isHidden ? 'block' : 'none';
+            if (isHidden) initSplitRows();
+        });
+
+        document.getElementById('addSplitRow').addEventListener('click', () => {
+            addSplitRow();
+            updateSplitRemaining();
+        });
+
+        document.getElementById('confirmSplit').addEventListener('click', () => {
+            approveSplit();
+        });
+
+        function initSplitRows() {
+            const container = document.getElementById('splitRows');
+            container.innerHTML = '';
+            const t = pendingImport[currentTransactionIndex];
+            addSplitRow(t.category, Math.abs(t.amount).toFixed(2));
+            addSplitRow();
+            updateSplitRemaining();
+        }
+
+        function addSplitRow(category, amount) {
+            const container = document.getElementById('splitRows');
+            const row = document.createElement('div');
+            row.className = 'split-row';
+            row.innerHTML = `
+                <select class="split-cat">${categories.map(c => `<option value="${c.name}">${c.name}</option>`).join('')}</select>
+                <input type="number" step="0.01" class="split-amt" placeholder="0.00" value="${amount || ''}">
+                <button class="btn btn-danger" onclick="this.parentElement.remove();updateSplitRemaining();">&times;</button>
+            `;
+            if (category) row.querySelector('.split-cat').value = category;
+            row.querySelector('.split-amt').addEventListener('input', updateSplitRemaining);
+            container.appendChild(row);
+        }
+
+        function updateSplitRemaining() {
+            const total = Math.abs(pendingImport[currentTransactionIndex].amount);
+            const inputs = document.querySelectorAll('#splitRows .split-amt');
+            let assigned = 0;
+            inputs.forEach(inp => { assigned += parseFloat(inp.value) || 0; });
+            const remaining = total - assigned;
+            const el = document.getElementById('splitRemaining');
+            el.textContent = `Remaining: $${remaining.toFixed(2)}`;
+            el.style.color = remaining < 0 ? '#e74c3c' : remaining === 0 ? '#27ae60' : '#666';
+        }
+
+        function approveSplit() {
+            const t = pendingImport[currentTransactionIndex];
+            const rows = document.querySelectorAll('#splitRows .split-row');
+            const splits = [];
+            rows.forEach(row => {
+                const cat = row.querySelector('.split-cat').value;
+                const amt = parseFloat(row.querySelector('.split-amt').value) || 0;
+                if (cat && amt > 0) splits.push({ category: cat, amount: amt });
+            });
+
+            if (splits.length === 0) return;
+
+            const totalAssigned = splits.reduce((s, sp) => s + sp.amount, 0);
+            if (Math.abs(totalAssigned - Math.abs(t.amount)) > 0.01) {
+                alert('Split amounts must equal the transaction amount.');
+                return;
+            }
+
+            splits.forEach((sp, i) => {
+                const newT = { ...t };
+                newT.amount = sp.amount;
+                newT.category = sp.category;
+                if (i > 0) newT.description = t.description + ` (split ${i + 1})`;
+                pendingImport.push(newT);
+            });
+
+            pendingImport.splice(currentTransactionIndex, 1);
+            if (pendingImport.length === 0) {
+                document.getElementById('categoryModal').classList.remove('active');
+                confirmImportTransactions();
+            } else {
+                if (currentTransactionIndex >= pendingImport.length) currentTransactionIndex = pendingImport.length - 1;
+                showCategoryModal(currentTransactionIndex);
+            }
+        }
+
         function confirmImportTransactions() {
+            pendingImport.forEach(t => {
+                if (!t.account) t.account = t.payment_method || '';
+            });
             const importedCategories = [...new Set(pendingImport.map(t => t.category).filter(c => c && c !== 'Uncategorized'))];
             importedCategories.forEach(catName => {
                 if (!categories.find(c => c.name === catName)) {
@@ -1728,6 +2038,38 @@
             initializeCumulativeBanks();
             renderAll();
             alert('Import complete! ' + (importedCategories.length > 0 ? importedCategories.length + ' new categories added.' : ''));
+        }
+
+        function handleNewImport(files) {
+            if (!files || files.length === 0) return;
+            newImportQueue = [];
+            newImportIndex = 0;
+            newImportAccount = '';
+
+            const fileArray = Array.from(files);
+
+            const processNext = (idx) => {
+                if (idx >= fileArray.length) {
+                    if (newImportQueue.length === 0) {
+                        alert('No transactions found in the selected file(s).');
+                        return;
+                    }
+                    pendingImport = newImportQueue;
+                    showCategoryModal(0);
+                    return;
+                }
+
+                Papa.parse(fileArray[idx], {
+                    complete: (results) => {
+                        const parsed = parseBankStatement(results.data, fileArray[idx].name);
+                        if (parsed.account && !newImportAccount) newImportAccount = parsed.account;
+                        newImportQueue = newImportQueue.concat(parsed.transactions);
+                        processNext(idx + 1);
+                    }
+                });
+            };
+
+            processNext(0);
         }
 
         function saveTransactionsToStorage() {
