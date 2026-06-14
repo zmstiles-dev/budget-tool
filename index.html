@@ -282,6 +282,13 @@
                 <input type="number" step="0.01" id="modalAmount" style="width:100%;padding:8px;border:1px solid #ddd;border-radius:4px;">
             </div>
             <div class="form-group">
+                <label>Type</label>
+                <select id="modalType" style="width:100%;padding:8px;border:1px solid #ddd;border-radius:4px;">
+                    <option value="expense">Expense</option>
+                    <option value="income">Income</option>
+                </select>
+            </div>
+            <div class="form-group">
                 <label>Category</label>
                 <select id="modalCategory" style="width:100%;padding:8px;border:1px solid #ddd;border-radius:4px;"></select>
             </div>
@@ -326,6 +333,13 @@
             <div class="form-group">
                 <label>Amount</label>
                 <input type="number" step="0.01" id="editTransAmount" style="width:100%;padding:8px;border:1px solid #ddd;border-radius:4px;">
+            </div>
+            <div class="form-group">
+                <label>Type</label>
+                <select id="editTransType" style="width:100%;padding:8px;border:1px solid #ddd;border-radius:4px;">
+                    <option value="expense">Expense</option>
+                    <option value="income">Income</option>
+                </select>
             </div>
             <div class="form-group">
                 <label>Category</label>
@@ -1017,31 +1031,68 @@
             localStorage.setItem(BUDGET_DATA_KEY, JSON.stringify(budgets));
         }
 
-        function saveMerchantDefault(merchant, category) {
+        function saveMerchantDefault(merchant, category, type) {
             if (merchant) {
-                merchantDefaults[merchant.toLowerCase()] = category;
+                const entry = { category, type };
+                merchantDefaults[merchant.toLowerCase()] = entry;
+                const normalized = normalizeMerchant(merchant);
+                if (normalized && normalized !== merchant.toLowerCase()) {
+                    merchantDefaults[normalized] = entry;
+                }
                 localStorage.setItem(STORAGE_KEY, JSON.stringify(merchantDefaults));
             }
         }
 
         function getDefaultCategory(merchant) {
-            return merchantDefaults[merchant.toLowerCase()] || null;
+            if (!merchant) return null;
+            const key = merchant.toLowerCase();
+            const raw = merchantDefaults[key] || null;
+            const result = resolveDefaultEntry(raw);
+            if (result) return result;
+            const normalized = normalizeMerchant(merchant);
+            for (const k in merchantDefaults) {
+                const entry = resolveDefaultEntry(merchantDefaults[k]);
+                if (entry && normalizeMerchant(k) === normalized) return entry;
+            }
+            return null;
+        }
+
+        function resolveDefaultEntry(entry) {
+            if (!entry) return null;
+            if (typeof entry === 'string') return { category: entry, type: null };
+            if (entry.category) return entry;
+            return null;
+        }
+
+        function normalizeMerchant(name) {
+            if (!name) return '';
+            let s = name.toLowerCase()
+                .replace(/[#*\-_.]/g, ' ')
+                .replace(/\b\d{3,}\b/g, '')
+                .replace(/\s+/g, ' ')
+                .trim();
+            const prefixes = ['sq *', 'paypal *'];
+            for (const p of prefixes) {
+                if (s.startsWith(p)) { s = s.slice(p.length).trim(); break; }
+            }
+            s = s.replace(/\s+[a-z]+\d+[a-z0-9]*$/i, '').trim();
+            return s;
         }
 
         function buildMerchantDefaults() {
             const merchantLastUsed = {};
             transactions.forEach(t => {
                 if (t.merchant && t.category && t.category !== 'Uncategorized') {
-                    const key = t.merchant.toLowerCase();
+                    const key = normalizeMerchant(t.merchant);
                     const existing = merchantLastUsed[key];
                     if (!existing || t.date > existing.date) {
-                        merchantLastUsed[key] = { category: t.category, date: t.date };
+                        merchantLastUsed[key] = { category: t.category, type: t.type, date: t.date };
                     }
                 }
             });
             Object.keys(merchantLastUsed).forEach(key => {
                 if (!merchantDefaults[key]) {
-                    merchantDefaults[key] = merchantLastUsed[key].category;
+                    merchantDefaults[key] = { category: merchantLastUsed[key].category, type: merchantLastUsed[key].type };
                 }
             });
             localStorage.setItem(STORAGE_KEY, JSON.stringify(merchantDefaults));
@@ -1179,6 +1230,9 @@
             document.getElementById('editTransAmount').value = parseFloat(t.amount).toFixed(2);
             document.getElementById('editTransAccount').value = t.account || t.payment_method || '';
 
+            const typeSelect = document.getElementById('editTransType');
+            typeSelect.value = t.type || 'expense';
+
             const categorySelect = document.getElementById('editTransCategory');
             categorySelect.innerHTML = categories.map(c => `<option value="${c.name}">${c.name}</option>`).join('');
             if (t.category && categories.find(c => c.name === t.category)) {
@@ -1212,9 +1266,7 @@
             t.category = document.getElementById('editTransCategory').value || t.category;
             t.account = document.getElementById('editTransAccount').value.trim();
             t.payment_method = t.account;
-
-            const isIncome = t.category === 'Income' || t.type === 'income';
-            t.type = isIncome ? 'income' : 'expense';
+            t.type = document.getElementById('editTransType').value || t.type;
 
             saveTransactionsToStorage();
             document.getElementById('editTransactionModal').classList.add('active');
@@ -1798,6 +1850,7 @@
             }
 
             const data = [];
+            const isChase = fileName.toLowerCase().includes('chase');
             for (let i = 1; i < rows.length; i++) {
                 const row = rows[i].map(c => (c || '').toString().replace(/\r/g, '').trim());
                 if (row.every(c => c === '')) continue;
@@ -1807,11 +1860,11 @@
                 let amount = 0;
 
                 if (amountCol >= 0) {
-                    amount = parseAmount(row[amountCol]);
+                    amount = isChase ? -parseAmount(row[amountCol]) : parseAmount(row[amountCol]);
                 } else if (debitCol >= 0 || creditCol >= 0) {
                     const debit = debitCol >= 0 ? parseAmount(row[debitCol]) : 0;
                     const credit = creditCol >= 0 ? parseAmount(row[creditCol]) : 0;
-                    amount = credit > 0 ? credit : -Math.abs(debit);
+                    amount = credit > 0 ? -Math.abs(credit) : Math.abs(debit);
                 }
 
                 if (!dateRaw || !desc || amount === 0) continue;
@@ -1819,21 +1872,23 @@
                 const parsedDate = parseDate(dateRaw);
                 if (!parsedDate) continue;
 
-                const defaultCat = getDefaultCategory(desc);
+                const defaultInfo = getDefaultCategory(desc);
 
-                if (/payment.*card|online\s*pmt|mobile\s*pmt|online\s*pymt|payment\s*thank\s*you/i.test(desc)) continue;
+                if (/payment.*card|online\s*py?mt|mobile\s*py?mt|payment\s*thank\s*you|capital\s*one\s*(mobile|online)\s*py?mt/i.test(desc)) continue;
                 if (/remote\s*online\s*deposit/i.test(desc)) continue;
                 if (account === 'Checking Account' && /morgan\s*stanley/i.test(desc)) continue;
+
+                const normalizedMerchant = normalizeMerchant(desc);
 
                 data.push({
                     date: parsedDate,
                     description: desc,
                     amount: amount,
-                    category: defaultCat || 'Restaurants',
-                    merchant: desc,
+                    category: (defaultInfo && defaultInfo.category) || 'Restaurants',
+                    merchant: normalizedMerchant || desc,
                     payment_method: account,
                     account: account,
-                    type: amount < 0 ? 'expense' : 'income'
+                    type: (defaultInfo && defaultInfo.type) || 'expense'
                 });
             }
 
@@ -1971,15 +2026,23 @@
             document.getElementById('modalDate').value = t.date || '';
             document.getElementById('modalDescription').value = t.description || '';
             document.getElementById('modalMerchant').value = t.merchant || '';
-            document.getElementById('modalAmount').value = Math.abs(t.amount).toFixed(2);
+            document.getElementById('modalAmount').value = t.amount;
+
+            const typeSelect = document.getElementById('modalType');
+            typeSelect.value = t.type || 'expense';
 
             const categorySelect = document.getElementById('modalCategory');
             categorySelect.innerHTML = categories.map(c => `<option value="${c.name}">${c.name}</option>`).join('') + '<option value="__new__">+ New Category</option>';
 
             if (t.merchant) {
-                const defaultCat = getDefaultCategory(t.merchant);
-                if (defaultCat && categories.find(c => c.name === defaultCat)) {
-                    categorySelect.value = defaultCat;
+                const defaultInfo = getDefaultCategory(t.merchant);
+                if (defaultInfo) {
+                    if (defaultInfo.category && categories.find(c => c.name === defaultInfo.category)) {
+                        categorySelect.value = defaultInfo.category;
+                    }
+                    if (defaultInfo.type) {
+                        typeSelect.value = defaultInfo.type;
+                    }
                 }
             }
             if (t.category && t.category !== 'Uncategorized' && categories.find(c => c.name === t.category)) {
@@ -2006,6 +2069,7 @@
             const description = document.getElementById('modalDescription').value.trim();
             const amount = parseFloat(document.getElementById('modalAmount').value);
             const date = document.getElementById('modalDate').value;
+            const type = document.getElementById('modalType').value;
 
             if (category === '__new__') {
                 const newName = document.getElementById('newCategoryName').value.trim();
@@ -2022,12 +2086,13 @@
             if (date) pendingImport[currentTransactionIndex].date = date;
             if (merchant) {
                 pendingImport[currentTransactionIndex].merchant = merchant;
-                saveMerchantDefault(merchant, category);
+                saveMerchantDefault(merchant, category, type);
             }
             if (description) pendingImport[currentTransactionIndex].description = description;
-            if (!isNaN(amount) && amount > 0) {
+            if (!isNaN(amount)) {
                 pendingImport[currentTransactionIndex].amount = amount;
             }
+            if (type) pendingImport[currentTransactionIndex].type = type;
 
             showCategoryModal(currentTransactionIndex + 1);
         });
