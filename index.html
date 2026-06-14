@@ -602,7 +602,9 @@
                     if (cat.bankBalances[month] !== undefined) {
                         balance = cat.bankBalances[month];
                     } else {
-                        balance += cat.cumulativeAmount;
+                        const prevMonth = getPreviousMonth(month);
+                        const prevSpending = prevMonth ? getMonthCategorySpending(cat.name, prevMonth) : 0;
+                        balance = balance - prevSpending + cat.cumulativeAmount;
                         cat.bankBalances[month] = balance;
                     }
                 }
@@ -626,7 +628,8 @@
                 if (cat.isCumulative && cat.bankBalances[month] === undefined) {
                     const prevMonth = getPreviousMonth(month);
                     const prevBalance = prevMonth ? (cat.bankBalances[prevMonth] || 0) : 0;
-                    cat.bankBalances[month] = prevBalance + cat.cumulativeAmount;
+                    const prevSpending = prevMonth ? getMonthCategorySpending(cat.name, prevMonth) : 0;
+                    cat.bankBalances[month] = prevBalance - prevSpending + cat.cumulativeAmount;
                     changed = true;
                 }
             });
@@ -642,6 +645,12 @@
                 return (parseInt(year) - 1) + '-12';
             }
             return year + '-' + prevMonth.toString().padStart(2, '0');
+        }
+
+        function getMonthCategorySpending(catName, month) {
+            return transactions
+                .filter(t => t.date && t.date.startsWith(month) && t.category === catName && (t.type === 'expense' || t.amount < 0))
+                .reduce((sum, t) => sum + Math.abs(parseFloat(t.amount) || 0), 0);
         }
 
         function getCategoryColor(catName) {
