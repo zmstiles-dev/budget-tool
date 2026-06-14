@@ -87,6 +87,22 @@
         .empty-state { text-align:center;padding:40px;color:#666; }
         .toggle-switch { display:flex;align-items:center;gap:10px; }
         .toggle-switch input { width:auto; }
+        .month-calendar { background:white;border:1px solid #ddd;border-radius:8px;padding:12px;box-shadow:0 2px 4px rgba(0,0,0,0.06);display:inline-block;min-width:280px; }
+        .month-calendar-header { display:flex;align-items:center;justify-content:space-between;margin-bottom:12px; }
+        .month-calendar-header #calYearLabel { font-size:1.1rem;font-weight:600;color:#2c3e50;min-width:60px;text-align:center; }
+        .month-cal-nav { background:none;border:1px solid #ddd;border-radius:6px;padding:4px 12px;cursor:pointer;font-size:1rem;color:#555;transition:all 0.15s; }
+        .month-cal-nav:hover { background:#f0f0f0;border-color:#bbb; }
+        .month-calendar-grid { display:grid;grid-template-columns:repeat(4,1fr);gap:6px; }
+        .month-calendar-grid button { padding:10px 4px;border:1px solid #eee;border-radius:6px;background:#fafafa;cursor:pointer;font-size:0.82rem;color:#444;transition:all 0.15s;text-align:center; }
+        .month-calendar-grid button:hover { background:#e8f0fe;border-color:#3498db; }
+        .month-calendar-grid button.selected { background:#3498db;color:white;border-color:#2980b9;font-weight:600; }
+        .month-calendar-grid button.no-data { color:#ccc;background:#f9f9f9; }
+        .month-calendar-grid button.no-data:hover { background:#f0f0f0;color:#999; }
+        .split-row { display:flex;gap:8px;align-items:center;margin-bottom:8px; }
+        .split-row select, .split-row input { padding:6px;border:1px solid #ddd;border-radius:4px;font-size:0.85rem; }
+        .split-row select { flex:2; }
+        .split-row input { flex:1; }
+        .split-row button { padding:4px 8px;font-size:0.8rem; }
     </style>
 </head>
 <body>
@@ -101,14 +117,21 @@
 
         <main class="main-content">
         <div id="monthly" class="panel active">
-            <div class="filters" style="margin-bottom: 20px;">
-                <select id="monthFilter"></select>
-            </div>
-
-            <div id="monthlySummary" style="display:flex;justify-content:space-between;padding:20px;background:linear-gradient(135deg,#667eea,#764ba2);border-radius:12px;margin-bottom:20px;color:white;">
-                <div style="text-align:center;"><div style="font-size:0.9rem;opacity:0.9;">Monthly Income</div><div id="monthSummaryIncome" style="font-size:1.8rem;font-weight:700;">$0.00</div></div>
-                <div style="text-align:center;"><div style="font-size:0.9rem;opacity:0.9;">Monthly Spent</div><div id="monthSummarySpent" style="font-size:1.8rem;font-weight:700;">$0.00</div></div>
-                <div style="text-align:center;"><div style="font-size:0.9rem;opacity:0.9;">Monthly Saved</div><div id="monthSummarySaved" style="font-size:1.8rem;font-weight:700;">$0.00</div></div>
+            <input type="hidden" id="monthFilter">
+            <div style="display:flex;gap:20px;align-items:stretch;margin-bottom:20px;">
+                <div class="month-calendar" style="align-self:stretch;display:flex;flex-direction:column;justify-content:center;">
+                    <div class="month-calendar-header">
+                        <button class="month-cal-nav" id="calPrevYear">&lt;</button>
+                        <span id="calYearLabel"></span>
+                        <button class="month-cal-nav" id="calNextYear">&gt;</button>
+                    </div>
+                    <div class="month-calendar-grid" id="calGrid"></div>
+                </div>
+                <div id="monthlySummary" style="flex:1;display:flex;justify-content:space-between;padding:20px;background:linear-gradient(135deg,#667eea,#764ba2);border-radius:12px;color:white;">
+                    <div style="text-align:center;"><div style="font-size:0.9rem;opacity:0.9;">Monthly Income</div><div id="monthSummaryIncome" style="font-size:1.8rem;font-weight:700;">$0.00</div></div>
+                    <div style="text-align:center;"><div style="font-size:0.9rem;opacity:0.9;">Monthly Spent</div><div id="monthSummarySpent" style="font-size:1.8rem;font-weight:700;">$0.00</div></div>
+                    <div style="text-align:center;"><div style="font-size:0.9rem;opacity:0.9;">Monthly Saved</div><div id="monthSummarySaved" style="font-size:1.8rem;font-weight:700;">$0.00</div></div>
+                </div>
             </div>
             <div class="grid" style="grid-template-columns: 1fr 1fr; gap: 20px; margin-bottom: 20px;">
                 <div>
@@ -146,6 +169,14 @@
                     </select>
                     <select id="transCategoryFilter">
                         <option value="all">All Categories</option>
+                    </select>
+                    <select id="transSortFilter">
+                        <option value="date-desc">Date (Newest)</option>
+                        <option value="date-asc">Date (Oldest)</option>
+                        <option value="amount-desc">Amount (Highest)</option>
+                        <option value="amount-asc">Amount (Lowest)</option>
+                        <option value="name-asc">Name (A-Z)</option>
+                        <option value="name-desc">Name (Z-A)</option>
                     </select>
                 </div>
                 <div class="transactions-list" id="transactionsList"></div>
@@ -200,20 +231,27 @@
                     <p>Drag & drop CSV file(s) here or click to browse</p>
                     <input type="file" id="fileInput" accept=".csv" multiple hidden>
                 </div>
+            </div>
+            <div class="card" style="margin-top: 20px;">
+                <h3>Import History</h3>
+                <div class="drop-zone" id="historyDropZone" style="margin-top: 10px;">
+                    <p>Drag & drop CSV file(s) here or click to browse</p>
+                    <input type="file" id="historyFileInput" accept=".csv" multiple hidden>
+                </div>
                 <div id="importPreview" class="hidden" style="margin-top: 20px;">
                     <h4>Preview</h4>
                     <div id="importStats" style="margin: 15px 0; padding: 15px; background: #f8f9fa; border-radius: 6px;"></div>
                     <button class="btn btn-primary" id="confirmImport">Import Transactions</button>
                 </div>
                 <div style="margin-top: 20px; padding-top: 20px; border-top: 1px solid #eee;">
-                    <button class="btn btn-secondary" onclick="clearAllData()">Clear All Data</button>
+                    <button class="btn btn-danger" onclick="clearAllData()">Clear All Data</button>
                 </div>
                 <div style="margin-top: 20px; padding-top: 20px; border-top: 1px solid #eee;">
                     <button class="btn btn-primary" onclick="exportData()">Export Data</button>
                     <button class="btn btn-primary" onclick="document.getElementById('dataFileInput').click()" style="margin-left: 10px;">Import Data</button>
                     <input type="file" id="dataFileInput" accept=".json" hidden onchange="importData(this)">
                 </div>
-                
+            </div>
         </div>
         </main>
     </div>
@@ -222,26 +260,99 @@
 
     <div class="modal" id="categoryModal">
         <div class="modal-content">
-            <h2>Categorize Transaction</h2>
+            <h2>Review Transaction <span id="reviewProgress" style="font-size:0.9rem;font-weight:400;color:#666;"></span></h2>
+            <div class="form-group">
+                <label>Account</label>
+                <div id="modalAccount" style="padding: 10px; background: #f8f9fa; border-radius: 4px; font-weight: 500;"></div>
+            </div>
+            <div class="form-group">
+                <label>Date</label>
+                <input type="date" id="modalDate" style="width:100%;padding:8px;border:1px solid #ddd;border-radius:4px;">
+            </div>
             <div class="form-group">
                 <label>Description</label>
-                <div id="modalDescription" style="padding: 10px; background: #f8f9fa; border-radius: 4px;"></div>
+                <input type="text" id="modalDescription" style="width:100%;padding:8px;border:1px solid #ddd;border-radius:4px;">
+            </div>
+            <div class="form-group">
+                <label>Merchant</label>
+                <input type="text" id="modalMerchant" placeholder="Enter merchant name" style="width:100%;padding:8px;border:1px solid #ddd;border-radius:4px;">
             </div>
             <div class="form-group">
                 <label>Amount</label>
-                <div id="modalAmount" style="padding: 10px; background: #f8f9fa; border-radius: 4px;"></div>
+                <input type="number" step="0.01" id="modalAmount" style="width:100%;padding:8px;border:1px solid #ddd;border-radius:4px;">
+            </div>
+            <div class="form-group">
+                <label>Type</label>
+                <select id="modalType" style="width:100%;padding:8px;border:1px solid #ddd;border-radius:4px;">
+                    <option value="expense">Expense</option>
+                    <option value="income">Income</option>
+                </select>
             </div>
             <div class="form-group">
                 <label>Category</label>
-                <select id="modalCategory"></select>
+                <select id="modalCategory" style="width:100%;padding:8px;border:1px solid #ddd;border-radius:4px;"></select>
+            </div>
+            <div class="form-group" id="newCategoryRow" style="display:none;">
+                <label>New Category Name</label>
+                <input type="text" id="newCategoryName" placeholder="Enter category name" style="width:100%;padding:8px;border:1px solid #ddd;border-radius:4px;">
+            </div>
+            <div id="splitSection" style="display:none;margin-top:15px;padding:15px;background:#f8f9fa;border-radius:8px;">
+                <h4 style="margin-bottom:10px;">Split Transaction</h4>
+                <div id="splitRows"></div>
+                <div style="display:flex;justify-content:space-between;align-items:center;margin-top:10px;">
+                    <span id="splitRemaining" style="font-size:0.9rem;color:#666;"></span>
+                    <div style="display:flex;gap:8px;">
+                        <button class="btn btn-secondary" id="addSplitRow" style="padding:5px 12px;font-size:0.85rem;">+ Add Split</button>
+                        <button class="btn btn-success" id="confirmSplit" style="padding:5px 12px;font-size:0.85rem;">Confirm Split</button>
+                    </div>
+                </div>
+            </div>
+            <div style="display: flex; gap: 10px; justify-content: flex-end; margin-top: 20px;">
+                <button class="btn btn-danger" id="deleteTransaction">Delete</button>
+                <button class="btn btn-secondary" id="splitTransaction">Split</button>
+                <button class="btn btn-success" id="saveTransaction">Approve</button>
+            </div>
+        </div>
+    </div>
+
+    <div class="modal" id="editTransactionModal">
+        <div class="modal-content">
+            <h2>Edit Transaction</h2>
+            <div class="form-group">
+                <label>Date</label>
+                <input type="date" id="editTransDate" style="width:100%;padding:8px;border:1px solid #ddd;border-radius:4px;">
             </div>
             <div class="form-group">
-                <label>Merchant (for auto-categorization)</label>
-                <input type="text" id="modalMerchant" placeholder="Enter merchant name">
+                <label>Description</label>
+                <input type="text" id="editTransDescription" style="width:100%;padding:8px;border:1px solid #ddd;border-radius:4px;">
             </div>
-            <div style="display: flex; gap: 10px; justify-content: flex-end;">
-                <button class="btn btn-secondary" id="skipTransaction">Skip</button>
-                <button class="btn btn-success" id="saveTransaction">Save</button>
+            <div class="form-group">
+                <label>Merchant</label>
+                <input type="text" id="editTransMerchant" style="width:100%;padding:8px;border:1px solid #ddd;border-radius:4px;">
+            </div>
+            <div class="form-group">
+                <label>Amount</label>
+                <input type="number" step="0.01" id="editTransAmount" style="width:100%;padding:8px;border:1px solid #ddd;border-radius:4px;">
+            </div>
+            <div class="form-group">
+                <label>Type</label>
+                <select id="editTransType" style="width:100%;padding:8px;border:1px solid #ddd;border-radius:4px;">
+                    <option value="expense">Expense</option>
+                    <option value="income">Income</option>
+                </select>
+            </div>
+            <div class="form-group">
+                <label>Category</label>
+                <select id="editTransCategory" style="width:100%;padding:8px;border:1px solid #ddd;border-radius:4px;"></select>
+            </div>
+            <div class="form-group">
+                <label>Account</label>
+                <input type="text" id="editTransAccount" style="width:100%;padding:8px;border:1px solid #ddd;border-radius:4px;">
+            </div>
+            <div style="display: flex; gap: 10px; justify-content: flex-end; margin-top: 20px;">
+                <button class="btn btn-danger" id="editTransDelete">Delete</button>
+                <button class="btn btn-secondary" id="editTransCancel">Cancel</button>
+                <button class="btn btn-success" id="editTransSave">Save</button>
             </div>
         </div>
     </div>
@@ -338,83 +449,24 @@
         let pendingImport = [];
         let pendingImportBudgets = {};
         let currentTransactionIndex = 0;
+
+        const accountMap = {
+            '4720': 'CFF',
+            '4004': 'CFU',
+            '9981': 'CSP',
+            '1963': 'CSP',
+            '0071': 'Ven X',
+            '71': 'Ven X',
+            '7418': 'Ven X',
+            '0820': 'Checking Account'
+        };
+
+        let newImportQueue = [];
+        let newImportIndex = 0;
+        let newImportAccount = '';
         let monthlyChart, yearlyChart;
 
         const categoryColorPalette = ['#3498db', '#e74c3c', '#2ecc71', '#f39c12', '#9b59b6', '#1abc9c', '#34495e', '#e67e22', '#c0392b', '#27ae60', '#2980b9', '#8e44ad', '#e91e63', '#00bcd4', '#ff5722', '#795548', '#607d8b', '#9c27b0', '#4caf50', '#ff9800', '#03a9f4', '#f44336', '#ffc107', '#cddc39', '#009688', '#673ab7', '#3f51b5', '#2196f3', '#ffeb3b', '#8bc34a', '#263238', '#9e9e9e', '#f06292', '#ba68c8', '#9575cd', '#7986cb', '#64b5f6', '#4fc3f7', '#4dd0e1', '#4db6ac', '#81c784', '#aed581', '#dce775', '#fff176', '#ffd54f', '#ffb74d', '#ff8a65', '#a1887f', '#90a4ae', '#f48fb1', '#ce93d8', '#b39ddb', '#9fa8da', '#82b1ff', '#81d4fa', '#80deea', '#80cbc4', '#a5d6a7', '#c5e1a5', '#dce775', '#e6ee9c', '#fff59d', '#ffe082', '#ffcc80', '#ffab91', '#bcaaa4', '#cfd8dc'];
-
-        const defaultTransactions = [
-            {date:'2026-01-30',description:'Maddie Paycheck',amount:4534.42,category:'Income',merchant:'Maddie Paycheck',payment_method:'Direct Deposit',type:'income'},
-            {date:'2026-01-09',description:'Zach Paycheck 1',amount:2270.01,category:'Income',merchant:'Zach Paycheck 1',payment_method:'Direct Deposit',type:'income'},
-            {date:'2026-01-23',description:'Zach Paycheck 2',amount:2510.69,category:'Income',merchant:'Zach Paycheck 2',payment_method:'Direct Deposit',type:'income'},
-            {date:'2026-01-05',description:'Gifts Reimbursement',amount:-20.00,category:'Gifts',merchant:'Zelle - Greg Stiles',payment_method:'Checking Account',type:'expense'},
-            {date:'2026-01-05',description:'GD Battery Replacement',amount:182.19,category:'Car Maintenance',merchant:'Higher Standards Auto',payment_method:'Check',type:'expense'},
-            {date:'2026-01-17',description:'Gym Membership',amount:10.00,category:'Gym',merchant:'Planet Fitness',payment_method:'Checking Account',type:'expense'},
-            {date:'2026-01-02',description:'Lunch',amount:36.99,category:'Restaurants',merchant:'Sushi Remix',payment_method:'CFF',type:'expense'},
-            {date:'2026-01-08',description:'Dinner',amount:14.84,category:'Restaurants',merchant:'Pizza Hut',payment_method:'CFF',type:'expense'},
-            {date:'2026-01-09',description:'Cookies',amount:13.86,category:'Restaurants',merchant:"Chef Sergey",payment_method:'CFF',type:'expense'},
-            {date:'2026-01-03',description:'Maggie Donation',amount:102.41,category:'CRU Donation',merchant:'CRU',payment_method:'Ven X',type:'expense'},
-            {date:'2026-01-03',description:'Groceries',amount:89.71,category:'Groceries',merchant:'Costco',payment_method:'Ven X',type:'expense'},
-            {date:'2026-01-03',description:'ACV Shampoo Creatine',amount:63.56,category:'Pharmacy',merchant:'Costco',payment_method:'Ven X',type:'expense'},
-            {date:'2026-01-03',description:'Groceries',amount:35.26,category:'Groceries',merchant:'Meijer',payment_method:'Ven X',type:'expense'},
-            {date:'2026-01-03',description:'Groceries',amount:34.12,category:'Groceries',merchant:'Aldi',payment_method:'Ven X',type:'expense'},
-            {date:'2026-01-05',description:'GD Battery',amount:138.37,category:'Car Maintenance',merchant:'Autozone',payment_method:'Ven X',type:'expense'},
-            {date:'2026-01-05',description:'Medical Bills Refund',amount:-68.25,category:'Medical Bills',merchant:'Mid Michigan Health',payment_method:'Ven X',type:'expense'},
-            {date:'2026-01-06',description:'Tithe',amount:812.00,category:'Tithe',merchant:'Midland Free',payment_method:'Ven X',type:'expense'},
-            {date:'2026-01-07',description:'Insurance',amount:181.80,category:'Insurance',merchant:'State Farm',payment_method:'Ven X',type:'expense'},
-            {date:'2026-01-08',description:'Rebeca Donation',amount:39.00,category:'Rebeca Donation',merchant:'Children International',payment_method:'Ven X',type:'expense'},
-            {date:'2026-01-09',description:'Lincoln Gas',amount:37.72,category:'Gasoline',merchant:'Speedway',payment_method:'Ven X',type:'expense'},
-            {date:'2026-01-12',description:'Groceries',amount:38.77,category:'Groceries',merchant:'Aldi',payment_method:'Ven X',type:'expense'},
-            {date:'2026-01-12',description:'Matcha',amount:11.99,category:'Groceries',merchant:'Amazon',payment_method:'Ven X',type:'expense'},
-            {date:'2026-01-12',description:'Razor Head Cable',amount:53.95,category:'Shopping',merchant:'Amazon',payment_method:'Ven X',type:'expense'},
-            {date:'2026-01-12',description:'AirPods case',amount:7.94,category:'Shopping',merchant:'Amazon',payment_method:'Ven X',type:'expense'},
-            {date:'2026-01-12',description:'Battery Core Refund',amount:-22.00,category:'Car Maintenance',merchant:'Autozone',payment_method:'Ven X',type:'expense'},
-            {date:'2026-01-16',description:'Groceries',amount:6.28,category:'Groceries',merchant:'Aldi',payment_method:'Ven X',type:'expense'},
-            {date:'2026-01-17',description:'Women\'s Conference',amount:50.00,category:'Miscellaneous',merchant:'Midland Free',payment_method:'Ven X',type:'expense'},
-            {date:'2026-01-16',description:'Groceries',amount:52.25,category:'Groceries',merchant:'Costco',payment_method:'Ven X',type:'expense'},
-            {date:'2026-01-16',description:'Groceries',amount:27.72,category:'Groceries',merchant:'Aldi',payment_method:'Ven X',type:'expense'},
-            {date:'2026-01-16',description:'Internet Bill',amount:85.00,category:'Internet',merchant:'Spectrum',payment_method:'Ven X',type:'expense'},
-            {date:'2026-01-16',description:'Lincoln Gas',amount:35.65,category:'Gasoline',merchant:'Meijer',payment_method:'Ven X',type:'expense'},
-            {date:'2026-01-16',description:'Groceries',amount:49.98,category:'Groceries',merchant:'Meijer',payment_method:'Ven X',type:'expense'}
-        ];
-
-        const defaultCategories = [
-            {name:'Income',type:'income',group:null,color:'#27ae60',isCumulative:false,cumulativeAmount:0,bankBalances:{}},
-            {name:'Gifts',type:'expense',group:null,color:'#e74c3c',isCumulative:false,cumulativeAmount:0,bankBalances:{}},
-            {name:'Car Maintenance',type:'expense',group:null,color:'#3498db',isCumulative:false,cumulativeAmount:0,bankBalances:{}},
-            {name:'Gym',type:'expense',group:null,color:'#9b59b6',isCumulative:false,cumulativeAmount:0,bankBalances:{}},
-            {name:'Restaurants',type:'expense',group:null,color:'#e67e22',isCumulative:false,cumulativeAmount:0,bankBalances:{}},
-            {name:'CRU Donation',type:'expense',group:null,color:'#f39c12',isCumulative:false,cumulativeAmount:0,bankBalances:{}},
-            {name:'Groceries',type:'expense',group:null,color:'#2ecc71',isCumulative:false,cumulativeAmount:0,bankBalances:{}},
-            {name:'Pharmacy',type:'expense',group:null,color:'#1abc9c',isCumulative:false,cumulativeAmount:0,bankBalances:{}},
-            {name:'Medical Bills',type:'expense',group:null,color:'#c0392b',isCumulative:false,cumulativeAmount:0,bankBalances:{}},
-            {name:'Tithe',type:'expense',group:null,color:'#2980b9',isCumulative:false,cumulativeAmount:0,bankBalances:{}},
-            {name:'Insurance',type:'expense',group:null,color:'#8e44ad',isCumulative:false,cumulativeAmount:0,bankBalances:{}},
-            {name:'Rebeca Donation',type:'expense',group:null,color:'#34495e',isCumulative:false,cumulativeAmount:0,bankBalances:{}},
-            {name:'Gasoline',type:'expense',group:null,color:'#d35400',isCumulative:false,cumulativeAmount:0,bankBalances:{}},
-            {name:'Shopping',type:'expense',group:null,color:'#16a085',isCumulative:false,cumulativeAmount:0,bankBalances:{}},
-            {name:'Miscellaneous',type:'expense',group:null,color:'#7f8c8d',isCumulative:false,cumulativeAmount:0,bankBalances:{}},
-            {name:'Internet',type:'expense',group:null,color:'#95a5a6',isCumulative:false,cumulativeAmount:0,bankBalances:{}}
-        ];
-
-        const defaultCategoryGroups = [];
-
-        const defaultBudgets = {
-            'Groceries': {'2026-01': 400},
-            'Restaurants': {'2026-01': 250},
-            'Gasoline': {'2026-01': 200},
-            'Gym': {'2026-01': 10},
-            'Car Maintenance': {'2026-01': 250},
-            'Shopping': {'2026-01': 50},
-            'Miscellaneous': {'2026-01': 100},
-            'Internet': {'2026-01': 85},
-            'Tithe': {'2026-01': 812},
-            'CRU Donation': {'2026-01': 102.41},
-            'Rebeca Donation': {'2026-01': 39},
-            'Insurance': {'2026-01': 188.73},
-            'Pharmacy': {'2026-01': 70},
-            'Gifts': {'2026-01': 70},
-            'Medical Bills': {'2026-01': 0}
-        };
 
         function loadData() {
             const storedTrans = localStorage.getItem(TRANS_DATA_KEY);
@@ -426,14 +478,12 @@
 
             if (storedTrans && storedTrans !== '[]') {
                 transactions = JSON.parse(storedTrans);
+                migrateTransactions();
             }
 
             if (storedCat) {
                 categories = JSON.parse(storedCat);
                 categories = migrateCategories(categories);
-            } else {
-                categories = defaultCategories;
-                localStorage.setItem(CAT_DATA_KEY, JSON.stringify(categories));
             }
 
             if (storedGroups) {
@@ -475,13 +525,14 @@
                     }
                 }
             } else {
-                budgets = defaultBudgets;
+                budgets = {};
             }
 
             if (storedMerchants) {
                 merchantDefaults = JSON.parse(storedMerchants);
             }
 
+            buildMerchantDefaults();
             populateDateFilters();
             populateCategoryFilters();
             applyImportedBudgets({});
@@ -512,7 +563,16 @@
             });
         }
 
-        function initializeCumulativeBanks() {
+        function migrateTransactions() {
+            transactions = transactions.map(t => {
+                if (t.account === undefined) {
+                    t.account = t.payment_method || '';
+                }
+                return t;
+            });
+        }
+
+         function initializeCumulativeBanks() {
             const months = new Set();
             transactions.forEach(t => {
                 if (t.date && t.date.length >= 7) {
@@ -522,17 +582,35 @@
             Object.values(budgets).forEach(catBudgets => {
                 Object.keys(catBudgets).forEach(month => months.add(month));
             });
+            categories.forEach(cat => {
+                if (cat.isCumulative) {
+                    Object.keys(cat.bankBalances).forEach(month => months.add(month));
+                }
+            });
             const sortedMonths = Array.from(months).sort();
 
-            sortedMonths.forEach(month => {
-                categories.forEach(cat => {
-                    if (cat.isCumulative && budgets[cat.name] && budgets[cat.name][month] !== undefined) {
-                        cat.bankBalances[month] = budgets[cat.name][month];
+            categories.forEach(cat => {
+                if (!cat.isCumulative) return;
+                const existingMonths = Object.keys(cat.bankBalances)
+                    .filter(m => cat.bankBalances[m] !== undefined)
+                    .sort();
+                if (existingMonths.length === 0) return;
+                let balance = cat.bankBalances[existingMonths[0]];
+                const startIdx = sortedMonths.indexOf(existingMonths[0]);
+                for (let i = startIdx; i < sortedMonths.length; i++) {
+                    const month = sortedMonths[i];
+                    if (cat.bankBalances[month] !== undefined) {
+                        balance = cat.bankBalances[month];
+                    } else {
+                        const prevMonth = getPreviousMonth(month);
+                        const prevSpending = prevMonth ? getMonthCategorySpending(cat.name, prevMonth) : 0;
+                        balance = balance - prevSpending + cat.cumulativeAmount;
+                        cat.bankBalances[month] = balance;
                     }
-                });
+                }
             });
             saveCategories();
-        }
+         }
 
         function saveCategories() {
             localStorage.setItem(CAT_DATA_KEY, JSON.stringify(categories));
@@ -543,25 +621,22 @@
             localStorage.setItem(CAT_COLORS_KEY, JSON.stringify(categoryColors));
         }
 
-        function addCumulativeBankAmounts(month) {
+         function addCumulativeBankAmounts(month) {
             if (!month) return;
             let changed = false;
             categories.forEach(cat => {
                 if (cat.isCumulative && cat.bankBalances[month] === undefined) {
-                    if (budgets[cat.name] && budgets[cat.name][month] !== undefined) {
-                        cat.bankBalances[month] = budgets[cat.name][month];
-                    } else {
-                        const prevMonth = getPreviousMonth(month);
-                        const prevBalance = prevMonth ? (cat.bankBalances[prevMonth] || 0) : 0;
-                        cat.bankBalances[month] = prevBalance + cat.cumulativeAmount;
-                    }
+                    const prevMonth = getPreviousMonth(month);
+                    const prevBalance = prevMonth ? (cat.bankBalances[prevMonth] || 0) : 0;
+                    const prevSpending = prevMonth ? getMonthCategorySpending(cat.name, prevMonth) : 0;
+                    cat.bankBalances[month] = prevBalance - prevSpending + cat.cumulativeAmount;
                     changed = true;
                 }
             });
             if (changed) {
                 saveCategories();
             }
-        }
+         }
 
         function getPreviousMonth(monthStr) {
             const [year, month] = monthStr.split('-');
@@ -572,24 +647,15 @@
             return year + '-' + prevMonth.toString().padStart(2, '0');
         }
 
+        function getMonthCategorySpending(catName, month) {
+            return transactions
+                .filter(t => t.date && t.date.startsWith(month) && t.category === catName && (t.type === 'expense' || t.amount < 0))
+                .reduce((sum, t) => sum + Math.abs(parseFloat(t.amount) || 0), 0);
+        }
+
         function getCategoryColor(catName) {
             const cat = categories.find(c => c.name === catName);
             return cat ? cat.color : (categoryColors[catName] || null);
-        }
-
-        function loadSampleData() {
-            transactions = defaultTransactions;
-            categories = defaultCategories;
-            budgets = defaultBudgets;
-            categoryGroups = defaultCategoryGroups;
-            merchantDefaults = {};
-            saveData();
-            localStorage.setItem(STORAGE_KEY, JSON.stringify(merchantDefaults));
-            saveCategories();
-            populateDateFilters();
-            populateCategoryFilters();
-            renderAll();
-            alert('Sample data loaded!');
         }
 
         function renderCategories() {
@@ -896,35 +962,77 @@
             document.getElementById('cumulativeOptions').style.display = this.checked ? 'block' : 'none';
         });
 
+        const monthShortNames = ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'];
+        let calendarYear = new Date().getFullYear();
+        let selectedMonth = '';
+        let availableMonths = new Set();
+
         function populateDateFilters() {
-            const months = new Set();
+            availableMonths.clear();
             const years = new Set();
 
             transactions.forEach(t => {
                 if (t.date && t.date.length >= 7) {
-                    const ym = t.date.substring(0, 7);
-                    months.add(ym);
+                    availableMonths.add(t.date.substring(0, 7));
                     years.add(t.date.substring(0, 4));
                 }
             });
 
-            const sortedMonths = Array.from(months).sort();
             const sortedYears = Array.from(years).sort().reverse();
-
-            const monthNames = ['', 'January', 'February', 'March', 'April', 'May', 'June', 'July', 'August', 'September', 'October', 'November', 'December'];
-
-            const monthOptions = sortedMonths.map(m => {
-                const [y, mm] = m.split('-');
-                return `<option value="${m}">${monthNames[parseInt(mm)]} ${y}</option>`;
-            }).join('');
+            const sortedMonths = Array.from(availableMonths).sort();
 
             const yearOptions = sortedYears.map(y => `<option value="${y}">${y}</option>`).join('');
-
-            document.getElementById('monthFilter').innerHTML = monthOptions;
             document.getElementById('yearFilter').innerHTML = yearOptions;
-            if (sortedMonths.length > 0) document.getElementById('monthFilter').value = sortedMonths[sortedMonths.length - 1];
             if (sortedYears.length > 0) document.getElementById('yearFilter').value = sortedYears[0];
+
+            if (sortedMonths.length > 0) {
+                selectedMonth = sortedMonths[sortedMonths.length - 1];
+                calendarYear = parseInt(selectedMonth.substring(0, 4));
+            } else {
+                selectedMonth = '';
+                calendarYear = new Date().getFullYear();
+            }
+
+            document.getElementById('monthFilter').value = selectedMonth;
+            renderCalendar();
         }
+
+        function renderCalendar() {
+            document.getElementById('calYearLabel').textContent = calendarYear;
+            const grid = document.getElementById('calGrid');
+            grid.innerHTML = '';
+
+            for (let m = 1; m <= 12; m++) {
+                const ym = calendarYear + '-' + String(m).padStart(2, '0');
+                const btn = document.createElement('button');
+                btn.textContent = monthShortNames[m - 1];
+                btn.type = 'button';
+                if (ym === selectedMonth) btn.classList.add('selected');
+                if (!availableMonths.has(ym)) btn.classList.add('no-data');
+                btn.addEventListener('click', () => selectMonth(ym));
+                grid.appendChild(btn);
+            }
+        }
+
+        function selectMonth(yearMonth) {
+            if (!availableMonths.has(yearMonth)) return;
+            selectedMonth = yearMonth;
+            calendarYear = parseInt(yearMonth.substring(0, 4));
+            document.getElementById('monthFilter').value = yearMonth;
+            renderCalendar();
+            addCumulativeBankAmounts(yearMonth);
+            renderAll();
+        }
+
+        document.getElementById('calPrevYear').addEventListener('click', () => {
+            calendarYear--;
+            renderCalendar();
+        });
+
+        document.getElementById('calNextYear').addEventListener('click', () => {
+            calendarYear++;
+            renderCalendar();
+        });
 
         function saveData() {
             localStorage.setItem(TRANS_DATA_KEY, JSON.stringify(transactions));
@@ -932,15 +1040,71 @@
             localStorage.setItem(BUDGET_DATA_KEY, JSON.stringify(budgets));
         }
 
-        function saveMerchantDefault(merchant, category) {
+        function saveMerchantDefault(merchant, category, type) {
             if (merchant) {
-                merchantDefaults[merchant.toLowerCase()] = category;
+                const entry = { category, type };
+                merchantDefaults[merchant.toLowerCase()] = entry;
+                const normalized = normalizeMerchant(merchant);
+                if (normalized && normalized !== merchant.toLowerCase()) {
+                    merchantDefaults[normalized] = entry;
+                }
                 localStorage.setItem(STORAGE_KEY, JSON.stringify(merchantDefaults));
             }
         }
 
         function getDefaultCategory(merchant) {
-            return merchantDefaults[merchant.toLowerCase()] || null;
+            if (!merchant) return null;
+            const key = merchant.toLowerCase();
+            const raw = merchantDefaults[key] || null;
+            const result = resolveDefaultEntry(raw);
+            if (result) return result;
+            const normalized = normalizeMerchant(merchant);
+            for (const k in merchantDefaults) {
+                const entry = resolveDefaultEntry(merchantDefaults[k]);
+                if (entry && normalizeMerchant(k) === normalized) return entry;
+            }
+            return null;
+        }
+
+        function resolveDefaultEntry(entry) {
+            if (!entry) return null;
+            if (typeof entry === 'string') return { category: entry, type: null };
+            if (entry.category) return entry;
+            return null;
+        }
+
+        function normalizeMerchant(name) {
+            if (!name) return '';
+            let s = name.toLowerCase()
+                .replace(/[#*\-_.]/g, ' ')
+                .replace(/\b\d{3,}\b/g, '')
+                .replace(/\s+/g, ' ')
+                .trim();
+            const prefixes = ['sq *', 'paypal *'];
+            for (const p of prefixes) {
+                if (s.startsWith(p)) { s = s.slice(p.length).trim(); break; }
+            }
+            s = s.replace(/\s+[a-z]+\d+[a-z0-9]*$/i, '').trim();
+            return s;
+        }
+
+        function buildMerchantDefaults() {
+            const merchantLastUsed = {};
+            transactions.forEach(t => {
+                if (t.merchant && t.category && t.category !== 'Uncategorized') {
+                    const key = normalizeMerchant(t.merchant);
+                    const existing = merchantLastUsed[key];
+                    if (!existing || t.date > existing.date) {
+                        merchantLastUsed[key] = { category: t.category, type: t.type, date: t.date };
+                    }
+                }
+            });
+            Object.keys(merchantLastUsed).forEach(key => {
+                if (!merchantDefaults[key]) {
+                    merchantDefaults[key] = { category: merchantLastUsed[key].category, type: merchantLastUsed[key].type };
+                }
+            });
+            localStorage.setItem(STORAGE_KEY, JSON.stringify(merchantDefaults));
         }
 
         function populateCategoryFilters() {
@@ -981,8 +1145,9 @@
             const typeFilter = document.getElementById('transTypeFilter').value;
             const catFilter = document.getElementById('transCategoryFilter').value;
             const monthFilter = document.getElementById('monthFilter').value;
+            const sortValue = document.getElementById('transSortFilter').value;
 
-            return transactions.filter(t => {
+            const filtered = transactions.filter(t => {
                 if (t.type === 'income') return false;
                 const tDate = t.date.substring(0, 7);
                 const tType = t.type || (t.amount >= 0 ? 'income' : 'expense');
@@ -991,6 +1156,24 @@
                 if (monthFilter && tDate !== monthFilter) return false;
                 return true;
             });
+
+            const [field, dir] = sortValue.split('-');
+            filtered.sort((a, b) => {
+                if (field === 'date') {
+                    return dir === 'desc' ? b.date.localeCompare(a.date) : a.date.localeCompare(b.date);
+                } else if (field === 'amount') {
+                    const aVal = Math.abs(a.amount);
+                    const bVal = Math.abs(b.amount);
+                    return dir === 'desc' ? bVal - aVal : aVal - bVal;
+                } else if (field === 'name') {
+                    const aName = (a.description || '').toLowerCase();
+                    const bName = (b.description || '').toLowerCase();
+                    return dir === 'desc' ? bName.localeCompare(aName) : aName.localeCompare(bName);
+                }
+                return 0;
+            });
+
+            return filtered;
         }
 
         function getMonthData(yearMonth) {
@@ -1003,8 +1186,11 @@
 
         function renderTransactions() {
             const list = document.getElementById('transactionsList');
-            const filtered = getFilteredTransactions();
-            list.innerHTML = filtered.map(t => {
+            const filtered = getFilteredTransactions().map(t => ({
+                t,
+                idx: transactions.indexOf(t)
+            }));
+            list.innerHTML = filtered.map(({t, idx}) => {
                 const cat = (t.category || '').trim();
                 const isIncome = cat === 'Income';
                 const amountVal = parseFloat(t.amount);
@@ -1023,7 +1209,7 @@
                 }
                 
                 return `
-                <div class="transaction">
+                <div class="transaction" style="cursor:pointer;" onclick="openEditModal(${idx})">
                     <div>
                         <div class="date">${t.date}</div>
                         <div>${t.description}</div>
@@ -1034,10 +1220,67 @@
                             ${amountPrefix}$${Math.abs(amountVal).toFixed(2)}
                         </div>
                         <span class="category">${t.category || 'Uncategorized'}</span>
+                        ${t.account ? `<span style="color:#999;font-size:0.75rem;margin-left:6px;">${t.account}</span>` : ''}
                     </div>
                 </div>
             `}).join('');
         }
+
+        let editingTransactionIndex = -1;
+
+        function openEditModal(index) {
+            editingTransactionIndex = index;
+            const t = transactions[index];
+            if (!t) return;
+
+            document.getElementById('editTransDate').value = t.date || '';
+            document.getElementById('editTransDescription').value = t.description || '';
+            document.getElementById('editTransMerchant').value = t.merchant || '';
+            document.getElementById('editTransAmount').value = parseFloat(t.amount).toFixed(2);
+            document.getElementById('editTransAccount').value = t.account || t.payment_method || '';
+
+            const typeSelect = document.getElementById('editTransType');
+            typeSelect.value = t.type || 'expense';
+
+            const categorySelect = document.getElementById('editTransCategory');
+            categorySelect.innerHTML = categories.map(c => `<option value="${c.name}">${c.name}</option>`).join('');
+            if (t.category && categories.find(c => c.name === t.category)) {
+                categorySelect.value = t.category;
+            }
+
+            document.getElementById('editTransactionModal').classList.add('active');
+        }
+
+        document.getElementById('editTransCancel').addEventListener('click', () => {
+            document.getElementById('editTransactionModal').classList.remove('active');
+        });
+
+        document.getElementById('editTransDelete').addEventListener('click', () => {
+            if (editingTransactionIndex < 0) return;
+            if (!confirm('Delete this transaction?')) return;
+            transactions.splice(editingTransactionIndex, 1);
+            saveTransactionsToStorage();
+            document.getElementById('editTransactionModal').classList.remove('active');
+            renderAll();
+        });
+
+        document.getElementById('editTransSave').addEventListener('click', () => {
+            if (editingTransactionIndex < 0) return;
+            const t = transactions[editingTransactionIndex];
+
+            t.date = document.getElementById('editTransDate').value || t.date;
+            t.description = document.getElementById('editTransDescription').value.trim() || t.description;
+            t.merchant = document.getElementById('editTransMerchant').value.trim();
+            t.amount = parseFloat(document.getElementById('editTransAmount').value) || t.amount;
+            t.category = document.getElementById('editTransCategory').value || t.category;
+            t.account = document.getElementById('editTransAccount').value.trim();
+            t.payment_method = t.account;
+            t.type = document.getElementById('editTransType').value || t.type;
+
+            saveTransactionsToStorage();
+            document.getElementById('editTransactionModal').classList.add('active');
+            renderAll();
+        });
 
         function renderCharts() {
             const month = document.getElementById('monthFilter').value;
@@ -1048,7 +1291,9 @@
             const catTotals = {};
             monthData.forEach(t => {
                 const cat = t.category || 'Uncategorized';
-                catTotals[cat] = (catTotals[cat] || 0) + Math.abs(t.amount);
+                const catInfo = categories.find(c => c.name === cat);
+                const isIncome = cat === 'Income' || (catInfo && catInfo.type === 'income');
+                catTotals[cat] = (catTotals[cat] || 0) + (isIncome ? Math.abs(t.amount) : t.amount);
             });
 
             const sortedCatKeys = Object.keys(catTotals).sort((a, b) => catTotals[b] - catTotals[a]);
@@ -1056,7 +1301,9 @@
             const yearTotals = {};
             yearData.forEach(t => {
                 const cat = t.category || 'Uncategorized';
-                yearTotals[cat] = (yearTotals[cat] || 0) + Math.abs(t.amount);
+                const catInfo = categories.find(c => c.name === cat);
+                const isIncome = cat === 'Income' || (catInfo && catInfo.type === 'income');
+                yearTotals[cat] = (yearTotals[cat] || 0) + (isIncome ? Math.abs(t.amount) : t.amount);
             });
 
             const sortedYearKeys = Object.keys(yearTotals).sort((a, b) => yearTotals[b] - yearTotals[a]);
@@ -1121,7 +1368,9 @@
             const catTotals = {};
             monthData.forEach(t => {
                 const cat = t.category || 'Uncategorized';
-                catTotals[cat] = (catTotals[cat] || 0) + Math.abs(t.amount);
+                const catInfo = categories.find(c => c.name === cat);
+                const isIncome = cat === 'Income' || (catInfo && catInfo.type === 'income');
+                catTotals[cat] = (catTotals[cat] || 0) + (isIncome ? Math.abs(t.amount) : t.amount);
             });
 
             let totalBudget = 0;
@@ -1163,7 +1412,7 @@
                 } else {
                     budget = budgets[cat][month] !== undefined ? budgets[cat][month] : 0;
                 }
-                return actual > 0 || budget > 0;
+                return actual > 0 || budget > 0 || (isCumulative && budget !== 0);
             }).map(cat => {
                 const catInfo = categories.find(c => c.name === cat);
                 const isCumulative = catInfo && catInfo.isCumulative;
@@ -1174,12 +1423,12 @@
                     const bank = catInfo.bankBalances[month] || 0;
                     budget = bank;
                     remaining = budget - actual;
-                    pct = budget > 0 ? (actual / budget) * 100 : 0;
+                    pct = budget > 0 && actual > 0 ? (actual / budget) * 100 : 0;
                     budgetInput = `<span style="font-weight:600;color:#856404;">Bank: $${budget.toFixed(2)}</span>`;
                 } else {
                     budget = budgets[cat][month] !== undefined ? budgets[cat][month] : 0;
                     remaining = budget - actual;
-                    pct = budget > 0 ? (actual / budget) * 100 : 0;
+                    pct = budget > 0 && actual > 0 ? (actual / budget) * 100 : 0;
                     budgetInput = `Budget: <input type="number" class="budget-input" data-cat="${cat}" data-month="${month}" value="${budget}" style="width:80px;padding:4px;border:1px solid #ddd;border-radius:4px;">`;
                 }
 
@@ -1309,7 +1558,7 @@
                 }
                 const actual = catTotals[cat] || 0;
                 const remaining = budget - actual;
-                const pct = budget > 0 ? (actual / budget) * 100 : 0;
+                const pct = budget > 0 && actual > 0 ? (actual / budget) * 100 : 0;
                 const catTransactions = isCumulative ? yearData.filter(t => t.category === cat) : [];
                 const transactionDebug = isCumulative ? catTransactions.map(t => `<div style="font-size:0.7rem;color:#999;padding-left:10px;">${t.date} ${t.description}: $${Math.abs(t.amount).toFixed(2)}</div>`).join('') : '';
                 return `
@@ -1351,7 +1600,7 @@
             const year = document.getElementById('yearFilter').value;
             const yearTransactions = transactions.filter(t => t.date.startsWith(year));
             const income = yearTransactions.filter(t => t.category === 'Income').reduce((sum, t) => sum + Math.abs(t.amount), 0);
-            const spent = yearTransactions.filter(t => t.category !== 'Income' && t.type !== 'income').reduce((sum, t) => sum + Math.abs(t.amount), 0);
+            const spent = yearTransactions.filter(t => t.category !== 'Income' && t.type !== 'income').reduce((sum, t) => sum + t.amount, 0);
             const saved = income - spent;
             document.getElementById('summaryIncome').textContent = '$' + income.toFixed(2);
             document.getElementById('summarySpent').textContent = '$' + spent.toFixed(2);
@@ -1363,7 +1612,7 @@
             const month = document.getElementById('monthFilter').value;
             const monthTransactions = transactions.filter(t => t.date.startsWith(month));
             const income = monthTransactions.filter(t => t.category === 'Income').reduce((sum, t) => sum + Math.abs(t.amount), 0);
-            const spent = monthTransactions.filter(t => t.category !== 'Income' && t.type !== 'income').reduce((sum, t) => sum + Math.abs(t.amount), 0);
+            const spent = monthTransactions.filter(t => t.category !== 'Income' && t.type !== 'income').reduce((sum, t) => sum + t.amount, 0);
             const saved = income - spent;
             document.getElementById('monthSummaryIncome').textContent = '$' + income.toFixed(2);
             document.getElementById('monthSummarySpent').textContent = '$' + spent.toFixed(2);
@@ -1379,15 +1628,17 @@
             list.innerHTML = `
                 <div style="font-size:1.5rem;font-weight:600;color:#27ae60;margin-bottom:15px;">$${total.toFixed(2)}</div>
                 <div style="max-height:250px;overflow-y:auto;">
-                    ${incomeData.map(t => `
-                        <div style="display:flex;justify-content:space-between;padding:8px;border-bottom:1px solid #eee;">
+                    ${incomeData.map(t => {
+                        const idx = transactions.indexOf(t);
+                        return `
+                        <div style="display:flex;justify-content:space-between;padding:8px;border-bottom:1px solid #eee;cursor:pointer;" onclick="openEditModal(${idx})">
                             <div>
                                 <div style="font-size:0.85rem;color:#666;">${t.date}</div>
                                 <div>${t.description}</div>
                             </div>
                             <div style="font-weight:600;color:#27ae60;">$${t.amount.toFixed(2)}</div>
                         </div>
-                    `).join('')}
+                    `}).join('')}
                 </div>
             `;
         }
@@ -1432,6 +1683,8 @@
             const budgetCats = Object.keys(budgets);
             let copied = 0;
             budgetCats.forEach(cat => {
+                const catInfo = categories.find(c => c.name === cat);
+                if (catInfo && catInfo.isCumulative) return;
                 if (budgets[cat][sourceMonth] !== undefined) {
                     budgets[cat][targetMonth] = budgets[cat][sourceMonth];
                     copied++;
@@ -1468,13 +1721,8 @@
             });
         });
 
-        ['monthFilter', 'yearFilter', 'transTypeFilter', 'transCategoryFilter'].forEach(id => {
+        ['yearFilter', 'transTypeFilter', 'transCategoryFilter', 'transSortFilter'].forEach(id => {
             document.getElementById(id).addEventListener('change', renderAll);
-        });
-
-        document.getElementById('monthFilter').addEventListener('change', function() {
-            addCumulativeBankAmounts(this.value);
-            renderAll();
         });
 
         const dropZone = document.getElementById('dropZone');
@@ -1486,10 +1734,24 @@
         dropZone.addEventListener('drop', (e) => {
             e.preventDefault();
             dropZone.classList.remove('dragover');
+            handleNewImport(e.dataTransfer.files);
+        });
+
+        fileInput.addEventListener('change', (e) => handleNewImport(e.target.files));
+
+        const historyDropZone = document.getElementById('historyDropZone');
+        const historyFileInput = document.getElementById('historyFileInput');
+
+        historyDropZone.addEventListener('click', () => historyFileInput.click());
+        historyDropZone.addEventListener('dragover', (e) => { e.preventDefault(); historyDropZone.classList.add('dragover'); });
+        historyDropZone.addEventListener('dragleave', () => historyDropZone.classList.remove('dragover'));
+        historyDropZone.addEventListener('drop', (e) => {
+            e.preventDefault();
+            historyDropZone.classList.remove('dragover');
             handleFiles(e.dataTransfer.files);
         });
 
-        fileInput.addEventListener('change', (e) => handleFiles(e.target.files));
+        historyFileInput.addEventListener('change', (e) => handleFiles(e.target.files));
 
         function handleFiles(files) {
             if (!files || files.length === 0) return;
@@ -1549,6 +1811,99 @@
             processNextFile(0);
         }
 
+        function parseBankStatement(rows, fileName) {
+            if (!rows || rows.length < 2) return { transactions: [], account: '' };
+
+            const header = rows[0].map(h => (h || '').toString().replace(/\r/g, '').toLowerCase().trim());
+            let account = '';
+            let cardCol = -1;
+            let dateCol = -1;
+            let descCol = -1;
+            let amountCol = -1;
+            let debitCol = -1;
+            let creditCol = -1;
+
+            for (let i = 0; i < header.length; i++) {
+                const h = header[i];
+                if (h.includes('card no') || h.includes('card #')) cardCol = i;
+                if (h === 'transaction date' || h === 'posting date' || h === 'post date') dateCol = i;
+                if (h === 'description' || h === 'payee' || h === 'name') descCol = i;
+                if (h === 'amount') amountCol = i;
+                if (h === 'debit') debitCol = i;
+                if (h === 'credit') creditCol = i;
+            }
+
+            if (descCol === -1) {
+                for (let i = 0; i < header.length; i++) {
+                    if (header[i].includes('memo')) { descCol = i; break; }
+                }
+            }
+
+            if (cardCol >= 0) {
+                for (let i = 1; i < rows.length; i++) {
+                    const cardNum = (rows[i][cardCol] || '').toString().trim().replace(/^0+/, '');
+                    if (cardNum && accountMap[cardNum]) {
+                        account = accountMap[cardNum];
+                        break;
+                    }
+                }
+            }
+
+            if (!account) {
+                const fn = fileName.toLowerCase();
+                if (fn.includes('4720') || fn.includes('cff')) account = 'CFF';
+                else if (fn.includes('4004') || fn.includes('cfu')) account = 'CFU';
+                else if (fn.includes('9981') || fn.includes('1963') || fn.includes('csp')) account = 'CSP';
+                else if (fn.includes('0071') || fn.includes('7418') || fn.includes('ven')) account = 'Ven X';
+                else if (fn.includes('0820') || fn.includes('checking')) account = 'Checking Account';
+            }
+
+            const data = [];
+            const isChase = fileName.toLowerCase().includes('chase');
+            for (let i = 1; i < rows.length; i++) {
+                const row = rows[i].map(c => (c || '').toString().replace(/\r/g, '').trim());
+                if (row.every(c => c === '')) continue;
+
+                const dateRaw = dateCol >= 0 ? row[dateCol] : '';
+                const desc = descCol >= 0 ? row[descCol] : '';
+                let amount = 0;
+
+                if (amountCol >= 0) {
+                    amount = isChase ? -parseAmount(row[amountCol]) : parseAmount(row[amountCol]);
+                } else if (debitCol >= 0 || creditCol >= 0) {
+                    const debit = debitCol >= 0 ? parseAmount(row[debitCol]) : 0;
+                    const credit = creditCol >= 0 ? parseAmount(row[creditCol]) : 0;
+                    amount = credit > 0 ? -Math.abs(credit) : Math.abs(debit);
+                }
+
+                if (!dateRaw || !desc || amount === 0) continue;
+
+                const parsedDate = parseDate(dateRaw);
+                if (!parsedDate) continue;
+
+                const defaultInfo = getDefaultCategory(desc);
+
+                if (/payment.*card|online\s*py?mt|mobile\s*py?mt|payment\s*thank\s*you|capital\s*one\s*(mobile|online)\s*py?mt/i.test(desc)) continue;
+                if (/remote\s*online\s*deposit/i.test(desc)) continue;
+                if (account === 'Checking Account' && /morgan\s*stanley/i.test(desc)) continue;
+
+                const normalizedMerchant = normalizeMerchant(desc);
+
+                data.push({
+                    date: parsedDate,
+                    description: desc,
+                    amount: amount,
+                    category: (defaultInfo && defaultInfo.category) || 'Restaurants',
+                    merchant: normalizedMerchant || desc,
+                    payment_method: account,
+                    account: account,
+                    type: (defaultInfo && defaultInfo.type) || 'expense'
+                });
+            }
+
+            return { transactions: data, account: account };
+        }
+
         function parseImportData(rows, fileName) {
             const data = [];
             const budgetsByMonth = {};
@@ -1603,6 +1958,7 @@
                         category: 'Income',
                         merchant: row[6],
                         payment_method: '',
+                        account: '',
                         type: 'income'
                     });
                 }
@@ -1630,6 +1986,7 @@
                         category: category,
                         merchant: row[7] || '',
                         payment_method: row[11] || '',
+                        account: row[11] || '',
                         type: 'expense'
                     });
                 }
@@ -1673,42 +2030,183 @@
             const t = pendingImport[index];
             currentTransactionIndex = index;
 
-            document.getElementById('modalDescription').textContent = t.description;
-            document.getElementById('modalAmount').textContent = `$${Math.abs(t.amount).toFixed(2)} (${t.type})`;
+            document.getElementById('reviewProgress').textContent = `(${index + 1} of ${pendingImport.length})`;
+            document.getElementById('modalAccount').textContent = t.account || t.payment_method || 'Unknown';
+            document.getElementById('modalDate').value = t.date || '';
+            document.getElementById('modalDescription').value = t.description || '';
             document.getElementById('modalMerchant').value = t.merchant || '';
+            document.getElementById('modalAmount').value = t.amount;
+
+            const typeSelect = document.getElementById('modalType');
+            typeSelect.value = t.type || 'expense';
 
             const categorySelect = document.getElementById('modalCategory');
+            categorySelect.innerHTML = categories.map(c => `<option value="${c.name}">${c.name}</option>`).join('') + '<option value="__new__">+ New Category</option>';
+
             if (t.merchant) {
-                const defaultCat = getDefaultCategory(t.merchant);
-                if (defaultCat) categorySelect.value = defaultCat;
+                const defaultInfo = getDefaultCategory(t.merchant);
+                if (defaultInfo) {
+                    if (defaultInfo.category && categories.find(c => c.name === defaultInfo.category)) {
+                        categorySelect.value = defaultInfo.category;
+                    }
+                    if (defaultInfo.type) {
+                        typeSelect.value = defaultInfo.type;
+                    }
+                }
             }
-            if (t.category && t.category !== 'Uncategorized' && !categorySelect.value) {
+            if (t.category && t.category !== 'Uncategorized' && categories.find(c => c.name === t.category)) {
                 categorySelect.value = t.category;
             }
+
+            document.getElementById('newCategoryRow').style.display = 'none';
+            document.getElementById('newCategoryName').value = '';
+
+            document.getElementById('splitSection').style.display = 'none';
+            document.getElementById('splitRows').innerHTML = '';
 
             document.getElementById('categoryModal').classList.add('active');
         }
 
-        document.getElementById('skipTransaction').addEventListener('click', () => {
-            showCategoryModal(currentTransactionIndex + 1);
+        document.getElementById('modalCategory').addEventListener('change', function() {
+            const isNew = this.value === '__new__';
+            document.getElementById('newCategoryRow').style.display = isNew ? 'block' : 'none';
         });
 
         document.getElementById('saveTransaction').addEventListener('click', () => {
-            const category = document.getElementById('modalCategory').value;
+            let category = document.getElementById('modalCategory').value;
             const merchant = document.getElementById('modalMerchant').value;
+            const description = document.getElementById('modalDescription').value.trim();
+            const amount = parseFloat(document.getElementById('modalAmount').value);
+            const date = document.getElementById('modalDate').value;
+            const type = document.getElementById('modalType').value;
 
-            if (category) {
-                pendingImport[currentTransactionIndex].category = category;
+            if (category === '__new__') {
+                const newName = document.getElementById('newCategoryName').value.trim();
+                if (!newName) { alert('Please enter a category name.'); return; }
+                if (!categories.find(c => c.name === newName)) {
+                    const usedColors = categories.map(c => c.color);
+                    const availableColor = categoryColorPalette.find(c => !usedColors.includes(c)) || categoryColorPalette[categories.length % categoryColorPalette.length];
+                    categories.push({ name: newName, type: 'expense', group: null, color: availableColor, isCumulative: false, cumulativeAmount: 0, bankBalances: {} });
+                }
+                category = newName;
             }
+
+            if (category) pendingImport[currentTransactionIndex].category = category;
+            if (date) pendingImport[currentTransactionIndex].date = date;
             if (merchant) {
                 pendingImport[currentTransactionIndex].merchant = merchant;
-                saveMerchantDefault(merchant, category);
+                saveMerchantDefault(merchant, category, type);
             }
+            if (description) pendingImport[currentTransactionIndex].description = description;
+            if (!isNaN(amount)) {
+                pendingImport[currentTransactionIndex].amount = amount;
+            }
+            if (type) pendingImport[currentTransactionIndex].type = type;
 
             showCategoryModal(currentTransactionIndex + 1);
         });
 
+        document.getElementById('deleteTransaction').addEventListener('click', () => {
+            pendingImport.splice(currentTransactionIndex, 1);
+            if (pendingImport.length === 0) {
+                document.getElementById('categoryModal').classList.remove('active');
+                alert('All transactions removed.');
+            } else {
+                if (currentTransactionIndex >= pendingImport.length) currentTransactionIndex = pendingImport.length - 1;
+                showCategoryModal(currentTransactionIndex);
+            }
+        });
+
+        document.getElementById('splitTransaction').addEventListener('click', () => {
+            const section = document.getElementById('splitSection');
+            const isHidden = section.style.display === 'none';
+            section.style.display = isHidden ? 'block' : 'none';
+            if (isHidden) initSplitRows();
+        });
+
+        document.getElementById('addSplitRow').addEventListener('click', () => {
+            addSplitRow();
+            updateSplitRemaining();
+        });
+
+        document.getElementById('confirmSplit').addEventListener('click', () => {
+            approveSplit();
+        });
+
+        function initSplitRows() {
+            const container = document.getElementById('splitRows');
+            container.innerHTML = '';
+            const t = pendingImport[currentTransactionIndex];
+            addSplitRow(t.category, Math.abs(t.amount).toFixed(2));
+            addSplitRow();
+            updateSplitRemaining();
+        }
+
+        function addSplitRow(category, amount) {
+            const container = document.getElementById('splitRows');
+            const row = document.createElement('div');
+            row.className = 'split-row';
+            row.innerHTML = `
+                <select class="split-cat">${categories.map(c => `<option value="${c.name}">${c.name}</option>`).join('')}</select>
+                <input type="number" step="0.01" class="split-amt" placeholder="0.00" value="${amount || ''}">
+                <button class="btn btn-danger" onclick="this.parentElement.remove();updateSplitRemaining();">&times;</button>
+            `;
+            if (category) row.querySelector('.split-cat').value = category;
+            row.querySelector('.split-amt').addEventListener('input', updateSplitRemaining);
+            container.appendChild(row);
+        }
+
+        function updateSplitRemaining() {
+            const total = Math.abs(pendingImport[currentTransactionIndex].amount);
+            const inputs = document.querySelectorAll('#splitRows .split-amt');
+            let assigned = 0;
+            inputs.forEach(inp => { assigned += parseFloat(inp.value) || 0; });
+            const remaining = total - assigned;
+            const el = document.getElementById('splitRemaining');
+            el.textContent = `Remaining: $${remaining.toFixed(2)}`;
+            el.style.color = remaining < 0 ? '#e74c3c' : remaining === 0 ? '#27ae60' : '#666';
+        }
+
+        function approveSplit() {
+            const t = pendingImport[currentTransactionIndex];
+            const rows = document.querySelectorAll('#splitRows .split-row');
+            const splits = [];
+            rows.forEach(row => {
+                const cat = row.querySelector('.split-cat').value;
+                const amt = parseFloat(row.querySelector('.split-amt').value) || 0;
+                if (cat && amt > 0) splits.push({ category: cat, amount: amt });
+            });
+
+            if (splits.length === 0) return;
+
+            const totalAssigned = splits.reduce((s, sp) => s + sp.amount, 0);
+            if (Math.abs(totalAssigned - Math.abs(t.amount)) > 0.01) {
+                alert('Split amounts must equal the transaction amount.');
+                return;
+            }
+
+            splits.forEach((sp, i) => {
+                const newT = { ...t };
+                newT.amount = sp.amount;
+                newT.category = sp.category;
+                if (i > 0) newT.description = t.description + ` (split ${i + 1})`;
+                pendingImport.push(newT);
+            });
+
+            pendingImport.splice(currentTransactionIndex, 1);
+            if (pendingImport.length === 0) {
+                document.getElementById('categoryModal').classList.remove('active');
+                confirmImportTransactions();
+            } else {
+                if (currentTransactionIndex >= pendingImport.length) currentTransactionIndex = pendingImport.length - 1;
+                showCategoryModal(currentTransactionIndex);
+            }
+        }
+
         function confirmImportTransactions() {
+            pendingImport.forEach(t => {
+                if (!t.account) t.account = t.payment_method || '';
+            });
             const importedCategories = [...new Set(pendingImport.map(t => t.category).filter(c => c && c !== 'Uncategorized'))];
             importedCategories.forEach(catName => {
                 if (!categories.find(c => c.name === catName)) {
@@ -1728,6 +2226,41 @@
             initializeCumulativeBanks();
             renderAll();
             alert('Import complete! ' + (importedCategories.length > 0 ? importedCategories.length + ' new categories added.' : ''));
+        }
+
+        function handleNewImport(files) {
+            if (!files || files.length === 0) return;
+            newImportQueue = [];
+            newImportIndex = 0;
+            newImportAccount = '';
+
+            const fileArray = Array.from(files);
+
+            const processNext = (idx) => {
+                if (idx >= fileArray.length) {
+                    if (newImportQueue.length === 0) {
+                        alert('No transactions found in the selected file(s).');
+                        return;
+                    }
+                    pendingImport = newImportQueue;
+                    showCategoryModal(0);
+                    return;
+                }
+
+                const file = fileArray[idx];
+                const reader = new FileReader();
+                reader.onload = (e) => {
+                    const text = e.target.result;
+                    const results = Papa.parse(text, { skipEmptyLines: true });
+                    const parsed = parseBankStatement(results.data, file.name);
+                    if (parsed.account && !newImportAccount) newImportAccount = parsed.account;
+                    newImportQueue = newImportQueue.concat(parsed.transactions);
+                    processNext(idx + 1);
+                };
+                reader.readAsText(file);
+            };
+
+            processNext(0);
         }
 
         function saveTransactionsToStorage() {
