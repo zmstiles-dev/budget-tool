@@ -7,102 +7,187 @@
     <script src="https://cdnjs.cloudflare.com/ajax/libs/PapaParse/5.4.1/papaparse.min.js"></script>
     <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.1/dist/chart.umd.min.js"></script>
     <style>
+        :root {
+            --bg: #f5f5f5;
+            --text: #333;
+            --surface: #ffffff;
+            --surface-alt: #f8f9fa;
+            --surface-hover: #f0f0f0;
+            --border: #eee;
+            --border-strong: #ddd;
+            --muted: #666;
+            --muted-strong: #555;
+            --muted-light: #999;
+            --accent: #3498db;
+            --accent-hover: #2980b9;
+            --accent-bg: #f0f8ff;
+            --success: #27ae60;
+            --danger: #e74c3c;
+            --danger-hover: #c0392b;
+            --warning-bg: #fff3cd;
+            --warning-text: #856404;
+            --expense-bg: #fce4e4;
+            --expense-text: #c0392b;
+            --income-bg: #e8f5e9;
+            --income-text: #27ae60;
+            --badge-bg: #ecf0f1;
+            --secondary: #95a5a6;
+            --sidebar-bg: #2c3e50;
+            --sidebar-border: #34495e;
+            --sidebar-text: #bdc3c7;
+            --sidebar-hover: #34495e;
+            --shadow: rgba(0,0,0,0.1);
+            --shadow-light: rgba(0,0,0,0.06);
+            --modal-overlay: rgba(0,0,0,0.5);
+            --cal-btn-bg: #fafafa;
+            --cal-btn-text: #444;
+            --cal-hover-bg: #e8f0fe;
+            --drop-border: #ccc;
+        }
+        [data-theme="dark"] {
+            --bg: #121212;
+            --text: #e0e0e0;
+            --surface: #1e1e1e;
+            --surface-alt: #252525;
+            --surface-hover: #2a2a2a;
+            --border: #333;
+            --border-strong: #444;
+            --muted: #aaa;
+            --muted-strong: #bbb;
+            --muted-light: #777;
+            --accent: #5dade2;
+            --accent-hover: #3498db;
+            --accent-bg: #1a2a3a;
+            --success: #2ecc71;
+            --danger: #e74c3c;
+            --danger-hover: #c0392b;
+            --warning-bg: #3d3520;
+            --warning-text: #f0c040;
+            --expense-bg: #3d2020;
+            --expense-text: #f08080;
+            --income-bg: #1a3a1a;
+            --income-text: #60d080;
+            --badge-bg: #2a2a2a;
+            --secondary: #7f8c8d;
+            --sidebar-bg: #1a1a2e;
+            --sidebar-border: #2a2a3e;
+            --sidebar-text: #a0a0b0;
+            --sidebar-hover: #2a2a3e;
+            --shadow: rgba(0,0,0,0.3);
+            --shadow-light: rgba(0,0,0,0.2);
+            --modal-overlay: rgba(0,0,0,0.7);
+            --cal-btn-bg: #252525;
+            --cal-btn-text: #ccc;
+            --cal-hover-bg: #1a2a3a;
+            --drop-border: #555;
+        }
         * { box-sizing: border-box; margin: 0; padding: 0; }
-        body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; background: #f5f5f5; color: #333; }
+        body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; background: var(--bg); color: var(--text); }
         .app-layout { display: flex; min-height: 100vh; }
-        .sidebar { width: 220px; background: #2c3e50; padding: 20px 0; flex-shrink: 0; }
-        .sidebar h2 { color: white; padding: 0 20px 20px; font-size: 1.2rem; border-bottom: 1px solid #34495e; margin-bottom: 10px; }
-        .nav-item { display: block; padding: 12px 20px; color: #bdc3c7; text-decoration: none; cursor: pointer; transition: all 0.2s; }
-        .nav-item:hover { background: #34495e; color: white; }
-        .nav-item.active { background: #3498db; color: white; }
+        .sidebar { width: 220px; background: var(--sidebar-bg); padding: 20px 0; flex-shrink: 0; display: flex; flex-direction: column; }
+        .sidebar h2 { color: white; padding: 0 20px 20px; font-size: 1.2rem; border-bottom: 1px solid var(--sidebar-border); margin-bottom: 10px; }
+        .nav-item { display: block; padding: 12px 20px; color: var(--sidebar-text); text-decoration: none; cursor: pointer; transition: all 0.2s; }
+        .nav-item:hover { background: var(--sidebar-hover); color: white; }
+        .nav-item.active { background: var(--accent); color: white; }
+        .sidebar-bottom { margin-top: auto; padding: 10px 20px; border-top: 1px solid var(--sidebar-border); }
+        .theme-toggle { display:flex;align-items:center;gap:10px;color:var(--sidebar-text);cursor:pointer;font-size:0.9rem;user-select:none; }
+        .theme-toggle:hover { color:white; }
+        .theme-toggle .switch { position:relative;width:36px;height:20px;background:#555;border-radius:10px;transition:background 0.2s;flex-shrink:0; }
+        [data-theme="dark"] .theme-toggle .switch { background:var(--accent); }
+        .theme-toggle .switch::after { content:''; position:absolute; top:2px; left:2px; width:16px; height:16px; background:white; border-radius:50%; transition:transform 0.2s; }
+        [data-theme="dark"] .theme-toggle .switch::after { transform:translateX(16px); }
         .main-content { flex: 1; padding: 20px; overflow-x: hidden; }
         .panel { display: none; }
         .panel.active { display: block; }
         .grid { display: grid; grid-template-columns: 1fr 1fr; gap: 20px; margin-bottom: 20px; }
-        .card { background: white; padding: 20px; border-radius: 8px; box-shadow: 0 2px 4px rgba(0,0,0,0.1); }
-        .card h3 { margin-bottom: 15px; color: #2c3e50; }
-        .drop-zone { border: 2px dashed #ccc; padding: 40px; text-align: center; border-radius: 8px; cursor: pointer; transition: all 0.2s; }
-        .drop-zone:hover, .drop-zone.dragover { border-color: #3498db; background: #f0f8ff; }
+        .card { background: var(--surface); padding: 20px; border-radius: 8px; box-shadow: 0 2px 4px var(--shadow); }
+        .card h3 { margin-bottom: 15px; color: var(--text); }
+        .drop-zone { border: 2px dashed var(--drop-border); padding: 40px; text-align: center; border-radius: 8px; cursor: pointer; transition: all 0.2s; }
+        .drop-zone:hover, .drop-zone.dragover { border-color: var(--accent); background: var(--accent-bg); }
         .transactions-list { max-height: 500px; overflow-y: auto; }
-        .transaction { display: flex; justify-content: space-between; align-items: center; padding: 12px; border-bottom: 1px solid #eee; animation: slideIn 0.3s ease-out; }
+        .transaction { display: flex; justify-content: space-between; align-items: center; padding: 12px; border-bottom: 1px solid var(--border); animation: slideIn 0.3s ease-out; }
         @keyframes slideIn { from { opacity: 0; transform: translateX(-20px); } to { opacity: 1; transform: translateX(0); } }
-        .transaction:hover { background: #f8f9fa; }
-        .transaction .date { color: #666; font-size: 0.85rem; }
+        .transaction:hover { background: var(--surface-alt); }
+        .transaction .date { color: var(--muted); font-size: 0.85rem; }
         .transaction .amount { font-weight: 600; }
-        .transaction .amount.positive { color: #27ae60; }
-        .transaction .amount.negative { color: #e74c3c; }
-        .transaction .category { display: inline-block; padding: 4px 8px; background: #ecf0f1; border-radius: 4px; font-size: 0.8rem; margin-left: 10px; }
+        .transaction .amount.positive { color: var(--success); }
+        .transaction .amount.negative { color: var(--danger); }
+        .transaction .category { display: inline-block; padding: 4px 8px; background: var(--badge-bg); border-radius: 4px; font-size: 0.8rem; margin-left: 10px; }
         .filters { display: flex; gap: 10px; margin-bottom: 20px; flex-wrap: wrap; }
-        select, input[type="month"] { padding: 8px 12px; border: 1px solid #ddd; border-radius: 6px; font-size: 0.9rem; }
+        select, input[type="month"], input[type="number"], input[type="text"], input[type="date"] { padding: 8px 12px; border: 1px solid var(--border-strong); border-radius: 6px; font-size: 0.9rem; background: var(--surface); color: var(--text); }
         .chart-container { position: relative; height: 300px; }
         .stats { display: grid; grid-template-columns: repeat(3, 1fr); gap: 15px; margin-bottom: 20px; }
-        .stat { background: white; padding: 15px; border-radius: 8px; text-align: center; }
-        .stat .value { font-size: 1.5rem; font-weight: 600; color: #2c3e50; }
-        .stat .label { font-size: 0.85rem; color: #666; }
-        .budget-item { display: flex; justify-content: space-between; padding: 10px; border-bottom: 1px solid #eee; }
+        .stat { background: var(--surface); padding: 15px; border-radius: 8px; text-align: center; }
+        .stat .value { font-size: 1.5rem; font-weight: 600; color: var(--text); }
+        .stat .label { font-size: 0.85rem; color: var(--muted); }
+        .budget-item { display: flex; justify-content: space-between; padding: 10px; border-bottom: 1px solid var(--border); }
         .budget-item .remaining { font-weight: 500; }
-        .budget-item .remaining.over { color: #e74c3c; }
-        .budget-item .remaining.under { color: #27ae60; }
-        .modal { display: none; position: fixed; top: 0; left: 0; width: 100%; height: 100%; background: rgba(0,0,0,0.5); z-index: 1000; justify-content: center; align-items: center; }
+        .budget-item .remaining.over { color: var(--danger); }
+        .budget-item .remaining.under { color: var(--success); }
+        .modal { display: none; position: fixed; top: 0; left: 0; width: 100%; height: 100%; background: var(--modal-overlay); z-index: 1000; justify-content: center; align-items: center; }
         .modal.active { display: flex; }
-        .modal-content { background: white; padding: 30px; border-radius: 12px; max-width: 500px; width: 90%; max-height: 80vh; overflow-y: auto; }
+        .modal-content { background: var(--surface); padding: 30px; border-radius: 12px; max-width: 500px; width: 90%; max-height: 80vh; overflow-y: auto; }
         .modal-content h2 { margin-bottom: 20px; }
         .form-group { margin-bottom: 15px; }
         .form-group label { display: block; margin-bottom: 5px; font-weight: 500; }
         .form-group select, .form-group input { width: 100%; }
         .btn { padding: 10px 20px; border: none; border-radius: 6px; cursor: pointer; font-weight: 500; transition: all 0.2s; }
-        .btn-primary { background: #3498db; color: white; }
-        .btn-primary:hover { background: #2980b9; }
-        .btn-secondary { background: #95a5a6; color: white; }
-        .btn-success { background: #27ae60; color: white; }
-        .uncategorized-count { background: #e74c3c; color: white; padding: 2px 8px; border-radius: 12px; font-size: 0.8rem; margin-left: 10px; }
-        .progress-bar { height: 4px; background: #ecf0f1; border-radius: 2px; overflow: hidden; margin-top: 5px; }
-        .progress-bar .fill { height: 100%; background: #3498db; transition: width 0.3s; }
-        .progress-bar .fill.over { background: #e74c3c; }
+        .btn-primary { background: var(--accent); color: white; }
+        .btn-primary:hover { background: var(--accent-hover); }
+        .btn-secondary { background: var(--secondary); color: white; }
+        .btn-success { background: var(--success); color: white; }
+        .uncategorized-count { background: var(--danger); color: white; padding: 2px 8px; border-radius: 12px; font-size: 0.8rem; margin-left: 10px; }
+        .progress-bar { height: 4px; background: var(--badge-bg); border-radius: 2px; overflow: hidden; margin-top: 5px; }
+        .progress-bar .fill { height: 100%; background: var(--accent); transition: width 0.3s; }
+        .progress-bar .fill.over { background: var(--danger); }
         .hidden { display: none; }
-        .category-group { margin-bottom: 20px; border: 1px solid #eee; border-radius: 8px; overflow: hidden; }
-        .category-group-header { display: flex;justify-content:space-between;align-items:center;padding:15px;background:#f8f9fa;cursor:pointer; }
-        .category-group-header:hover { background:#f0f0f0; }
+        .category-group { margin-bottom: 20px; border: 1px solid var(--border); border-radius: 8px; overflow: hidden; }
+        .category-group-header { display: flex;justify-content:space-between;align-items:center;padding:15px;background:var(--surface-alt);cursor:pointer; }
+        .category-group-header:hover { background:var(--surface-hover); }
         .category-group-title { font-weight:600;font-size:1.1rem; }
         .category-group-actions { display:flex;gap:10px; }
         .category-group-actions button { padding:4px 10px;font-size:0.85rem; }
         .category-group-content { padding:15px; }
-        .category-item { display:flex;justify-content:space-between;align-items:center;padding:12px;border-bottom:1px solid #eee; }
+        .category-item { display:flex;justify-content:space-between;align-items:center;padding:12px;border-bottom:1px solid var(--border); }
         .category-item:last-child { border-bottom:none; }
         .category-info { display:flex;align-items:center;gap:10px; }
         .category-color { width:16px;height:16px;border-radius:50%;flex-shrink:0; }
         .category-name { font-weight:500; }
-        .category-type { font-size:0.8rem;padding:2px 8px;border-radius:4px;background:#ecf0f1;color:#666; }
-        .category-type.expense { background:#fce4e4;color:#c0392b; }
-        .category-type.income { background:#e8f5e9;color:#27ae60; }
-        .category-type.cumulative { background:#fff3cd;color:#856404; }
+        .category-type { font-size:0.8rem;padding:2px 8px;border-radius:4px;background:var(--badge-bg);color:var(--muted); }
+        .category-type.expense { background:var(--expense-bg);color:var(--expense-text); }
+        .category-type.income { background:var(--income-bg);color:var(--income-text); }
+        .category-type.cumulative { background:var(--warning-bg);color:var(--warning-text); }
         .category-actions { display:flex;gap:8px; }
         .category-actions button { padding:4px 10px;font-size:0.85rem; }
         .color-picker { display:flex;gap:8px;flex-wrap:wrap;margin-top:10px; }
         .color-option { width:32px;height:32px;border-radius:50%;cursor:pointer;border:3px solid transparent;transition:all 0.2s; }
         .color-option:hover { transform:scale(1.1); }
-        .color-option.selected { border-color:#333;transform:scale(1.1); }
-        .btn-danger { background:#e74c3c;color:white; }
-        .btn-danger:hover { background:#c0392b; }
-        .empty-state { text-align:center;padding:40px;color:#666; }
+        .color-option.selected { border-color:var(--text);transform:scale(1.1); }
+        .btn-danger { background:var(--danger);color:white; }
+        .btn-danger:hover { background:var(--danger-hover); }
+        .empty-state { text-align:center;padding:40px;color:var(--muted); }
         .toggle-switch { display:flex;align-items:center;gap:10px; }
         .toggle-switch input { width:auto; }
-        .month-calendar { background:white;border:1px solid #ddd;border-radius:8px;padding:12px;box-shadow:0 2px 4px rgba(0,0,0,0.06);display:inline-block;min-width:280px; }
+        .month-calendar { background:var(--surface);border:1px solid var(--border-strong);border-radius:8px;padding:12px;box-shadow:0 2px 4px var(--shadow-light);display:inline-block;min-width:280px; }
         .month-calendar-header { display:flex;align-items:center;justify-content:space-between;margin-bottom:12px; }
-        .month-calendar-header #calYearLabel { font-size:1.1rem;font-weight:600;color:#2c3e50;min-width:60px;text-align:center; }
-        .month-cal-nav { background:none;border:1px solid #ddd;border-radius:6px;padding:4px 12px;cursor:pointer;font-size:1rem;color:#555;transition:all 0.15s; }
-        .month-cal-nav:hover { background:#f0f0f0;border-color:#bbb; }
+        .month-calendar-header #calYearLabel { font-size:1.1rem;font-weight:600;color:var(--text);min-width:60px;text-align:center; }
+        .month-cal-nav { background:none;border:1px solid var(--border-strong);border-radius:6px;padding:4px 12px;cursor:pointer;font-size:1rem;color:var(--muted-strong);transition:all 0.15s; }
+        .month-cal-nav:hover { background:var(--surface-hover);border-color:var(--muted-light); }
         .month-calendar-grid { display:grid;grid-template-columns:repeat(4,1fr);gap:6px; }
-        .month-calendar-grid button { padding:10px 4px;border:1px solid #eee;border-radius:6px;background:#fafafa;cursor:pointer;font-size:0.82rem;color:#444;transition:all 0.15s;text-align:center; }
-        .month-calendar-grid button:hover { background:#e8f0fe;border-color:#3498db; }
-        .month-calendar-grid button.selected { background:#3498db;color:white;border-color:#2980b9;font-weight:600; }
-        .month-calendar-grid button.no-data { color:#ccc;background:#f9f9f9; }
-        .month-calendar-grid button.no-data:hover { background:#f0f0f0;color:#999; }
+        .month-calendar-grid button { padding:10px 4px;border:1px solid var(--border);border-radius:6px;background:var(--cal-btn-bg);cursor:pointer;font-size:0.82rem;color:var(--cal-btn-text);transition:all 0.15s;text-align:center; }
+        .month-calendar-grid button:hover { background:var(--cal-hover-bg);border-color:var(--accent); }
+        .month-calendar-grid button.selected { background:var(--accent);color:white;border-color:var(--accent-hover);font-weight:600; }
+        .month-calendar-grid button.no-data { color:var(--muted-light);background:var(--surface-alt); }
+        .month-calendar-grid button.no-data:hover { background:var(--surface-hover);color:var(--muted); }
         .split-row { display:flex;gap:8px;align-items:center;margin-bottom:8px; }
-        .split-row select, .split-row input { padding:6px;border:1px solid #ddd;border-radius:4px;font-size:0.85rem; }
+        .split-row select, .split-row input { padding:6px;border:1px solid var(--border-strong);border-radius:4px;font-size:0.85rem; }
         .split-row select { flex:2; }
         .split-row input { flex:1; }
         .split-row button { padding:4px 8px;font-size:0.8rem; }
+        .budget-item[draggable="true"] { cursor: grab; }
+        .budget-item[draggable="true"]:active { cursor: grabbing; }
+        .budget-item.dragging { opacity:0.4; }
+        .budget-item.drag-over { border-top:2px solid var(--accent); }
     </style>
 </head>
 <body>
@@ -113,6 +198,12 @@
             <div class="nav-item" data-tab="yearly">Yearly</div>
             <div class="nav-item" data-tab="categories">Categories</div>
             <div class="nav-item" data-tab="import">Import</div>
+            <div class="sidebar-bottom">
+                <div class="theme-toggle" id="themeToggle">
+                    <div class="switch"></div>
+                    <span>Dark Mode</span>
+                </div>
+            </div>
         </nav>
 
         <main class="main-content">
@@ -148,10 +239,10 @@
                 </div>
                 <div class="card">
                     <h3>Monthly Budget</h3>
-                    <div id="monthlyBudgetTotals" style="margin-bottom:15px;padding:15px;background:#f8f9fa;border-radius:8px;"></div>
+                    <div id="monthlyBudgetTotals" style="margin-bottom:15px;padding:15px;background:var(--surface-alt);border-radius:8px;"></div>
                     <div class="filters" style="margin-bottom:15px;">
                         <span style="font-size:0.9rem;">Copy from:</span>
-                        <select id="copyBudgetFrom" style="padding:6px;border:1px solid #ddd;border-radius:4px;">
+                        <select id="copyBudgetFrom" style="padding:6px;border:1px solid var(--border-strong);border-radius:4px;">
                             <option value="">Select month...</option>
                         </select>
                         <button class="btn btn-primary" onclick="copyBudgetsFromMonth()" style="padding:6px 12px;font-size:0.9rem;">Copy</button>
@@ -208,7 +299,7 @@
                 </div>
                 <div class="card">
                     <h3>Yearly Budget</h3>
-                    <div id="yearlyBudgetTotals" style="margin-bottom:15px;padding:15px;background:#f8f9fa;border-radius:8px;"></div>
+                    <div id="yearlyBudgetTotals" style="margin-bottom:15px;padding:15px;background:var(--surface-alt);border-radius:8px;"></div>
                     <div id="yearlyBudgetList"></div>
                 </div>
             </div>
@@ -243,10 +334,10 @@
                     <div id="importStats" style="margin: 15px 0; padding: 15px; background: #f8f9fa; border-radius: 6px;"></div>
                     <button class="btn btn-primary" id="confirmImport">Import Transactions</button>
                 </div>
-                <div style="margin-top: 20px; padding-top: 20px; border-top: 1px solid #eee;">
+                <div style="margin-top: 20px; padding-top: 20px; border-top: 1px solid var(--border);">
                     <button class="btn btn-danger" onclick="clearAllData()">Clear All Data</button>
                 </div>
-                <div style="margin-top: 20px; padding-top: 20px; border-top: 1px solid #eee;">
+                <div style="margin-top: 20px; padding-top: 20px; border-top: 1px solid var(--border);">
                     <button class="btn btn-primary" onclick="exportData()">Export Data</button>
                     <button class="btn btn-primary" onclick="document.getElementById('dataFileInput').click()" style="margin-left: 10px;">Import Data</button>
                     <input type="file" id="dataFileInput" accept=".json" hidden onchange="importData(this)">
@@ -260,47 +351,47 @@
 
     <div class="modal" id="categoryModal">
         <div class="modal-content">
-            <h2>Review Transaction <span id="reviewProgress" style="font-size:0.9rem;font-weight:400;color:#666;"></span></h2>
+            <h2>Review Transaction <span id="reviewProgress" style="font-size:0.9rem;font-weight:400;color:var(--muted);"></span></h2>
             <div class="form-group">
                 <label>Account</label>
                 <div id="modalAccount" style="padding: 10px; background: #f8f9fa; border-radius: 4px; font-weight: 500;"></div>
             </div>
             <div class="form-group">
                 <label>Date</label>
-                <input type="date" id="modalDate" style="width:100%;padding:8px;border:1px solid #ddd;border-radius:4px;">
+                <input type="date" id="modalDate" style="width:100%;padding:8px;border:1px solid var(--border-strong);border-radius:4px;">
             </div>
             <div class="form-group">
                 <label>Description</label>
-                <input type="text" id="modalDescription" style="width:100%;padding:8px;border:1px solid #ddd;border-radius:4px;">
+                <input type="text" id="modalDescription" style="width:100%;padding:8px;border:1px solid var(--border-strong);border-radius:4px;">
             </div>
             <div class="form-group">
                 <label>Merchant</label>
-                <input type="text" id="modalMerchant" placeholder="Enter merchant name" style="width:100%;padding:8px;border:1px solid #ddd;border-radius:4px;">
+                <input type="text" id="modalMerchant" placeholder="Enter merchant name" style="width:100%;padding:8px;border:1px solid var(--border-strong);border-radius:4px;">
             </div>
             <div class="form-group">
                 <label>Amount</label>
-                <input type="number" step="0.01" id="modalAmount" style="width:100%;padding:8px;border:1px solid #ddd;border-radius:4px;">
+                <input type="number" step="0.01" id="modalAmount" style="width:100%;padding:8px;border:1px solid var(--border-strong);border-radius:4px;">
             </div>
             <div class="form-group">
                 <label>Type</label>
-                <select id="modalType" style="width:100%;padding:8px;border:1px solid #ddd;border-radius:4px;">
+                <select id="modalType" style="width:100%;padding:8px;border:1px solid var(--border-strong);border-radius:4px;">
                     <option value="expense">Expense</option>
                     <option value="income">Income</option>
                 </select>
             </div>
             <div class="form-group">
                 <label>Category</label>
-                <select id="modalCategory" style="width:100%;padding:8px;border:1px solid #ddd;border-radius:4px;"></select>
+                <select id="modalCategory" style="width:100%;padding:8px;border:1px solid var(--border-strong);border-radius:4px;"></select>
             </div>
             <div class="form-group" id="newCategoryRow" style="display:none;">
                 <label>New Category Name</label>
-                <input type="text" id="newCategoryName" placeholder="Enter category name" style="width:100%;padding:8px;border:1px solid #ddd;border-radius:4px;">
+                <input type="text" id="newCategoryName" placeholder="Enter category name" style="width:100%;padding:8px;border:1px solid var(--border-strong);border-radius:4px;">
             </div>
-            <div id="splitSection" style="display:none;margin-top:15px;padding:15px;background:#f8f9fa;border-radius:8px;">
+            <div id="splitSection" style="display:none;margin-top:15px;padding:15px;background:var(--surface-alt);border-radius:8px;">
                 <h4 style="margin-bottom:10px;">Split Transaction</h4>
                 <div id="splitRows"></div>
                 <div style="display:flex;justify-content:space-between;align-items:center;margin-top:10px;">
-                    <span id="splitRemaining" style="font-size:0.9rem;color:#666;"></span>
+                    <span id="splitRemaining" style="font-size:0.9rem;color:var(--muted);"></span>
                     <div style="display:flex;gap:8px;">
                         <button class="btn btn-secondary" id="addSplitRow" style="padding:5px 12px;font-size:0.85rem;">+ Add Split</button>
                         <button class="btn btn-success" id="confirmSplit" style="padding:5px 12px;font-size:0.85rem;">Confirm Split</button>
@@ -320,34 +411,34 @@
             <h2>Edit Transaction</h2>
             <div class="form-group">
                 <label>Date</label>
-                <input type="date" id="editTransDate" style="width:100%;padding:8px;border:1px solid #ddd;border-radius:4px;">
+                <input type="date" id="editTransDate" style="width:100%;padding:8px;border:1px solid var(--border-strong);border-radius:4px;">
             </div>
             <div class="form-group">
                 <label>Description</label>
-                <input type="text" id="editTransDescription" style="width:100%;padding:8px;border:1px solid #ddd;border-radius:4px;">
+                <input type="text" id="editTransDescription" style="width:100%;padding:8px;border:1px solid var(--border-strong);border-radius:4px;">
             </div>
             <div class="form-group">
                 <label>Merchant</label>
-                <input type="text" id="editTransMerchant" style="width:100%;padding:8px;border:1px solid #ddd;border-radius:4px;">
+                <input type="text" id="editTransMerchant" style="width:100%;padding:8px;border:1px solid var(--border-strong);border-radius:4px;">
             </div>
             <div class="form-group">
                 <label>Amount</label>
-                <input type="number" step="0.01" id="editTransAmount" style="width:100%;padding:8px;border:1px solid #ddd;border-radius:4px;">
+                <input type="number" step="0.01" id="editTransAmount" style="width:100%;padding:8px;border:1px solid var(--border-strong);border-radius:4px;">
             </div>
             <div class="form-group">
                 <label>Type</label>
-                <select id="editTransType" style="width:100%;padding:8px;border:1px solid #ddd;border-radius:4px;">
+                <select id="editTransType" style="width:100%;padding:8px;border:1px solid var(--border-strong);border-radius:4px;">
                     <option value="expense">Expense</option>
                     <option value="income">Income</option>
                 </select>
             </div>
             <div class="form-group">
                 <label>Category</label>
-                <select id="editTransCategory" style="width:100%;padding:8px;border:1px solid #ddd;border-radius:4px;"></select>
+                <select id="editTransCategory" style="width:100%;padding:8px;border:1px solid var(--border-strong);border-radius:4px;"></select>
             </div>
             <div class="form-group">
                 <label>Account</label>
-                <input type="text" id="editTransAccount" style="width:100%;padding:8px;border:1px solid #ddd;border-radius:4px;">
+                <input type="text" id="editTransAccount" style="width:100%;padding:8px;border:1px solid var(--border-strong);border-radius:4px;">
             </div>
             <div style="display: flex; gap: 10px; justify-content: flex-end; margin-top: 20px;">
                 <button class="btn btn-danger" id="editTransDelete">Delete</button>
@@ -439,10 +530,14 @@
         const BUDGET_DATA_KEY = 'budget_budgets';
         const CAT_GROUPS_KEY = 'budget_category_groups';
         const CAT_COLORS_KEY = 'budget_category_colors';
+        const CAT_ORDER_KEY = 'budget_category_order';
+
+        const THEME_KEY = 'budget_theme';
 
         let transactions = [];
         let categories = [];
         let budgets = {};
+        let categoryOrder = [];
         let categoryGroups = [];
         let categoryColors = {};
         let merchantDefaults = {};
@@ -467,6 +562,21 @@
         let monthlyChart, yearlyChart;
 
         const categoryColorPalette = ['#3498db', '#e74c3c', '#2ecc71', '#f39c12', '#9b59b6', '#1abc9c', '#34495e', '#e67e22', '#c0392b', '#27ae60', '#2980b9', '#8e44ad', '#e91e63', '#00bcd4', '#ff5722', '#795548', '#607d8b', '#9c27b0', '#4caf50', '#ff9800', '#03a9f4', '#f44336', '#ffc107', '#cddc39', '#009688', '#673ab7', '#3f51b5', '#2196f3', '#ffeb3b', '#8bc34a', '#263238', '#9e9e9e', '#f06292', '#ba68c8', '#9575cd', '#7986cb', '#64b5f6', '#4fc3f7', '#4dd0e1', '#4db6ac', '#81c784', '#aed581', '#dce775', '#fff176', '#ffd54f', '#ffb74d', '#ff8a65', '#a1887f', '#90a4ae', '#f48fb1', '#ce93d8', '#b39ddb', '#9fa8da', '#82b1ff', '#81d4fa', '#80deea', '#80cbc4', '#a5d6a7', '#c5e1a5', '#dce775', '#e6ee9c', '#fff59d', '#ffe082', '#ffcc80', '#ffab91', '#bcaaa4', '#cfd8dc'];
+
+        function initTheme() {
+            const saved = localStorage.getItem(THEME_KEY);
+            const theme = saved !== null ? saved : 'dark';
+            document.documentElement.setAttribute('data-theme', theme);
+        }
+
+        function toggleTheme() {
+            const current = document.documentElement.getAttribute('data-theme');
+            const next = current === 'dark' ? 'light' : 'dark';
+            document.documentElement.setAttribute('data-theme', next);
+            localStorage.setItem(THEME_KEY, next);
+        }
+
+        initTheme();
 
         function loadData() {
             const storedTrans = localStorage.getItem(TRANS_DATA_KEY);
@@ -526,6 +636,11 @@
                 }
             } else {
                 budgets = {};
+            }
+
+            const storedOrder = localStorage.getItem(CAT_ORDER_KEY);
+            if (storedOrder) {
+                categoryOrder = JSON.parse(storedOrder);
             }
 
             if (storedMerchants) {
@@ -1213,14 +1328,14 @@
                     <div>
                         <div class="date">${t.date}</div>
                         <div>${t.description}</div>
-                        ${t.merchant ? `<div style="color:#666;font-size:0.85rem">${t.merchant}</div>` : ''}
+                        ${t.merchant ? `<div style="color:var(--muted);font-size:0.85rem">${t.merchant}</div>` : ''}
                     </div>
                     <div style="text-align:right">
                         <div class="amount ${amountClass}">
                             ${amountPrefix}$${Math.abs(amountVal).toFixed(2)}
                         </div>
                         <span class="category">${t.category || 'Uncategorized'}</span>
-                        ${t.account ? `<span style="color:#999;font-size:0.75rem;margin-left:6px;">${t.account}</span>` : ''}
+                        ${t.account ? `<span style="color:var(--muted-light);font-size:0.75rem;margin-left:6px;">${t.account}</span>` : ''}
                     </div>
                 </div>
             `}).join('');
@@ -1357,6 +1472,83 @@
             });
         }
 
+        function getSortedBudgetCats() {
+            const allCats = Object.keys(budgets);
+            if (categoryOrder.length === 0) return allCats;
+            const ordered = categoryOrder.filter(c => allCats.includes(c));
+            const newCats = allCats.filter(c => !ordered.includes(c));
+            return [...ordered, ...newCats];
+        }
+
+        function saveCategoryOrder(newOrder) {
+            categoryOrder = newOrder;
+            localStorage.setItem(CAT_ORDER_KEY, JSON.stringify(categoryOrder));
+        }
+
+        function setupDragAndDrop(listEl, containerType) {
+            let draggedItem = null;
+            let draggedIndex = -1;
+
+            listEl.querySelectorAll('.budget-item').forEach((item, index) => {
+                item.setAttribute('draggable', 'true');
+
+                item.addEventListener('dragstart', (e) => {
+                    draggedItem = item;
+                    draggedIndex = index;
+                    item.classList.add('dragging');
+                    e.dataTransfer.effectAllowed = 'move';
+                    e.dataTransfer.setData('text/plain', index.toString());
+                });
+
+                item.addEventListener('dragend', () => {
+                    item.classList.remove('dragging');
+                    listEl.querySelectorAll('.budget-item').forEach(el => el.classList.remove('drag-over'));
+                    draggedItem = null;
+                    draggedIndex = -1;
+                });
+
+                item.addEventListener('dragover', (e) => {
+                    e.preventDefault();
+                    e.dataTransfer.dropEffect = 'move';
+                    if (item !== draggedItem) {
+                        item.classList.add('drag-over');
+                    }
+                });
+
+                item.addEventListener('dragleave', () => {
+                    item.classList.remove('drag-over');
+                });
+
+                item.addEventListener('drop', (e) => {
+                    e.preventDefault();
+                    item.classList.remove('drag-over');
+                    if (draggedItem && draggedItem !== item) {
+                        const fromIndex = draggedIndex;
+                        const toIndex = index;
+                        const visibleItems = Array.from(listEl.querySelectorAll('.budget-item'));
+                        const fromCat = visibleItems[fromIndex].dataset.cat;
+                        const toCat = visibleItems[toIndex].dataset.cat;
+
+                        const currentOrder = getSortedBudgetCats();
+                        const fromPos = currentOrder.indexOf(fromCat);
+                        const toPos = currentOrder.indexOf(toCat);
+                        if (fromPos === -1 || toPos === -1) return;
+
+                        const reordered = [...currentOrder];
+                        reordered.splice(fromPos, 1);
+                        reordered.splice(toPos, 0, fromCat);
+                        saveCategoryOrder(reordered);
+
+                        if (containerType === 'monthly') {
+                            renderBudget();
+                        } else {
+                            renderYearlyBudget();
+                        }
+                    }
+                });
+            });
+        }
+
         function renderBudget() {
             const month = document.getElementById('monthFilter').value;
             const monthData = getMonthData(month);
@@ -1375,7 +1567,7 @@
 
             let totalBudget = 0;
             let totalActual = 0;
-            const budgetCats = Object.keys(budgets);
+            const budgetCats = getSortedBudgetCats();
             budgetCats.forEach(cat => {
                 const catInfo = categories.find(c => c.name === cat);
                 if (catInfo && catInfo.isCumulative) {
@@ -1399,7 +1591,7 @@
                 </div>
                 <div style="display:flex;justify-content:space-between;font-size:1.1rem;">
                     <span>Surplus: <strong style="color:${totalRemaining >= -0.01 ? '#27ae60' : '#e74c3c'}">${totalRemaining >= -0.01 ? '+' : ''}$${Math.abs(totalRemaining).toFixed(2)}</strong></span>
-                    <span style="color:#666">${totalPct.toFixed(1)}% used</span>
+                    <span style="color:var(--muted)">${totalPct.toFixed(1)}% used</span>
                 </div>
             `;
             list.innerHTML = budgetCats.filter(cat => {
@@ -1424,16 +1616,16 @@
                     budget = bank;
                     remaining = budget - actual;
                     pct = budget > 0 && actual > 0 ? (actual / budget) * 100 : 0;
-                    budgetInput = `<span style="font-weight:600;color:#856404;">Bank: $${budget.toFixed(2)}</span>`;
+                    budgetInput = `<span style="font-weight:600;color:var(--warning-text);">Bank: $${budget.toFixed(2)}</span>`;
                 } else {
                     budget = budgets[cat][month] !== undefined ? budgets[cat][month] : 0;
                     remaining = budget - actual;
                     pct = budget > 0 && actual > 0 ? (actual / budget) * 100 : 0;
-                    budgetInput = `Budget: <input type="number" class="budget-input" data-cat="${cat}" data-month="${month}" value="${budget}" style="width:80px;padding:4px;border:1px solid #ddd;border-radius:4px;">`;
+                    budgetInput = `Budget: <input type="number" class="budget-input" data-cat="${cat}" data-month="${month}" value="${budget}" style="width:80px;padding:4px;border:1px solid var(--border-strong);border-radius:4px;">`;
                 }
 
                 return `
-                    <div class="budget-item" style="flex-direction:column;gap:5px;">
+                    <div class="budget-item" data-cat="${cat}" style="flex-direction:column;gap:5px;">
                         <div style="display:flex;justify-content:space-between;align-items:center;">
                             <div>
                                 ${cat}
@@ -1443,7 +1635,7 @@
                                 ${remaining >= 0 ? '+' : ''}$${remaining.toFixed(2)}
                             </div>
                         </div>
-                        <div style="font-size:0.85rem;color:#666">
+                        <div style="font-size:0.85rem;color:var(--muted)">
                             ${budgetInput} | Actual: $${actual.toFixed(2)}
                         </div>
                         <div class="progress-bar" style="width:100%;">
@@ -1471,6 +1663,8 @@
                     renderYearlyBudget();
                 });
             });
+
+            setupDragAndDrop(list, 'monthly');
         }
 
         function renderYearlyBudget() {
@@ -1495,7 +1689,7 @@
 
             let totalBudget = 0;
             let totalActual = 0;
-            const budgetCats = Object.keys(budgets);
+            const budgetCats = getSortedBudgetCats();
 
             budgetCats.forEach(cat => {
                 const catInfo = categories.find(c => c.name === cat);
@@ -1524,7 +1718,7 @@
                 </div>
                 <div style="display:flex;justify-content:space-between;font-size:1.1rem;">
                     <span>Surplus: <strong style="color:${totalRemaining >= -0.01 ? '#27ae60' : '#e74c3c'}">${totalRemaining >= -0.01 ? '+' : ''}$${Math.abs(totalRemaining).toFixed(2)}</strong></span>
-                    <span style="color:#666">${totalPct.toFixed(1)}% used</span>
+                    <span style="color:var(--muted)">${totalPct.toFixed(1)}% used</span>
                 </div>
             `;
             
@@ -1560,9 +1754,9 @@
                 const remaining = budget - actual;
                 const pct = budget > 0 && actual > 0 ? (actual / budget) * 100 : 0;
                 const catTransactions = isCumulative ? yearData.filter(t => t.category === cat) : [];
-                const transactionDebug = isCumulative ? catTransactions.map(t => `<div style="font-size:0.7rem;color:#999;padding-left:10px;">${t.date} ${t.description}: $${Math.abs(t.amount).toFixed(2)}</div>`).join('') : '';
+                const transactionDebug = isCumulative ? catTransactions.map(t => `<div style="font-size:0.7rem;color:var(--muted-light);padding-left:10px;">${t.date} ${t.description}: $${Math.abs(t.amount).toFixed(2)}</div>`).join('') : '';
                 return `
-                    <div class="budget-item" style="flex-direction:column;gap:5px;">
+                    <div class="budget-item" data-cat="${cat}" style="flex-direction:column;gap:5px;">
                         <div style="display:flex;justify-content:space-between;align-items:center;">
                             <div>
                                 ${cat}
@@ -1572,8 +1766,8 @@
                                 ${remaining >= -0.01 ? '+' : ''}$${Math.abs(remaining).toFixed(2)}
                             </div>
                         </div>
-                        <div style="font-size:0.85rem;color:#666">${isCumulative ? 'Bank' : 'Budget'}: $${budget.toFixed(2)} | Actual: $${actual.toFixed(2)}</div>
-                        <!-- ${isCumulative ? `<div style="font-size:0.75rem;color:#999;margin-top:2px;">Jan ${year} Bank $${(catInfo.bankBalances[year + '-01'] || 0).toFixed(2)} + (11 × $${catInfo.cumulativeAmount.toFixed(2)}) = $${budget.toFixed(2)}</div>` : ''} -->
+                        <div style="font-size:0.85rem;color:var(--muted)">${isCumulative ? 'Bank' : 'Budget'}: $${budget.toFixed(2)} | Actual: $${actual.toFixed(2)}</div>
+                        <!-- ${isCumulative ? `<div style="font-size:0.75rem;color:var(--muted-light);margin-top:2px;">Jan ${year} Bank $${(catInfo.bankBalances[year + '-01'] || 0).toFixed(2)} + (11 × $${catInfo.cumulativeAmount.toFixed(2)}) = $${budget.toFixed(2)}</div>` : ''} -->
                         <!-- ${transactionDebug} -->
                         <div class="progress-bar" style="width:100%;">
                             <div class="fill ${pct > 100 ? 'over' : ''}" style="width:${Math.min(pct, 100)}%"></div>
@@ -1581,6 +1775,8 @@
                     </div>
                 `;
             }).join('');
+
+            setupDragAndDrop(list, 'yearly');
         }
 
         function renderAll() {
@@ -1626,17 +1822,17 @@
             const total = incomeData.reduce((sum, t) => sum + t.amount, 0);
             const list = document.getElementById('monthlyIncome');
             list.innerHTML = `
-                <div style="font-size:1.5rem;font-weight:600;color:#27ae60;margin-bottom:15px;">$${total.toFixed(2)}</div>
+                <div style="font-size:1.5rem;font-weight:600;color:var(--success);margin-bottom:15px;">$${total.toFixed(2)}</div>
                 <div style="max-height:250px;overflow-y:auto;">
                     ${incomeData.map(t => {
                         const idx = transactions.indexOf(t);
                         return `
-                        <div style="display:flex;justify-content:space-between;padding:8px;border-bottom:1px solid #eee;cursor:pointer;" onclick="openEditModal(${idx})">
+                        <div style="display:flex;justify-content:space-between;padding:8px;border-bottom:1px solid var(--border);cursor:pointer;" onclick="openEditModal(${idx})">
                             <div>
-                                <div style="font-size:0.85rem;color:#666;">${t.date}</div>
+                                <div style="font-size:0.85rem;color:var(--muted);">${t.date}</div>
                                 <div>${t.description}</div>
                             </div>
-                            <div style="font-weight:600;color:#27ae60;">$${t.amount.toFixed(2)}</div>
+                            <div style="font-weight:600;color:var(--success);">$${t.amount.toFixed(2)}</div>
                         </div>
                     `}).join('')}
                 </div>
@@ -1662,11 +1858,11 @@
             
             const list = document.getElementById('yearlyIncome');
             list.innerHTML = `
-                <div style="font-size:1.5rem;font-weight:600;color:#27ae60;margin-bottom:15px;">$${total.toFixed(2)}</div>
+                <div style="font-size:1.5rem;font-weight:600;color:var(--success);margin-bottom:15px;">$${total.toFixed(2)}</div>
                 ${sortedTypes.map(type => `
-                    <div style="display:flex;justify-content:space-between;padding:8px;border-bottom:1px solid #eee;">
+                    <div style="display:flex;justify-content:space-between;padding:8px;border-bottom:1px solid var(--border);">
                         <div>${type}</div>
-                        <div style="font-weight:600;color:#27ae60;">$${incomeByType[type].toFixed(2)}</div>
+                        <div style="font-weight:600;color:var(--success);">$${incomeByType[type].toFixed(2)}</div>
                     </div>
                 `).join('')}
             `;
@@ -2388,6 +2584,8 @@
         }
 
         loadData();
+
+        document.getElementById('themeToggle').addEventListener('click', toggleTheme);
     </script>
 </body>
 </html>
