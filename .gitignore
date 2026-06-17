@@ -1,4 +1,5 @@
 .opencode/
 Old CSVs/
 statements/
-budget-data.jsonbad-data.json
+budget-data.json
+bad-data.json

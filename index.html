@@ -121,9 +121,13 @@
         .transaction .amount.positive { color: var(--success); }
         .transaction .amount.negative { color: var(--danger); }
         .transaction .category { display: inline-block; padding: 4px 8px; background: var(--badge-bg); border-radius: 4px; font-size: 0.8rem; margin-left: 10px; }
+        .transaction-left { flex: 1; min-width: 0; }
+        .transaction-main { display: flex; justify-content: space-between; align-items: baseline; gap: 8px; }
+        .transaction-desc { flex: 1; min-width: 0; }
+        .transaction-tags { text-align: right; flex-shrink: 0; white-space: nowrap; }
         .filters { display: flex; gap: 10px; margin-bottom: 20px; flex-wrap: wrap; }
         select, input[type="month"], input[type="number"], input[type="text"], input[type="date"] { padding: 8px 12px; border: 1px solid var(--border-strong); border-radius: 6px; font-size: 0.9rem; background: var(--surface); color: var(--text); }
-        .chart-container { position: relative; height: 300px; }
+        .chart-container { position: relative; min-height: 300px; }
         .stats { display: grid; grid-template-columns: repeat(3, 1fr); gap: 15px; margin-bottom: 20px; }
         .stat { background: var(--surface); padding: 15px; border-radius: 8px; text-align: center; }
         .stat .value { font-size: 1.5rem; font-weight: 600; color: var(--text); }
@@ -261,15 +265,8 @@
             .transaction {
                 flex-wrap: wrap;
                 gap: 5px;
-                justify-content: space-between;
             }
-            .transaction > div:last-child {
-                width: 100%;
-                text-align: right;
-                display: flex;
-                justify-content: flex-end;
-                align-items: center;
-                gap: 6px;
+            .transaction-main {
                 flex-wrap: wrap;
             }
             .chart-container {
@@ -1506,15 +1503,17 @@
                 
                 return `
                 <div class="transaction" style="cursor:pointer;" onclick="openEditModal(${idx})">
-                    <div>
+                    <div class="transaction-left">
                         <div class="date">${t.date}</div>
-                        <div>${t.description}</div>
+                        <div class="transaction-main">
+                            <span class="transaction-desc">${t.description}</span>
+                            <span class="amount ${amountClass}">
+                                ${amountPrefix}$${Math.abs(amountVal).toFixed(2)}
+                            </span>
+                        </div>
                         ${t.merchant ? `<div style="color:var(--muted);font-size:0.85rem">${t.merchant}</div>` : ''}
                     </div>
-                    <div style="text-align:right">
-                        <div class="amount ${amountClass}">
-                            ${amountPrefix}$${Math.abs(amountVal).toFixed(2)}
-                        </div>
+                    <div class="transaction-tags">
                         <span class="category">${t.category || 'Uncategorized'}</span>
                         ${t.account ? `<span style="color:var(--muted-light);font-size:0.75rem;margin-left:6px;">${t.account}</span>` : ''}
                     </div>
@@ -1627,7 +1626,7 @@
                                 }
                             }
                         },
-                        legend: { position: window.innerWidth <= 768 ? 'bottom' : 'right' }
+                        legend: { position: window.innerWidth <= 768 ? 'bottom' : 'right', labels: { textAlign: 'left' } }
                     },
                     onClick: (evt, elements) => {
                         if (elements.length > 0) {
@@ -1648,7 +1647,7 @@
                 options: {
                     responsive: true,
                     maintainAspectRatio: false,
-                    plugins: { tooltip: { callbacks: { label: (ctx) => `${ctx.label}: $${ctx.raw.toFixed(2)}` } }, legend: { position: window.innerWidth <= 768 ? 'bottom' : 'right' } }
+                    plugins: { tooltip: { callbacks: { label: (ctx) => `${ctx.label}: $${ctx.raw.toFixed(2)}` } }, legend: { position: window.innerWidth <= 768 ? 'bottom' : 'right', labels: { textAlign: 'left' } } }
                 }
             });
         }
