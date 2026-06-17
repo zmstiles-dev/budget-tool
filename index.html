@@ -122,9 +122,10 @@
         .transaction .amount.negative { color: var(--danger); }
         .transaction .category { display: inline-block; padding: 4px 8px; background: var(--badge-bg); border-radius: 4px; font-size: 0.8rem; margin-left: 10px; }
         .transaction-left { flex: 1; min-width: 0; }
+        .transaction-right { text-align: right; flex-shrink: 0; }
         .transaction-main { display: flex; justify-content: space-between; align-items: baseline; gap: 8px; }
         .transaction-desc { flex: 1; min-width: 0; }
-        .transaction-tags { text-align: right; flex-shrink: 0; white-space: nowrap; }
+        .transaction-tags { text-align: right; white-space: nowrap; }
         .filters { display: flex; gap: 10px; margin-bottom: 20px; flex-wrap: wrap; }
         select, input[type="month"], input[type="number"], input[type="text"], input[type="date"] { padding: 8px 12px; border: 1px solid var(--border-strong); border-radius: 6px; font-size: 0.9rem; background: var(--surface); color: var(--text); }
         .chart-container { position: relative; height: 400px; }
