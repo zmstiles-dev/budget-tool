@@ -1627,7 +1627,7 @@
                                 }
                             }
                         },
-                        legend: { position: 'right', labels: { textAlign: 'left', boxWidth: 14, padding: 12 }, columns: 2 }
+                        legend: { position: window.innerWidth <= 768 ? 'bottom' : 'right', labels: { textAlign: 'left', boxWidth: 14, padding: 12 }, columns: 2 }
                     },
                     onClick: (evt, elements) => {
                         if (elements.length > 0) {
@@ -1648,7 +1648,7 @@
                 options: {
                     responsive: true,
                     maintainAspectRatio: false,
-                    plugins: { tooltip: { callbacks: { label: (ctx) => `${ctx.label}: $${ctx.raw.toFixed(2)}` } }, legend: { position: 'right', labels: { textAlign: 'left', boxWidth: 14, padding: 12 }, columns: 2 } }
+                    plugins: { tooltip: { callbacks: { label: (ctx) => `${ctx.label}: $${ctx.raw.toFixed(2)}` } }, legend: { position: window.innerWidth <= 768 ? 'bottom' : 'right', labels: { textAlign: 'left', boxWidth: 14, padding: 12 }, columns: 2 } }
                 }
             });
         }
