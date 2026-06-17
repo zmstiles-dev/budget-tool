@@ -245,6 +245,9 @@
                 min-width: unset;
                 width: 100%;
             }
+            .month-header-row {
+                flex-direction: column;
+            }
             #monthlySummary, #yearlySummary {
                 flex-direction: column;
                 gap: 10px;
@@ -258,6 +261,19 @@
             .transaction {
                 flex-wrap: wrap;
                 gap: 5px;
+                justify-content: space-between;
+            }
+            .transaction > div:last-child {
+                width: 100%;
+                text-align: right;
+                display: flex;
+                justify-content: flex-end;
+                align-items: center;
+                gap: 6px;
+                flex-wrap: wrap;
+            }
+            .chart-container {
+                overflow: hidden;
             }
         }
     </style>
@@ -293,7 +309,7 @@
         <main class="main-content">
         <div id="monthly" class="panel active">
             <input type="hidden" id="monthFilter">
-            <div style="display:flex;gap:20px;align-items:stretch;margin-bottom:20px;">
+            <div class="month-header-row" style="display:flex;gap:20px;align-items:stretch;margin-bottom:20px;">
                 <div class="month-calendar" style="align-self:stretch;display:flex;flex-direction:column;justify-content:center;">
                     <div class="month-calendar-header">
                         <button class="month-cal-nav" id="calPrevYear">&lt;</button>
@@ -1611,7 +1627,7 @@
                                 }
                             }
                         },
-                        legend: { position: 'right' }
+                        legend: { position: window.innerWidth <= 768 ? 'bottom' : 'right' }
                     },
                     onClick: (evt, elements) => {
                         if (elements.length > 0) {
@@ -1632,7 +1648,7 @@
                 options: {
                     responsive: true,
                     maintainAspectRatio: false,
-                    plugins: { tooltip: { callbacks: { label: (ctx) => `${ctx.label}: $${ctx.raw.toFixed(2)}` } }, legend: { position: 'right' } }
+                    plugins: { tooltip: { callbacks: { label: (ctx) => `${ctx.label}: $${ctx.raw.toFixed(2)}` } }, legend: { position: window.innerWidth <= 768 ? 'bottom' : 'right' } }
                 }
             });
         }
