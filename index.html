@@ -120,7 +120,7 @@
         .transaction .amount { font-weight: 600; }
         .transaction .amount.positive { color: var(--success); }
         .transaction .amount.negative { color: var(--danger); }
-        .transaction .category { display: inline-block; padding: 4px 8px; background: var(--badge-bg); border-radius: 4px; font-size: 0.8rem; margin-left: 10px; }
+        .transaction .category { display: inline-block; padding: 4px 8px; background: var(--badge-bg); border-radius: 4px; font-size: 0.8rem; margin-top: 4px; }
         .transaction-left { flex: 1; min-width: 0; }
         .transaction-right { text-align: right; flex-shrink: 0; }
         .transaction-main { display: flex; justify-content: space-between; align-items: baseline; gap: 8px; }
@@ -215,6 +215,7 @@
             font-size: 1.2rem;
             cursor: pointer;
         }
+        .hamburger.hidden { display: none; }
         .sidebar-overlay {
             display: none;
             position: fixed;
@@ -1513,10 +1514,8 @@
                         <div class="amount ${amountClass}">
                             ${amountPrefix}$${Math.abs(amountVal).toFixed(2)}
                         </div>
-                        <div class="transaction-tags">
-                            <span class="category">${t.category || 'Uncategorized'}</span>
-                            ${t.account ? `<span style="color:var(--muted-light);font-size:0.75rem;margin-left:6px;">${t.account}</span>` : ''}
-                        </div>
+                        <span class="category">${t.category || 'Uncategorized'}</span>
+                        ${t.account ? `<div style="color:var(--muted-light);font-size:0.75rem;margin-top:2px;">${t.account}</div>` : ''}
                     </div>
                 </div>
             `}).join('');
@@ -2802,15 +2801,18 @@
         document.getElementById('hamburger').addEventListener('click', () => {
             document.querySelector('.sidebar').classList.toggle('open');
             document.getElementById('sidebarOverlay').classList.toggle('active');
+            document.getElementById('hamburger').classList.toggle('hidden');
         });
         document.getElementById('sidebarOverlay').addEventListener('click', () => {
             document.querySelector('.sidebar').classList.remove('open');
             document.getElementById('sidebarOverlay').classList.remove('active');
+            document.getElementById('hamburger').classList.remove('hidden');
         });
         document.querySelectorAll('.nav-item').forEach(item => {
             item.addEventListener('click', () => {
                 document.querySelector('.sidebar').classList.remove('open');
                 document.getElementById('sidebarOverlay').classList.remove('active');
+                document.getElementById('hamburger').classList.remove('hidden');
             });
         });
     </script>
