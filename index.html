@@ -2264,7 +2264,7 @@
                 const defaultInfo = getDefaultCategory(desc);
 
                 if (/payment.*card|online\s*py?mt|mobile\s*py?mt|payment\s*thank\s*you|capital\s*one\s*(mobile|online)\s*py?mt/i.test(desc)) continue;
-                if (/remote\s*online\s*deposit/i.test(desc)) continue;
+                if (account !== 'Checking Account' && /remote\s*online\s*deposit/i.test(desc)) continue;
                 if (account === 'Checking Account' && /morgan\s*stanley/i.test(desc)) continue;
 
                 const normalizedMerchant = normalizeMerchant(desc);
