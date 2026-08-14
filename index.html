@@ -676,6 +676,7 @@
                 return;
             }
             populateDateFilters();
+            initializeCumulativeBanks();
             renderAll();
         }
 
@@ -884,25 +885,45 @@
 
             categories.forEach(cat => {
                 if (!cat.isCumulative) return;
-                const existingMonths = Object.keys(cat.bankBalances)
+                const definedMonths = Object.keys(cat.bankBalances)
                     .filter(m => cat.bankBalances[m] !== undefined)
                     .sort();
-                if (existingMonths.length === 0) return;
-                let balance = cat.bankBalances[existingMonths[0]];
-                const startIdx = sortedMonths.indexOf(existingMonths[0]);
-                for (let i = startIdx; i < sortedMonths.length; i++) {
-                    const month = sortedMonths[i];
-                    if (cat.bankBalances[month] !== undefined) {
-                        balance = cat.bankBalances[month];
+                if (definedMonths.length === 0) return;
+                const earliestMonth = definedMonths[0];
+                const latestMonth = sortedMonths[sortedMonths.length - 1];
+                const allMonths = getAllMonths(earliestMonth, latestMonth);
+                let balance = cat.bankBalances[earliestMonth];
+                for (let i = 1; i < allMonths.length; i++) {
+                    const month = allMonths[i];
+                    const prevMonth = getPreviousMonth(month);
+                    const prevSpending = prevMonth ? getMonthCategorySpending(cat.name, prevMonth) : 0;
+                    const withoutSpending = balance + cat.cumulativeAmount;
+                    const expected = balance - prevSpending + cat.cumulativeAmount;
+                    const stored = cat.bankBalances[month];
+                    if (stored !== undefined && prevSpending > 0 && Math.abs(stored - withoutSpending) < 0.01) {
+                        balance = expected;
+                        cat.bankBalances[month] = balance;
+                    } else if (stored !== undefined) {
+                        balance = stored;
                     } else {
-                        const prevMonth = getPreviousMonth(month);
-                        const prevSpending = prevMonth ? getMonthCategorySpending(cat.name, prevMonth) : 0;
-                        balance = balance - prevSpending + cat.cumulativeAmount;
+                        balance = expected;
                         cat.bankBalances[month] = balance;
                     }
                 }
             });
             saveCategories();
+         }
+
+         function getAllMonths(startMonth, endMonth) {
+            const result = [];
+            let [y, m] = startMonth.split('-').map(Number);
+            const [ey, em] = endMonth.split('-').map(Number);
+            while (y < ey || (y === ey && m <= em)) {
+                result.push(y + '-' + String(m).padStart(2, '0'));
+                m++;
+                if (m > 12) { m = 1; y++; }
+            }
+            return result;
          }
 
         function saveCategories() {
@@ -916,20 +937,7 @@
         }
 
          function addCumulativeBankAmounts(month) {
-            if (!month) return;
-            let changed = false;
-            categories.forEach(cat => {
-                if (cat.isCumulative && cat.bankBalances[month] === undefined) {
-                    const prevMonth = getPreviousMonth(month);
-                    const prevBalance = prevMonth ? (cat.bankBalances[prevMonth] || 0) : 0;
-                    const prevSpending = prevMonth ? getMonthCategorySpending(cat.name, prevMonth) : 0;
-                    cat.bankBalances[month] = prevBalance - prevSpending + cat.cumulativeAmount;
-                    changed = true;
-                }
-            });
-            if (changed) {
-                saveCategories();
-            }
+            initializeCumulativeBanks();
          }
 
         function getPreviousMonth(monthStr) {
