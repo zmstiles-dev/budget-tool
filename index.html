@@ -900,14 +900,20 @@
                     const withoutSpending = balance + cat.cumulativeAmount;
                     const expected = balance - prevSpending + cat.cumulativeAmount;
                     const stored = cat.bankBalances[month];
-                    if (stored !== undefined && prevSpending > 0 && Math.abs(stored - withoutSpending) < 0.01) {
+                    if (stored === undefined) {
                         balance = expected;
                         cat.bankBalances[month] = balance;
-                    } else if (stored !== undefined) {
-                        balance = stored;
                     } else {
-                        balance = expected;
-                        cat.bankBalances[month] = balance;
+                        const buggySpending = prevMonth ? getMonthCategorySpendingAbs(cat.name, prevMonth) : 0;
+                        const buggyExpected = balance - buggySpending + cat.cumulativeAmount;
+                        const looksUngenerated = Math.abs(stored - withoutSpending) < 0.01;
+                        const looksBuggy = Math.abs(stored - buggyExpected) < 0.01 && Math.abs(buggyExpected - expected) > 0.01;
+                        if (looksUngenerated || looksBuggy) {
+                            balance = expected;
+                            cat.bankBalances[month] = balance;
+                        } else {
+                            balance = stored;
+                        }
                     }
                 }
             });
@@ -950,6 +956,12 @@
         }
 
         function getMonthCategorySpending(catName, month) {
+            return transactions
+                .filter(t => t.date && t.date.startsWith(month) && t.category === catName && (t.type === 'expense' || t.amount < 0))
+                .reduce((sum, t) => sum + (parseFloat(t.amount) || 0), 0);
+        }
+
+        function getMonthCategorySpendingAbs(catName, month) {
             return transactions
                 .filter(t => t.date && t.date.startsWith(month) && t.category === catName && (t.type === 'expense' || t.amount < 0))
                 .reduce((sum, t) => sum + Math.abs(parseFloat(t.amount) || 0), 0);
@@ -1119,7 +1131,7 @@
             document.getElementById('cumulativeOptions').style.display = cat.isCumulative ? 'block' : 'none';
             document.getElementById('categoryFormCumulativeAmount').value = cat.cumulativeAmount || '';
             const currentMonth = document.getElementById('monthFilter').value;
-            document.getElementById('categoryFormInitialBank').value = cat.bankBalances[currentMonth] || '';
+            document.getElementById('categoryFormInitialBank').value = cat.bankBalances[currentMonth] !== undefined ? cat.bankBalances[currentMonth] : '';
             document.getElementById('categoryFormEditIndex').value = index;
             initColorPicker(cat.color);
             document.getElementById('categoryFormModal').classList.add('active');
@@ -1157,7 +1169,8 @@
             const newGroup = document.getElementById('categoryFormNewGroup').value.trim();
             const isCumulative = document.getElementById('categoryFormIsCumulative').checked;
             const cumulativeAmount = parseFloat(document.getElementById('categoryFormCumulativeAmount').value) || 0;
-            const initialBank = parseFloat(document.getElementById('categoryFormInitialBank').value) || 0;
+            const initialBankRaw = document.getElementById('categoryFormInitialBank').value;
+            const initialBank = initialBankRaw === '' ? null : parseFloat(initialBankRaw);
             const editIndex = document.getElementById('categoryFormEditIndex').value;
             const color = getSelectedColor();
 
@@ -1191,7 +1204,7 @@
                     cumulativeAmount: cumulativeAmount,
                     bankBalances: oldCat.bankBalances || {}
                 };
-                if (isCumulative && initialBank > 0) {
+                if (isCumulative && initialBank !== null && !isNaN(initialBank)) {
                     categories[idx].bankBalances[currentMonth] = initialBank;
                 }
                 delete budgets[oldCat.name];
@@ -1210,7 +1223,7 @@
                     cumulativeAmount: cumulativeAmount,
                     bankBalances: {}
                 };
-                if (isCumulative && initialBank > 0) {
+                if (isCumulative && initialBank !== null && !isNaN(initialBank)) {
                     newCat.bankBalances[currentMonth] = initialBank;
                 }
                 categories.push(newCat);
@@ -1796,7 +1809,7 @@
                 } else {
                     budget = budgets[cat][month] !== undefined ? budgets[cat][month] : 0;
                 }
-                return actual > 0 || budget > 0 || (isCumulative && budget !== 0);
+                return actual !== 0 || budget !== 0;
             }).map(cat => {
                 const catInfo = categories.find(c => c.name === cat);
                 const isCumulative = catInfo && catInfo.isCumulative;
