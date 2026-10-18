@@ -113,7 +113,16 @@ manifest to `POST /api/v1/sites/{site_id}/deploys` with a `functions` entry
 whose `budgetTransactions` value is the SHA-256 digest of
 `budgetTransactions.zip`. After Netlify returns the deploy ID, upload the ZIP
 bytes to
-`PUT /api/v1/deploys/{deploy_id}/functions/budgetTransactions?runtime=js`.
+`PUT /api/v1/deploys/{deploy_id}/functions/budgetTransactions?runtime=nodejs24.x&invocation_mode=stream`.
+The deploy manifest must also carry a `functions_config` entry for
+`budgetTransactions` with `runtime: nodejs24.x`, `invocation_mode: stream`, and
+`build_data` identifying the v2 API and bootstrap version. The reviewed
+archive's generated function metadata records the same contract:
+`runtimeAPIVersion=2`, `runtimeVersion=nodejs24.x`, `invocationMode=stream`,
+`entryFilename=___netlify-entry-point.mjs`, and the ZISI v2 bootstrap version.
+Verify those values in
+`netlify/.artifact/manifest.json` before upload; do not substitute a legacy
+named `handler` entry or a callback/event invocation contract.
 Use a private approved API credential supplied by the operator; never put it in
 this repository, chat, command arguments, logs, or a hosted build. The
 whole-site ZIP endpoint is a static-site deployment method and is not the

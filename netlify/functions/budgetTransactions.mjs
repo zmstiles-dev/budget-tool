@@ -394,6 +394,10 @@ export function createNetlifyHandler(options = {}) {
     };
 }
 
-export const handler = createNetlifyHandler();
+// Export only the Web API default.  Netlify's static analysis treats a named
+// `handler` export as the legacy event/callback API, even when a default Web
+// handler is also present.  Keeping this entry v2 is required for Request /
+// Response invocation and the v2 streaming bootstrap emitted by ZISI.
+const handler = createNetlifyHandler();
 export default handler;
 export { assertTrustedProductionContext, assertRequestHost, parseRuntimeConfig, initializeFirebase, invokeNodeHandler, lazyPlaidClient, FUNCTION_ROUTE_PREFIX };

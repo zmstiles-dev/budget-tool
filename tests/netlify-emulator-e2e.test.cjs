@@ -157,7 +157,7 @@ async function clearSyntheticState(db) {
     execFileSync(process.execPath, ['scripts/prepare-netlify.cjs'], { cwd: root, stdio: 'pipe' });
     const runtime = await import(`file://${path.join(root, 'netlify', 'functions', 'budgetTransactions.mjs').replaceAll('\\', '/')}`);
     assert.equal(typeof runtime.default, 'function');
-    assert.equal(typeof runtime.handler, 'function');
+    assert.equal('handler' in runtime, false, 'the Netlify entry must use the v2 default export');
     const app = initializeApp({ projectId: EMULATOR_PROJECT, credential: cert({ projectId: EMULATOR_PROJECT, clientEmail: 'budget-transactions-runtime@budget-tool-sync.iam.gserviceaccount.com', privateKey: PRIVATE_KEY }) }, 'netlify-emulator-test');
     const auth = getAuth(app);
     const db = getFirestore(app);

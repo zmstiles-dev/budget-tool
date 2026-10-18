@@ -124,9 +124,15 @@ function zipInventory(file) {
 
 function assertArchiveInventory(entries, runtimeEntries) {
     const runtimeSet = new Set(runtimeEntries.map(name => `_runtime/${name}`));
-    if (!entries.includes('budgetTransactions.mjs') || !entries.includes('___netlify-telemetry.mjs')) throw new Error('Netlify archive entry is missing.');
+    const v2BootstrapEntries = new Set([
+        '___netlify-bootstrap.mjs',
+        '___netlify-entry-point.mjs',
+        '___netlify-metadata.json',
+        '___netlify-telemetry.mjs'
+    ]);
+    if (!entries.includes('budgetTransactions.mjs') || [...v2BootstrapEntries].some(name => !entries.includes(name))) throw new Error('Netlify v2 archive entry is missing.');
     for (const name of entries) {
-        if (name === 'budgetTransactions.mjs' || name === '___netlify-telemetry.mjs' || runtimeSet.has(name) || name.startsWith('node_modules/')) continue;
+        if (name === 'budgetTransactions.mjs' || v2BootstrapEntries.has(name) || runtimeSet.has(name) || name.startsWith('node_modules/')) continue;
         throw new Error(`Unexpected Netlify archive entry: ${name}`);
     }
     for (const name of runtimeSet) if (!entries.includes(name)) throw new Error(`Missing Netlify archive runtime entry: ${name}`);
@@ -215,7 +221,13 @@ async function main() {
                     nodeVersion: '24',
                     nodeModuleFormat: 'esm',
                     externalNodeModules: ['firebase-admin', 'plaid'],
-                    includedFiles: runtimeEntries.map(name => `_runtime/${name}`),
+                    // The provider SDK is loaded behind the provider gate
+                    // through the injected dependency seam. ZISI cannot
+                    // discover that dynamic require, so retain the complete
+                    // production-only node_modules closure from this staging
+                    // install. The staging install uses --omit=dev and the
+                    // archive guard rejects every build-only package.
+                    includedFiles: [...runtimeEntries.map(name => `_runtime/${name}`), 'node_modules/**'],
                     includedFilesBasePath: staging
                 }
             }
@@ -236,10 +248,17 @@ async function main() {
     assertEntries(artifactPublic, ['.gitkeep'], 'artifact public');
 
     const lock = JSON.parse(fs.readFileSync(path.join(netlifyDir, 'package-lock.json'), 'utf8'));
+    const functionResult = zipResults[0];
+    const functionBuild = functionResult && functionResult.buildData || {};
+    if (functionResult?.runtimeAPIVersion !== 2 || functionBuild.runtimeAPIVersion !== 2) throw new Error('Netlify function did not build as Web API v2.');
+    if (functionResult?.runtimeVersion !== 'nodejs24.x') throw new Error(`Unexpected Netlify function runtime: ${functionResult?.runtimeVersion || 'missing'}`);
+    if (functionResult?.invocationMode !== 'stream') throw new Error(`Unexpected Netlify invocation mode: ${functionResult?.invocationMode || 'missing'}`);
+    if (functionResult?.entryFilename !== '___netlify-entry-point.mjs') throw new Error(`Unexpected Netlify v2 entry point: ${functionResult?.entryFilename || 'missing'}`);
     const manifest = {
         schemaVersion: 2,
         source: 'local-trusted-prebuilt-netlify-artifact',
         runtime: 'node24',
+        function: { runtimeAPIVersion: functionResult.runtimeAPIVersion, runtimeVersion: functionResult.runtimeVersion, invocationMode: functionResult.invocationMode, entryFilename: functionResult.entryFilename, bootstrapVersion: functionBuild.bootstrapVersion },
         bundle: { file: 'functions/budgetTransactions.mjs', sha256: hashFile(bundle), esbuildVersion: esbuild.version, inputs: Object.keys(result.metafile && result.metafile.inputs || {}).filter(value => !value.includes('node_modules')) },
         archive: { file: 'budgetTransactions.zip', sha256: hashFile(archivePath), bundler: '@netlify/zip-it-and-ship-it', version: lock.packages && lock.packages['node_modules/@netlify/zip-it-and-ship-it'] && lock.packages['node_modules/@netlify/zip-it-and-ship-it'].version, productionLockSha256: hashFile(path.join(netlifyDir, 'package-lock.json')), entries: archiveEntries },
         runtimeFiles: Object.fromEntries(runtimeEntries.map(name => [name, hashFile(path.join(artifactRuntime, name))])),

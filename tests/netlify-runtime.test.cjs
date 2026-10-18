@@ -384,11 +384,22 @@ function assertRejectsMessage(promise, pattern) {
     assert.equal(artifactManifest.dependencies.firebaseAdmin, '14.5.0');
     assert.equal(artifactManifest.dependencies.plaid, '38.1.0');
     assert.equal(artifactManifest.archive.version, '16.3.1');
+    assert.deepEqual(artifactManifest.function, {
+        runtimeAPIVersion: 2,
+        runtimeVersion: 'nodejs24.x',
+        invocationMode: 'stream',
+        entryFilename: '___netlify-entry-point.mjs',
+        bootstrapVersion: '2.24.0'
+    });
     assert.ok(Array.isArray(artifactManifest.archive.entries));
     assert.ok(artifactManifest.archive.entries.includes('budgetTransactions.mjs'));
+    assert.ok(artifactManifest.archive.entries.includes('___netlify-entry-point.mjs'));
+    assert.ok(artifactManifest.archive.entries.includes('___netlify-bootstrap.mjs'));
+    assert.ok(artifactManifest.archive.entries.includes('___netlify-metadata.json'));
     assert.ok(artifactManifest.archive.entries.includes('_runtime/production-service.js'));
     assert.ok(artifactManifest.archive.entries.includes('node_modules/firebase-admin/package.json'));
     assert.ok(artifactManifest.archive.entries.includes('node_modules/plaid/package.json'));
+    assert.ok(artifactManifest.archive.entries.includes('node_modules/axios/package.json'), 'the dynamic Plaid SDK closure must include axios');
     assert.equal(artifactManifest.archive.entries.some(entry => entry.startsWith('netlify/')), false);
     assert.equal(fs.existsSync(path.join(projectRoot, 'netlify', '.artifact', 'budget-data.json')), false);
     for (const file of [artifactManifest.bundle.file, ...Object.keys(artifactManifest.runtimeFiles).filter(name => name !== 'manifest.json').map(name => `functions/_runtime/${name}`)]) {
@@ -398,7 +409,7 @@ function assertRejectsMessage(promise, pattern) {
     }
     const bundled = await import(pathToFileURL(path.join(projectRoot, 'netlify', '.artifact', 'functions', 'budgetTransactions.mjs')).href);
     assert.equal(typeof bundled.default, 'function');
-    assert.equal(typeof bundled.handler, 'function');
+    assert.equal('handler' in bundled, false, 'the Netlify entry must not expose the legacy named handler export');
     assert.equal(artifactManifest.archive.bundler, '@netlify/zip-it-and-ship-it');
     const archivePath = path.join(projectRoot, 'netlify', '.artifact', artifactManifest.archive.file);
     assert.equal(fs.existsSync(archivePath), true);
@@ -408,11 +419,30 @@ function assertRejectsMessage(promise, pattern) {
     fs.mkdirSync(proofRoot, { recursive: true });
     try {
         execFileSync('tar', ['-xf', archivePath, '-C', proofRoot], { stdio: 'pipe' });
-        const isolatedEntry = path.join(proofRoot, 'budgetTransactions.mjs');
-        assert.equal(fs.existsSync(isolatedEntry), true);
-        const isolated = await import(pathToFileURL(isolatedEntry).href);
+        const isolatedSource = path.join(proofRoot, 'budgetTransactions.mjs');
+        assert.equal(fs.existsSync(isolatedSource), true);
+        const isolated = await import(pathToFileURL(isolatedSource).href);
         assert.equal(typeof isolated.default, 'function');
-        assert.equal(typeof isolated.handler, 'function');
+        assert.equal('handler' in isolated, false, 'the isolated source must not expose the legacy named handler export');
+        const isolatedMetadata = JSON.parse(fs.readFileSync(path.join(proofRoot, '___netlify-metadata.json'), 'utf8'));
+        assert.equal(isolatedMetadata.version, 1);
+        assert.equal(isolatedMetadata.bootstrap_version, '2.24.0');
+        const isolatedV2Entry = path.join(proofRoot, '___netlify-entry-point.mjs');
+        assert.equal(fs.existsSync(isolatedV2Entry), true);
+        // Node does not provide Netlify's Lambda streaming global. A minimal
+        // platform shim lets this test import the real generated v2 bootstrap
+        // and entry point while keeping the archive isolated from checkout
+        // dependencies; request invocation remains covered by the source
+        // default Web handler above.
+        const previousAwsLambda = globalThis.awslambda;
+        globalThis.awslambda = { streamifyResponse: implementation => implementation };
+        let isolatedV2;
+        try {
+            isolatedV2 = await import(pathToFileURL(isolatedV2Entry).href);
+        } finally {
+            if (previousAwsLambda === undefined) delete globalThis.awslambda; else globalThis.awslambda = previousAwsLambda;
+        }
+        assert.equal(typeof isolatedV2.handler, 'function', 'the uploaded v2 entry must expose the generated Lambda bootstrap handler');
         const { privateKey } = crypto.generateKeyPairSync('rsa', { modulusLength: 2048 });
         const isolatedEnvironment = {
             BUDGET_NETLIFY_SITE_ID: 'site-synthetic', BUDGET_NETLIFY_SITE_HOST: 'synthetic.example',
