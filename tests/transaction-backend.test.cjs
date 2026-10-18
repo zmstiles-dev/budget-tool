@@ -154,9 +154,10 @@ await durableReload.stage(auth, [record({ sourceId: 'pending-after-accepted' })]
 assert.equal((await durableReload.exportState(auth)).revision, durableApproval.revision);
 assert.ok(transactionCalls >= 2);
 
-// Ordinary accepted-state saves use a CAS and preserve unchanged legacy rows
-// that strict restore must continue to reject. Invalid rows are consumed as a
-// multiset so a caller cannot duplicate or alter one while bypassing validation.
+// Ordinary accepted-state saves use a CAS and preserve unchanged legacy rows.
+// Invalid rows are consumed as a multiset so a caller cannot duplicate or
+// alter one while bypassing validation. Explicit historical restore is the
+// only path that accepts an opaque date string.
 const legacyRow = record({ sourceId: 'legacy-invalid', date: '2023-02-30' });
 const legacyBackend = new ProtectedReviewBackend({ householdId: 'household-1', allowedUsers: ['reviewer@example.test'], initialState: { transactions: [legacyRow], categories: [{ name: 'Restaurants', type: 'expense' }], budgets: {}, merchantDefaults: {}, categoryGroups: [], categoryColors: {}, categoryOrder: [] } });
 const legacyBefore = await legacyBackend.exportState(auth);
@@ -175,7 +176,11 @@ assert.throws(() => legacyBackend.saveAcceptedState(auth, { ...settingsSave.stat
 assert.throws(() => legacyBackend.saveAcceptedState(auth, { ...settingsSave.state, merchantDefaults: { accessToken: 'must-not-persist' } }, metadataRevision), /credentials or provider tokens/);
 assert.equal((await legacyBackend.exportState(auth)).revision, metadataRevision);
 assert.throws(() => legacyBackend.replaceAccepted(auth, legacyCanonical, settingsSave.revision), /Backup transaction 1 is invalid/);
-const validLegacyEdit = await legacyBackend.saveAcceptedState(auth, { ...legacyCanonical, transactions: [{ ...legacyRow, date: '2026-10-02' }] }, settingsSave.revision);
+const historicalRestore = await legacyBackend.replaceAccepted(auth, { ...legacyCanonical, acceptedHistoryDateCompatibility: true }, settingsSave.revision);
+assert.equal(historicalRestore.ok, true);
+assert.equal(historicalRestore.state.transactions[0].date, '2023-02-30');
+assert.equal(Object.prototype.hasOwnProperty.call(historicalRestore.state, 'acceptedHistoryDateCompatibility'), false);
+const validLegacyEdit = await legacyBackend.saveAcceptedState(auth, { ...legacyCanonical, transactions: [{ ...legacyRow, date: '2026-10-02' }] }, historicalRestore.revision);
 assert.equal(validLegacyEdit.state.transactions[0].date, '2026-10-02');
 
 // Legacy accepted history can remain in canonical state even when its date
@@ -265,6 +270,14 @@ const missingRevisionResponse = { statusCode: 0, headers: {}, setHeader(name, va
 await acceptedStateHandler({ method: 'POST', url: '/accepted-state', headers: {}, on(event, handler) { if (event === 'data') process.nextTick(() => handler(JSON.stringify({ state: validLegacyEdit.state }))); if (event === 'end') process.nextTick(handler); } }, missingRevisionResponse);
 assert.equal(missingRevisionResponse.statusCode, 409);
 assert.equal((await legacyBackend.exportState(auth)).revision, validLegacyEdit.revision);
+const restoreBackend = new ProtectedReviewBackend({ householdId: 'household-1', allowedUsers: ['reviewer@example.test'], initialState: { transactions: [unknownLegacyRow], categories: [{ name: 'Restaurants', type: 'expense' }], budgets: {}, merchantDefaults: {}, categoryGroups: [], categoryColors: {}, categoryOrder: [] } });
+const restoreHandler = createHttpHandler({ backend: restoreBackend, authenticate: async () => auth });
+const restoreResponse = { statusCode: 0, headers: {}, setHeader(name, value) { this.headers[name] = value; }, end(body) { this.body = body; } };
+const restoreState = { transactions: [unknownLegacyRow], categories: [{ name: 'Restaurants', type: 'expense' }], budgets: {}, merchantDefaults: {}, categoryGroups: [], categoryColors: {}, categoryOrder: [], acceptedHistoryDateCompatibility: true };
+await restoreHandler({ method: 'POST', url: '/restore', headers: {}, on(event, handler) { if (event === 'data') process.nextTick(() => handler(JSON.stringify({ state: restoreState, expectedRevision: 0 }))); if (event === 'end') process.nextTick(handler); } }, restoreResponse);
+assert.equal(restoreResponse.statusCode, 200);
+assert.equal(JSON.parse(restoreResponse.body).state.transactions[0].date, 'Unknown');
+assert.equal(Object.prototype.hasOwnProperty.call(JSON.parse(restoreResponse.body).state, 'acceptedHistoryDateCompatibility'), false);
 
 const structuredFailureHandler = createHttpHandler({
     backend: { async listPending() { throw new Error('provider secret must never cross the HTTP boundary'); } },

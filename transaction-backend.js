@@ -77,7 +77,8 @@
         const message = text(error && error.message);
         const allowed = new Set([
             'Bearer authentication is required.', 'Firebase Admin authorization is not configured.',
-            'Authenticated user is not an approved app user.', 'Authenticated household membership is not configured.',
+            'Authenticated user is not an approved app user.', 'Authenticated user is not an existing app user.',
+            'Authenticated household membership is not configured.', 'User is not a member of this household.',
             'CORS origin is not allowed.', 'Request body is too large.', 'Request body must be valid JSON.',
             'Route not found.', 'Browser staging is limited to CSV observations.',
             'Approval candidates were already rejected or accepted.', 'A durable review transaction failed.'
@@ -402,6 +403,12 @@
         };
     }
 
+    function acceptsOpaqueAcceptedHistoryDates(source) {
+        if (!source || !Object.prototype.hasOwnProperty.call(source, 'acceptedHistoryDateCompatibility')) return false;
+        if (source.acceptedHistoryDateCompatibility !== true) throw new Error('Accepted history compatibility marker is invalid.');
+        return true;
+    }
+
     function sameSerialized(left, right) {
         return JSON.stringify(left) === JSON.stringify(right);
     }
@@ -447,6 +454,8 @@
             const opts = options || {};
             this.householdId = text(opts.householdId || 'default-household');
             this.allowedUsers = new Set((opts.allowedUsers || EXISTING_ALLOWED_USERS).map(value => text(value).toLowerCase()).filter(Boolean));
+            this.allowedUserIds = new Set((opts.allowedUserIds || []).map(value => text(value)).filter(Boolean));
+            this.allowExistingAppUserClaim = opts.allowExistingAppUserClaim === true;
             this.clock = typeof opts.clock === 'function' ? opts.clock : () => new Date().toISOString();
             this.pending = new Map();
             this.rejected = new Map();
@@ -476,7 +485,7 @@
             const actor = auth || {};
             const email = text(actor.email).toLowerCase();
             if (actor.tokenVerified !== true || !text(actor.uid) || !email) throw new Error('Authenticated server authorization is required.');
-            if (!this.allowedUsers.has(email)) throw new Error('Authenticated user is not an approved app user.');
+            if (!this.allowedUsers.has(email) && !this.allowedUserIds.has(text(actor.uid)) && !(this.allowExistingAppUserClaim && actor.existingAppUser === true)) throw new Error('Authenticated user is not an approved app user.');
             if (actor.householdId !== undefined && text(actor.householdId) !== this.householdId) throw new Error('User is not a member of this household.');
             return { uid: text(actor.uid), email, householdId: this.householdId };
         }
@@ -637,7 +646,7 @@
                 categories: Array.isArray(source.categories) ? source.categories : [],
                 budgets: source.budgets || {}, merchantDefaults: source.merchantDefaults || {},
                 categoryGroups: source.categoryGroups || [], categoryColors: source.categoryColors || {}, categoryOrder: source.categoryOrder || []
-            });
+            }, { allowOpaqueAcceptedHistoryDates: acceptsOpaqueAcceptedHistoryDates(source) });
             const invalidatedReceipts = this.receipts.size;
             this.accepted.clear();
             this.approvedAmendments.clear();
@@ -866,8 +875,9 @@
 
         exportReviewSnapshot() {
             // Keep legacy rows in canonical accepted state, but omit rows that
-            // cannot satisfy the strict review schema. No date is fabricated
-            // and strict backup restore remains unchanged.
+            // cannot satisfy the strict review schema. No date is fabricated;
+            // accepted-history backup compatibility is handled by the
+            // explicit restore/export marker rather than by review metadata.
             const accepted = [];
             const acceptedIds = new Set();
             [...this.accepted.values(), ...this.approvedAmendments.values()]
@@ -1032,6 +1042,8 @@
             const memory = new ProtectedReviewBackend({
                 householdId: this.policy.householdId,
                 allowedUsers: [...this.policy.allowedUsers],
+                allowedUserIds: [...this.policy.allowedUserIds],
+                allowExistingAppUserClaim: this.policy.allowExistingAppUserClaim,
                 clock: this.policy.clock,
                 initialState: snapshot && snapshot.state ? { ...snapshot.state, transactions: (snapshot.accepted || []).map(entry => Array.isArray(entry) ? entry[1] : entry) } : {}
             });
@@ -1330,6 +1342,10 @@
             (result && result.pending || []).forEach(candidate => this.stagedIds.add(candidate.id));
             return result;
         }
+        async createLinkToken(connectionKey, sessionId) { return this.request('link-token', { connectionKey, mode: 'create', ...(sessionId ? { sessionId } : {}) }); }
+        async exchangeLink(connectionKey, publicToken, accountBindings, requestId) { return this.request('link-exchange', { connectionKey, ...(publicToken ? { publicToken } : {}), ...(accountBindings ? { accountBindings } : {}), requestId }); }
+        async linkStatus(connectionKey, requestId) { return this.request('link-status', { connectionKey, requestId }); }
+        async updateLinkToken(connectionKey) { return this.request('link-update', { connectionKey, mode: 'update' }); }
         async sync(connectionKey) { return this.request('sync', { connectionKey }); }
 
         async edit(candidateId, patch, expectedRevision) { return this.request('edit', { candidateId, patch, expectedRevision }); }
@@ -1362,6 +1378,7 @@
     function jsonResponse(response, status, body) {
         response.statusCode = status;
         response.setHeader('Content-Type', 'application/json; charset=utf-8');
+        response.setHeader('Cache-Control', 'no-store');
         response.end(JSON.stringify(body));
     }
 
@@ -1423,7 +1440,7 @@
                 return jsonResponse(response, 200, result);
             } catch (error) {
                 const message = text(error && error.message) || 'Request failed.';
-                const status = /authentication|approved app user|household|Bearer|membership/i.test(message) ? 401 : /CORS origin/i.test(message) ? 403 : /changed|pending|approval|invalid|revision|Route|too large|JSON/i.test(message) || message === 'Browser staging is limited to CSV observations.' ? 409 : 500;
+                const status = /authentication|approved app user|existing app user|household|Bearer|membership/i.test(message) ? 401 : /CORS origin/i.test(message) ? 403 : /changed|pending|approval|invalid|revision|Route|too large|JSON/i.test(message) || message === 'Browser staging is limited to CSV observations.' ? 409 : 500;
                 let diagnostic = null;
                 if (typeof opts.errorDiagnostic === 'function') {
                     try {
@@ -1501,13 +1518,17 @@
             }
         }
 
-        async call(payload) {
+        async call(payload, control) {
+            const timing = control && typeof control === 'object' ? control : payload;
             let lastError;
             for (let attempt = 0; attempt <= this.maxRetries; attempt += 1) {
-                this.assertSyncActive(payload);
+                this.assertSyncActive(timing);
                 try {
-                    const result = await this.client.sync(payload);
-                    this.assertSyncActive(payload);
+                    // `payload` is the provider request. Execution controls
+                    // stay in the adapter and are passed separately so they
+                    // can never become undocumented provider fields.
+                    const result = await this.client.sync(payload, timing);
+                    this.assertSyncActive(timing);
                     if (result && result.error_code && result.error_code !== 'TRANSACTIONS_SYNC_MUTATION_DURING_PAGINATION') {
                         if (text(result.error_code) === 'PRODUCT_NOT_READY') {
                             const notReady = new Error('Plaid sync data is not ready; retry the sync.');
@@ -1519,7 +1540,7 @@
                     }
                     return result || {};
                 } catch (error) {
-                    this.assertSyncActive(payload);
+                    this.assertSyncActive(timing);
                     if (this.isMutation(error)) {
                         const mutation = new Error('Plaid sync changed during pagination.');
                         mutation.code = 'TRANSACTIONS_SYNC_MUTATION_DURING_PAGINATION';
@@ -1548,13 +1569,13 @@
                         lastError = preservedError;
                         if (!retryable || attempt >= this.maxRetries) throw preservedError;
                         await this.sleep(this.backoffMs * (attempt + 1));
-                        this.assertSyncActive(payload);
+                        this.assertSyncActive(timing);
                         continue;
                     }
                     lastError = new Error('Plaid sync provider request failed.');
                     if (attempt >= this.maxRetries) throw lastError;
                     await this.sleep(this.backoffMs * (attempt + 1));
-                    this.assertSyncActive(payload);
+                    this.assertSyncActive(timing);
                 }
             }
             throw lastError || new Error('Plaid sync failed.');
@@ -1622,10 +1643,11 @@
                     if (page >= this.maxPages) throw new Error('Plaid sync exceeded the page limit.');
                     let response;
                     try {
-                        const request = { access_token: opts.accessToken, cursor };
-                        if (opts.deadlineAt !== undefined) request.deadlineAt = opts.deadlineAt;
-                        if (opts.signal !== undefined) request.signal = opts.signal;
-                        response = await this.call(request);
+                        // Plaid's documented transactions/sync body contains
+                        // only these fields. deadlineAt/signal are internal
+                        // controls and travel as the second client argument.
+                        const request = { access_token: opts.accessToken, cursor, count: 500 };
+                        response = await this.call(request, { deadlineAt: opts.deadlineAt, signal: opts.signal });
                     } catch (error) {
                         if (!this.isMutation(error)) throw error;
                         if (restart >= this.maxMutationRestarts) throw new Error('Plaid sync changed during pagination too many times.');
@@ -1718,6 +1740,7 @@
             this.connectionOwners = opts.connectionOwners || {};
             this.connectionEnabled = typeof opts.connectionEnabled === 'function' ? opts.connectionEnabled : null;
             this.connectionDisabled = opts.connectionDisabled || {};
+            this.maxDurationMs = Number.isSafeInteger(opts.maxDurationMs) && opts.maxDurationMs > 0 ? opts.maxDurationMs : null;
         }
 
         coordinatorFor(connection) {
@@ -1748,6 +1771,10 @@
             const connection = text(connectionKey);
             if (!connection) throw new Error('Sync connection key is required.');
             const runId = text(opts.runId || uniqueRunId(connection, this.clock));
+            const now = Date.now();
+            const requestedDeadline = Number.isSafeInteger(opts.deadlineAt) ? opts.deadlineAt : null;
+            const boundedDeadline = this.maxDurationMs ? now + this.maxDurationMs : null;
+            const deadlineAt = boundedDeadline === null ? requestedDeadline : requestedDeadline === null ? boundedDeadline : Math.min(requestedDeadline, boundedDeadline);
             const enabled = this.connectionEnabled ? await this.connectionEnabled(connection, user) : this.connectionDisabled[connection] !== true;
             if (!enabled) throw new Error('Provider connection is disabled by server configuration.');
             const owner = this.connectionOwner ? await this.connectionOwner(connection) : this.connectionOwners[connection];
@@ -1762,7 +1789,7 @@
                 const cursor = storedCursor && storedCursor.cursor ? storedCursor.cursor : null;
                 const connectionAuth = this.connectionResolver ? await this.connectionResolver(connection, clone(user)) : {};
                 const existingSourceIdentities = this.cutoverDate ? await this.knownProviderSourceIdentities(user) : [];
-                const result = await this.provider.fetchDelta({ connectionKey: connection, cursor, cutoverDate: this.cutoverDate, existingSourceIdentities, user: clone(user), ...(connectionAuth || {}) });
+                const result = await this.provider.fetchDelta({ connectionKey: connection, cursor, cutoverDate: this.cutoverDate, existingSourceIdentities, user: clone(user), ...(deadlineAt === null ? {} : { deadlineAt }), ...(connectionAuth || {}) });
                 if (!result || !Array.isArray(result.pages) || !text(result.cursor)) throw new Error('Provider returned an incomplete paginated delta.');
                 const expectedIds = [];
                 for (const [index, page] of result.pages.entries()) {

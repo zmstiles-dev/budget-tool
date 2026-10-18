@@ -32,11 +32,15 @@ function createBudgetService(options) {
             repository,
             householdId: opts.householdId,
             allowedUsers: opts.allowedUsers,
+            allowedUserIds: opts.allowedUserIds,
+            allowExistingAppUserClaim: opts.allowExistingAppUserClaim,
             clock: opts.clock,
             initialState: opts.initialState
         }) : new backendApi.ProtectedReviewBackend({
             householdId: opts.householdId,
             allowedUsers: opts.allowedUsers,
+            allowedUserIds: opts.allowedUserIds,
+            allowExistingAppUserClaim: opts.allowExistingAppUserClaim,
             clock: opts.clock,
             initialState: opts.initialState
         });
@@ -55,13 +59,14 @@ function createBudgetService(options) {
         // request; never add it before the policy check.
         authorize: opts.authorize || (auth => {
             const authorized = backend.authorize(auth);
-            return { ...authorized, tokenVerified: auth && auth.tokenVerified === true };
+            return { ...authorized, tokenVerified: auth && auth.tokenVerified === true, existingAppUser: auth && auth.existingAppUser === true };
         }),
         connectionOwner: opts.connectionOwner,
         connectionOwners: opts.connectionOwners,
         connectionResolver: opts.connectionResolver,
         connectionEnabled: opts.connectionEnabled,
         connectionDisabled: opts.connectionDisabled,
+        maxDurationMs: opts.maxDurationMs,
         cooldownMs: opts.cooldownMs,
         clock: opts.clock
     });

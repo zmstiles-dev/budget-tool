@@ -47,6 +47,10 @@ function initialState() {
 
 async function ensureUser(auth, user) {
     try { await auth.deleteUser(user.uid); } catch (_) { /* fresh emulator or prior test user */ }
+    try {
+        const existingByEmail = await auth.getUserByEmail(user.email);
+        if (existingByEmail.uid !== user.uid) await auth.deleteUser(existingByEmail.uid);
+    } catch (_) { /* fresh emulator or no conflicting email */ }
     return auth.createUser(user);
 }
 
@@ -66,6 +70,7 @@ function staticResponse(request, response) {
     const pathname = requested === '/' ? '/index.html' : requested;
     const assets = new Map([
         ['/index.html', ['index.html', 'text/html; charset=utf-8']],
+        ['/deployment-config.template.js', ['deployment-config.template.js', 'application/javascript; charset=utf-8']],
         ['/transaction-config.js', ['transaction-config.js', 'application/javascript; charset=utf-8']],
         ['/transaction-validation.js', ['transaction-validation.js', 'application/javascript; charset=utf-8']],
         ['/transaction-review.js', ['transaction-review.js', 'application/javascript; charset=utf-8']],
@@ -95,12 +100,26 @@ function firestoreDoc(db, collection, id) {
 }
 
 async function waitForDocument(db, collection, id, predicate) {
+    let latest = null;
     for (let attempt = 0; attempt < 30; attempt += 1) {
         const snapshot = await firestoreDoc(db, collection, id).get();
-        if (snapshot.exists && predicate(snapshot.data())) return snapshot.data();
+        if (snapshot.exists) {
+            latest = snapshot.data();
+            if (predicate(latest)) return latest;
+        }
         await new Promise(resolve => setTimeout(resolve, 100));
     }
-    throw new Error(`Timed out waiting for ${collection}/${id}.`);
+    throw new Error(`Timed out waiting for ${collection}/${id}: ${JSON.stringify(latest)}`);
+}
+
+async function drainBrowserSaveQueue(page) {
+    await page.evaluate(async () => {
+        const queue = typeof firestoreSaveQueue !== 'undefined' ? firestoreSaveQueue : Promise.resolve();
+        await new Promise((resolve, reject) => {
+            const timeout = setTimeout(() => reject(new Error('Timed out draining browser Firestore save queue.')), 5000);
+            Promise.resolve(queue).then(() => { clearTimeout(timeout); resolve(); }, error => { clearTimeout(timeout); reject(error); });
+        });
+    });
 }
 
 async function readJson(response) {
@@ -117,6 +136,8 @@ async function readJson(response) {
     await ensureUser(auth, { uid: 'local-e2e-allowed', email: ALLOWED_EMAIL, password: ALLOWED_PASSWORD, emailVerified: true });
     await ensureUser(auth, { uid: 'local-e2e-unapproved', email: UNAPPROVED_EMAIL, password: UNAPPROVED_PASSWORD, emailVerified: true });
     await ensureUser(auth, { uid: 'local-e2e-unverified', email: UNVERIFIED_EMAIL, password: UNVERIFIED_PASSWORD, emailVerified: false });
+    await firestoreDoc(db, 'protectedAppConfig', 'transactionService').set({ allowed: true, householdId: 'local-e2e-household' });
+    await firestoreDoc(db, 'protectedAppUsers', 'local-e2e-allowed').set({ allowed: true, uid: 'local-e2e-allowed', email: ALLOWED_EMAIL, householdId: 'local-e2e-household' });
     await firestoreDoc(db, 'shared', 'data').set(initialState());
     const backendApi = require('../transaction-backend.js');
 
@@ -306,6 +327,13 @@ async function readJson(response) {
         assert.equal((await composed.backend.listPending({ uid: 'local-e2e-allowed', email: ALLOWED_EMAIL, tokenVerified: true, householdId: 'local-e2e-household' })).length, 1);
 
         // Authenticated reload hydrates both accepted history and pending inbox.
+        // Render-time settings can enqueue an accepted-state CAS write while
+        // the approval response is settling. Drain that queue before the
+        // navigation so a reload cannot race an old snapshot against the
+        // durable approval acknowledgement.
+        await drainBrowserSaveQueue(page);
+        const beforeReload = await firestoreDoc(db, 'shared', 'data').get();
+        assert.equal(beforeReload.data().transactions.length, 1);
         await page.reload();
         await page.waitForFunction(() => document.querySelector('.app-layout').style.display === 'flex');
         await page.locator('.nav-item[data-tab="import"]').click();
@@ -330,25 +358,32 @@ async function readJson(response) {
         // Close the first browser page before changing the durable fixture.
         // Its reload/save queue can still hold an accepted-state CAS request;
         // leaving it open makes the following Admin reset race that request.
-        await page.evaluate(async () => {
-            const queue = typeof firestoreSaveQueue !== 'undefined' ? firestoreSaveQueue : Promise.resolve();
-            await new Promise((resolve, reject) => {
-                const timeout = setTimeout(() => reject(new Error('Timed out draining browser Firestore save queue before fixture reset.')), 5000);
-                Promise.resolve(queue).then(() => { clearTimeout(timeout); resolve(); }, error => { clearTimeout(timeout); reject(error); });
-            });
-        });
+        await drainBrowserSaveQueue(page);
         await page.close();
         const e2eAuth = { uid: 'local-e2e-allowed', email: ALLOWED_EMAIL, tokenVerified: true, householdId: 'local-e2e-household' };
         await composed.backend.cancel(e2eAuth);
         const resetState = await composed.backend.exportState(e2eAuth);
         await composed.backend.resetAccepted(e2eAuth, resetState.revision);
-        const seededLegacyState = (await firestoreDoc(db, 'shared', 'data').get()).data();
         const unknownLegacy = {
             id: 'legacy-unknown-date@1', sourceIdentity: 'legacy-unknown-date', sourceRevision: '1',
             date: 'Unknown', description: 'Legacy unknown date', amount: -1, category: 'Restaurants',
             merchant: 'Legacy unknown date', account: 'Checking Account', payment_method: 'Checking Account', type: 'expense'
         };
-        await firestoreDoc(db, 'shared', 'data').set({ ...seededLegacyState, transactions: [unknownLegacy], revision: Number(seededLegacyState.revision || 0) + 1 });
+        // Seed the opaque accepted row through the durable restore boundary so
+        // the repository's backend snapshot and Firestore document agree.
+        // Writing this fixture directly to Firestore would leave the durable
+        // backend's in-memory transaction state empty; the next approval would
+        // then legitimately return only the new provider row and erase the
+        // synthetic legacy history.
+        const clearedState = await composed.backend.exportState(e2eAuth);
+        const restoredLegacy = await composed.backend.replaceAccepted(e2eAuth, {
+            ...clearedState.state,
+            transactions: [unknownLegacy],
+            acceptedHistoryDateCompatibility: true
+        }, clearedState.revision);
+        assert.equal(restoredLegacy.ok, true);
+        const seededLegacyState = (await firestoreDoc(db, 'shared', 'data').get()).data();
+        assert.equal(seededLegacyState.transactions[0].date, 'Unknown');
         await composed.backend.stage(e2eAuth, [{
             sourceIdentity: 'plaid:legacy-fixture:provider-after-legacy', sourceRevision: '1',
             date: '2026-10-17', description: 'Provider after legacy row', amount: -3.75,
@@ -404,11 +439,13 @@ async function readJson(response) {
         assert.equal(legacyAfterSettings.transactions.some(transaction => transaction.date === 'Unknown'), true);
         await page.unroute('**/sync');
         assert.equal(pageErrors.length, 0, pageErrors.map(error => error.stack || error).join('\n'));
-        console.log('PASS: real Auth emulator ID tokens, Admin-verified HTTP approval, Firestore durable approval/reload, direct-write denial, failed persistence retention, idempotent replay, and allowlist rejection.');
+        console.log('PASS: real Auth emulator ID tokens, Admin-verified HTTP approval, Firestore durable approval/reload, protected UID membership, direct-write denial, failed persistence retention, and idempotent replay.');
     } finally {
         if (badPage) await badPage.close().catch(() => {});
         if (browser) await browser.close().catch(() => {});
         if (server) await new Promise(resolve => server.close(() => resolve()));
+        await firestoreDoc(db, 'protectedAppUsers', 'local-e2e-allowed').delete().catch(() => {});
+        await firestoreDoc(db, 'protectedAppConfig', 'transactionService').delete().catch(() => {});
         await db.terminate().catch(() => {});
         await admin.app().delete().catch(() => {});
     }

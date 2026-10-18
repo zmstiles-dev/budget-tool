@@ -1,5 +1,23 @@
 # Transaction service local setup
 
+> October 18, 2026 decision update: Zach rejected Blaze and requires a genuinely
+> free backend with no automatic paid overages. The Firebase Functions/Secret
+> Manager deployment described below is retained as tested reference work, not
+> the launch path. Netlify's current credit-based Free plan is the selected
+> replacement path; its modern Node adapter, isolated bundle, and integrated
+> encrypted token vault are implemented locally and still require independent
+> release review. Existing Firebase
+> Auth/Firestore must remain on Spark. All four currently registered project
+> accounts are approved; future signups are not. Exact proposed UID/email entries
+> are private local provisioning material, not client configuration. No account,
+> credential, membership, IAM, billing or deployment action is authorized here.
+
+The current launch and operator documents are
+[PRODUCTION_READINESS.md](PRODUCTION_READINESS.md) and
+[NETLIFY_FREE_SETUP.md](NETLIFY_FREE_SETUP.md). Firebase Functions and Secret
+Manager material later in this file is retained reference work from the prior
+milestone; it does not authorize Blaze billing or a Firebase deployment.
+
 This checkout is a local release candidate for the transaction review foundation.
 `transaction-service.js` composes the authenticated review backend, protected
 pending inbox, canonical `shared/data` repository, and fail-closed on-open
@@ -22,8 +40,8 @@ provider integration must bind stable provider account IDs explicitly and
 reject unmapped IDs. Enabling `/sync` requires a provider, owner mapping,
 connection resolver, protected endpoint, and `syncEnabled: true`.
 
-The protected backend verifies the Firebase Admin ID token, existing app
-allowlist, household membership, connection ownership, and expected revisions
+The protected backend verifies the Firebase Admin ID token, operator-seeded UID
+membership, fixed household configuration, connection ownership, and expected revisions
 before every mutation. Pending inbox state is separate from accepted history.
 Approval writes the canonical `shared/data` shape once and stores pending
 review metadata, receipts, and audit state separately. Browser writes to
@@ -33,7 +51,16 @@ array. Provider amendments carry a bounded server-created digest of their
 accepted target row or split children; changing that target while review is
 pending rejects the stale approval and requires a fresh staging/review pass.
 Legacy accepted rows that fail strict review dates remain in canonical history
-but are omitted from review metadata without date repair.
+but are omitted from review metadata without date repair. A backup explicitly
+exported from accepted history records a schema-1 compatibility marker when it
+contains an opaque date string. Restore honors that marker only for the
+accepted-history transaction array, preserves each string byte-for-byte, and
+strips the transport marker before canonical persistence. Unversioned
+four-field backups receive the same marker during migration, so export and
+restore can be repeated without changing historical dates. New exports that
+are not marked as accepted history, versioned backups without the marker,
+review snapshots, CSV candidates, and provider observations retain strict real
+date validation.
 Ordinary accepted-state saves preserve receipts and amendment history; a
 receipt-bound deletion is archived only in protected review history. Explicit
 restore and reset invalidate prior receipts. If a browser loses a committed
@@ -48,11 +75,17 @@ Firestore per-document limit remains a separate history-size constraint.
 amounts, pending/posted linkage, complete pagination before cursor publication,
 bounded retries, mutation restarts, and a deadline.
 
-The browser's protected restore route intentionally validates every transaction
-date. The private historical backup contains four pre-existing date anomalies
-that are preserved byte-for-byte and therefore cannot be submitted through
-strict restore until a separately approved migration decision is made. This is
-a known release gate; do not weaken validation or silently rewrite those dates.
+The production Functions wrapper is in `production-service.js` and
+`functions/index.js`; its rollout, Secret Manager roles, exact origin, Link
+create/exchange/update routes, and rollback procedure are documented in
+`PRODUCTION_READINESS.md`. The wrapper remains sync-disabled until a separate
+live activation decision.
+
+The browser's protected restore route treats an explicitly marked accepted
+history backup as a historical import. The private historical backup contains
+four pre-existing date anomalies; they remain unchanged and are not made
+reviewable or provider-syncable. The compatibility marker does not authorize
+new or edited candidates, and no date is inferred or rewritten.
 
 ## Server-only Sandbox scaffold
 
@@ -138,54 +171,60 @@ and browser cache. Launcher argument checks run without starting emulators:
 powershell -NoProfile -ExecutionPolicy Bypass -File '.\tests\local-demo-bridge-launcher.test.ps1'
 ```
 
-## Proposed production implementation
+## Production implementation
 
-The recommended target is a Firebase Functions 2nd-gen HTTPS adapter in the
-existing `budget-tool-sync` project, after a separately authorized check of
-the existing Firestore location. Keep the existing GitHub Pages frontend and
-allow only `https://zmstiles-dev.github.io`. Select Node.js 22, currently
-supported for Functions 2nd gen, when that future wrapper is implemented. Use
-the managed runtime identity and Firebase Admin SDK; do not download
-service-account keys.
+The local target is a Firebase Functions 2nd-gen HTTPS adapter in the
+existing `budget-tool-sync` project, targeting `us-central1` for the verified
+`nam5` Firestore location. Keep the existing GitHub Pages frontend and allow
+only `https://zmstiles-dev.github.io`. The wrapper targets Node.js 22 and
+uses the managed runtime identity and Firebase Admin SDK; it does not
+download service-account keys.
 
 The adapter should preserve the protected pending inbox, accepted-state
 document, revision-bound receipts, connection ownership, provider cursor/run
 state, and on-open delta/cooldown behavior. It should not add forced refreshes,
-webhooks, scheduled jobs, or a browser-side provider path. Store the Plaid
+webhooks, or scheduled jobs. The browser Link card is explicit-gated and sends
+only a public token and reviewed account mapping. Store the Plaid
 client secret and per-Item access-token values in Secret Manager. Store only
 ownership, non-secret connection references, stable account mappings, and
 other non-secret provider metadata in protected Firestore documents.
 
-Before deployment, implement and review a production transport, Secret
-Manager resolver, deployed wrapper, exact CORS, configuration/IAM, safe error
-serialization, rate/deadline controls, and monitoring. The platform wrapper
-must adapt either its already-parsed body or its raw request stream to the
-current handler; it must not blindly attach the current Node stream reader to a
-platform request that has already been consumed.
+Before deployment, review the implemented production transport, Secret
+Manager resolver, exact CORS, configuration/IAM, safe error serialization,
+rate/deadline controls, and monitoring. The wrapper adapts either an already
+parsed body or a raw request stream; it does not attach a second reader to a
+platform request that has already been consumed. See
+`PRODUCTION_READINESS.md` for rollout and rollback checks.
 
 Current official constraints checked 2026-10-18 UTC:
 
 - Functions requires Blaze. Free allowances cover some compute and network
   usage, while build/container storage, Firestore, logs, egress, and existing
   project usage can still bill. Start with `minInstances=0`,
-  `maxInstances=1` as capacity controls, not a cost guarantee.
+  `maxInstances=1`, and request concurrency four as capacity controls, not a
+  cost guarantee.
 - Secret Manager documents six active versions and 10,000 monthly accesses
   without charge; additional versions/accesses are billable.
 - Firebase service spend caps are Preview, service-specific, and not hard caps
   because reporting latency can produce billed overage. Budget alerts notify
   but do not stop services.
+- The verified Firebase console state on 2026-10-18 showed Spark billing at
+  $0 with no billing account linked and no existing billing accounts listed
+  for this project. Blaze and a future billing-account link or creation still
+  require separate human approval; no billing settings were changed.
 - A $0 covered-workload estimate may be plausible for low local-scale traffic
   under the published allowances, but it is not a guaranteed $0 total or hard
-  cap; current project billing and usage were not inspected.
+  cap; no production workload usage was inspected.
 - For scale planning only, three users opening four times per day across two
   connections would be about 720 delta starts per 30-day month; at an assumed
   five seconds each that is about 3,600 CPU-seconds before pagination or other
   requests. This is a conditional allowance comparison, not an all-in quote.
-- Plaid Trial eligibility is limited to new US/Canada teams created on or after
-  April 15, 2026, with up to 10 Production Items. Transactions is listed as a
-  Trial product; removing an Item does not restore a Trial slot. This account's
-  eligibility, remaining quota, institution coverage, and eventual pricing
-  remain unverified. Sandbox usage is free, and no paid fallback is approved.
+- The Plaid dashboard showed this team on the free trial with Transactions
+  marked as a Trial product on 2026-10-18. The remaining Production Item quota,
+  institution coverage, and eventual pricing remain unverified. Official
+  Trial terms describe up to 10 Production Items for eligible teams and do not
+  restore a slot when an Item is removed. Sandbox usage is free, and no paid
+  fallback is approved.
 
 Sources: [Firebase Functions quotas](https://firebase.google.com/docs/functions/quotas),
 [Firebase Functions configuration and Secret Manager](https://firebase.google.com/docs/functions/config-env),

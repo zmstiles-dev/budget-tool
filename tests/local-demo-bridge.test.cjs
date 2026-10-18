@@ -168,7 +168,7 @@ function makeFailureDb(db, failure) {
         assert.equal(denied.status, 401);
         assert.equal(providerCalls, 1, 'reload must not trigger another provider read in the same auth generation');
         assert.equal(pageErrors.length, 0, pageErrors.map(error => error.stack || error).join('\n'));
-        console.log('PASS: local bridge bootstrap guard, synthetic Plaid adapter, Admin-authenticated HTTP approval, Firestore pending/accepted reload, failed commit retention, and allowlist denial.');
+    console.log('PASS: local bridge bootstrap guard, synthetic Plaid adapter, Admin-authenticated HTTP approval, protected UID membership, Firestore pending/accepted reload, and failed commit retention.');
     } finally {
         await browser.close().catch(() => {});
         await bridge.close().catch(() => {});

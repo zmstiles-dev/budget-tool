@@ -14,6 +14,7 @@
     <script src="https://www.gstatic.com/firebasejs/10.12.0/firebase-app-compat.js"></script>
     <script src="https://www.gstatic.com/firebasejs/10.12.0/firebase-auth-compat.js"></script>
     <script src="https://www.gstatic.com/firebasejs/10.12.0/firebase-firestore-compat.js"></script>
+    <script src="deployment-config.template.js"></script>
     <script src="transaction-config.js"></script>
     <script src="transaction-validation.js"></script>
     <script src="transaction-review.js"></script>
@@ -95,7 +96,7 @@
         }
         * { box-sizing: border-box; margin: 0; padding: 0; }
         body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; background: var(--bg); color: var(--text); }
-        .app-layout { display: flex; min-height: 100vh; }
+        .app-layout { display: none; min-height: 100vh; }
         .sidebar { width: 220px; background: var(--sidebar-bg); padding: 20px 0; flex-shrink: 0; display: flex; flex-direction: column; }
         .sidebar h2 { color: white; padding: 0 20px 20px; font-size: 1.2rem; border-bottom: 1px solid var(--sidebar-border); margin-bottom: 10px; }
         .nav-item { display: block; padding: 12px 20px; color: var(--sidebar-text); text-decoration: none; cursor: pointer; transition: all 0.2s; }
@@ -454,6 +455,20 @@
                     <input type="file" id="fileInput" accept=".csv" multiple hidden>
                 </div>
             </div>
+            <div class="card" id="providerLinkCard" style="display:none;margin-top:20px;">
+                <h3>Connect a bank</h3>
+                <p style="color:var(--muted);">Connect only after reviewing each returned account mapping. New transactions remain pending for review.</p>
+                <label>Connection
+                    <select id="providerLinkConnection"></select>
+                </label>
+                <div style="display:flex;gap:8px;flex-wrap:wrap;margin-top:12px;">
+                    <button class="btn btn-primary" id="providerLinkConnect">Connect bank</button>
+                    <button class="btn btn-secondary" id="providerLinkUpdate">Update connection</button>
+                </div>
+                <div id="providerLinkBindings" style="margin-top:14px;"></div>
+                <button class="btn btn-primary" id="providerLinkConfirm" style="display:none;margin-top:12px;">Confirm account mapping</button>
+                <div id="providerLinkStatus" style="margin-top:12px;color:var(--muted);" aria-live="polite"></div>
+            </div>
             <div class="card" style="margin-top: 20px;">
                 <h3>Import History</h3>
                 <div class="drop-zone" id="historyDropZone" style="margin-top: 10px;">
@@ -740,10 +755,267 @@
         let currentUser = null;
         let authGeneration = 0;
         let cloudRevision = 0;
+        // Durable review approvals/restores can advance the accepted-state
+        // revision independently of the browser save queue. A queued render
+        // save from the prior accepted snapshot must not execute afterward.
+        let acceptedStateEpoch = 0;
         let firestoreSaveQueue = Promise.resolve();
         let lastPersistenceError = null;
         let syncAttemptGeneration = null;
         let bankSyncState = 'not configured';
+        let providerLinkPending = null;
+        let activeProviderLinkHandler = null;
+
+        function providerAuthSnapshot() {
+            return { generation: authGeneration, user: currentUser, uid: currentUser && currentUser.uid };
+        }
+
+        function providerAuthCurrent(snapshot) {
+            return Boolean(snapshot && snapshot.generation === authGeneration && snapshot.user && currentUser === snapshot.user && currentUser.uid === snapshot.uid);
+        }
+
+        function authLoadCurrent(generation, user) {
+            return Number.isSafeInteger(generation) && generation === authGeneration && Boolean(user) && currentUser === user;
+        }
+
+        function requireProviderAuth(snapshot) {
+            if (!providerAuthCurrent(snapshot)) throw new Error('Authentication changed during bank connection.');
+        }
+
+        function providerLinkId() {
+            if (globalThis.crypto && typeof globalThis.crypto.randomUUID === 'function') return globalThis.crypto.randomUUID();
+            return `link-${Date.now()}-${Math.random().toString(36).slice(2, 10)}`;
+        }
+
+        function providerLinkConnections() {
+            if (!Array.isArray(window.TRANSACTION_LINK_CONNECTIONS)) return [];
+            return window.TRANSACTION_LINK_CONNECTIONS.map(value => typeof value === 'string' ? { key: value, label: value } : { key: value && value.key, label: value && (value.label || value.key) })
+                .filter(value => /^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$/.test(String(value.key || '')) && value.label);
+        }
+
+        function providerLinkStatus(message, error) {
+            const element = document.getElementById('providerLinkStatus');
+            if (!element) return;
+            element.textContent = message || '';
+            element.style.color = error ? 'var(--danger)' : 'var(--muted)';
+        }
+
+        function clearProviderLinkUiState() {
+            providerLinkPending = null;
+            const bindings = document.getElementById('providerLinkBindings');
+            const confirm = document.getElementById('providerLinkConfirm');
+            if (bindings) bindings.innerHTML = '';
+            if (confirm) confirm.style.display = 'none';
+        }
+
+        function refreshProviderLinkUi() {
+            const card = document.getElementById('providerLinkCard');
+            const select = document.getElementById('providerLinkConnection');
+            if (!card || !select) return;
+            const enabled = window.TRANSACTION_LINK_ENABLED === true && window.transactionApprovalService && typeof window.transactionApprovalService.createLinkToken === 'function';
+            const connections = providerLinkConnections();
+            if (!enabled || !connections.length || !currentUser) {
+                card.style.display = 'none';
+                return;
+            }
+            card.style.display = '';
+            select.innerHTML = connections.map(value => `<option value="${String(value.key).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/"/g, '&quot;')}">${String(value.label).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/"/g, '&quot;')}</option>`).join('');
+        }
+
+        let providerLinkSdkPromise = null;
+        function loadProviderLinkSdk() {
+            if (window.Plaid && typeof window.Plaid.create === 'function') return Promise.resolve(window.Plaid);
+            if (providerLinkSdkPromise) return providerLinkSdkPromise;
+            providerLinkSdkPromise = new Promise((resolve, reject) => {
+                const script = document.createElement('script');
+                script.src = 'https://cdn.plaid.com/link/v2/stable/link-initialize.js';
+                script.async = true;
+                script.onload = () => window.Plaid && typeof window.Plaid.create === 'function' ? resolve(window.Plaid) : reject(new Error('Plaid Link SDK did not load.'));
+                script.onerror = () => reject(new Error('Plaid Link SDK did not load.'));
+                document.head.appendChild(script);
+            });
+            return providerLinkSdkPromise;
+        }
+
+        function providerAccountId(account) { return String(account && (account.id || account.account_id || account.accountId) || '').trim(); }
+        function providerAccountMask(account) {
+            const value = String(account && (account.mask || account.last4) || '').replace(/\D/g, '').slice(-4);
+            return value.length >= 2 ? `••••${value}` : '';
+        }
+        function providerAccountLabel(account) {
+            const name = String(account && (account.name || account.official_name || account.officialName) || providerAccountId(account)).trim();
+            const type = [account && account.type, account && account.subtype].map(value => String(value || '').trim()).filter(Boolean).join('/');
+            const mask = providerAccountMask(account);
+            return [name, type, mask].filter(Boolean).join(' · ');
+        }
+
+        const PROVIDER_LINK_STORAGE_KEY = 'budget_provider_link_session_v1';
+        function providerLinkStorageRead() {
+            try {
+                const value = JSON.parse(sessionStorage.getItem(PROVIDER_LINK_STORAGE_KEY) || 'null');
+                if (!value || value.uid !== (currentUser && currentUser.uid) || !Number.isSafeInteger(value.expiresAt) || value.expiresAt <= Date.now()) {
+                    sessionStorage.removeItem(PROVIDER_LINK_STORAGE_KEY);
+                    return null;
+                }
+                return value;
+            } catch (_) { return null; }
+        }
+        function providerLinkStorageWrite(value) {
+            try { sessionStorage.setItem(PROVIDER_LINK_STORAGE_KEY, JSON.stringify(value)); } catch (_) { /* A reload can require a fresh user action. */ }
+        }
+        function providerLinkStorageClear() {
+            try { sessionStorage.removeItem(PROVIDER_LINK_STORAGE_KEY); } catch (_) { /* Ignore unavailable browser storage. */ }
+        }
+
+        function renderProviderAccountBindings(accounts) {
+            const container = document.getElementById('providerLinkBindings');
+            const confirm = document.getElementById('providerLinkConfirm');
+            const aliases = window.TransactionConfig && Array.isArray(window.TransactionConfig.accountDisplayNames) ? window.TransactionConfig.accountDisplayNames : [];
+            const normalized = (accounts || []).map(account => ({ id: providerAccountId(account), label: providerAccountLabel(account) })).filter(account => account.id);
+            if (!container || !confirm || !normalized.length || !aliases.length) throw new Error('Plaid Link did not return stable account IDs or configured display accounts.');
+            container.innerHTML = normalized.map((account, index) => `<label>${account.label.replace(/&/g, '&amp;').replace(/</g, '&lt;')}<select data-provider-account-index="${index}"><option value="">Select display account</option>${aliases.map(alias => `<option value="${String(alias).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/"/g, '&quot;')}">${String(alias).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/"/g, '&quot;')}</option>`).join('')}</select></label>`).join('');
+            confirm.style.display = '';
+            return normalized;
+        }
+
+        async function resumeProviderLinkPending() {
+            const authSnapshot = providerAuthSnapshot();
+            const stored = providerLinkStorageRead();
+            const service = window.transactionApprovalService;
+            if (!providerAuthCurrent(authSnapshot) || !stored || stored.kind !== 'pending' || !service || typeof service.linkStatus !== 'function') return;
+            try {
+                const result = await service.linkStatus(stored.connectionKey, stored.requestId);
+                requireProviderAuth(authSnapshot);
+                if (result.status !== 'pending-binding') { providerLinkStorageClear(); return; }
+                const accounts = renderProviderAccountBindings(result.accounts);
+                requireProviderAuth(authSnapshot);
+                providerLinkPending = { connectionKey: stored.connectionKey, requestId: stored.requestId, accounts };
+                providerLinkStatus('A reviewed account mapping is waiting to be completed.');
+            } catch (error) {
+                if (providerAuthCurrent(authSnapshot)) providerLinkStatus(error.message, true);
+            }
+        }
+
+        async function openProviderLink(mode, resume) {
+            const authSnapshot = providerAuthSnapshot();
+            requireProviderAuth(authSnapshot);
+            const service = window.transactionApprovalService;
+            const select = document.getElementById('providerLinkConnection');
+            if (window.TRANSACTION_LINK_ENABLED !== true || !service || !select) throw new Error('Provider Link operations are disabled.');
+            const storedValue = providerLinkStorageRead();
+            const stored = storedValue && storedValue.kind === 'link' && storedValue.mode === mode ? storedValue : null;
+            if (resume && (!stored || typeof stored.linkToken !== 'string' || !stored.linkToken || !stored.sessionId)) throw new Error('The bank connection session expired; start again.');
+            if (storedValue && storedValue.kind === 'link' && storedValue.mode !== mode) throw new Error('Another bank connection session is waiting; resume or let it expire before starting a different mode.');
+            if (storedValue && storedValue.kind === 'pending' && !resume) throw new Error('A bank connection is waiting for account mapping.');
+            const connectionKey = stored ? stored.connectionKey : select.value;
+            const sessionId = stored ? stored.sessionId : providerLinkId();
+            providerLinkStatus('Preparing secure bank connection…');
+            const link = stored ? { linkToken: stored.linkToken, sessionId } : mode === 'update' ? await service.updateLinkToken(connectionKey) : await service.createLinkToken(connectionKey, sessionId);
+            requireProviderAuth(authSnapshot);
+            if (!link || typeof link.linkToken !== 'string' || !link.linkToken) throw new Error('Plaid Link returned an invalid session.');
+            const activeSessionId = link.sessionId || sessionId;
+            if (!stored) {
+                requireProviderAuth(authSnapshot);
+                providerLinkStorageWrite({ kind: 'link', uid: authSnapshot.uid, connectionKey, sessionId: activeSessionId, mode, linkToken: link.linkToken, expiresAt: Date.now() + 10 * 60 * 1000 });
+            }
+            const Plaid = await loadProviderLinkSdk();
+            requireProviderAuth(authSnapshot);
+            if (activeProviderLinkHandler && typeof activeProviderLinkHandler.exit === 'function') activeProviderLinkHandler.exit();
+            activeProviderLinkHandler = null;
+            const plaidOptions = {
+                token: link.linkToken,
+                ...(stored ? { receivedRedirectUri: window.location.href } : {}),
+                onSuccess: async (publicToken, metadata) => {
+                    if (!providerAuthCurrent(authSnapshot)) return;
+                    if (mode === 'update') {
+                        providerLinkStorageClear();
+                        providerLinkStatus('Connection update completed.');
+                        return;
+                    }
+                    try {
+                        requireProviderAuth(authSnapshot);
+                        providerLinkStorageClear();
+                        providerLinkPending = { connectionKey, requestId: activeSessionId, accounts: [] };
+                        providerLinkStorageWrite({ kind: 'pending', uid: authSnapshot.uid, connectionKey, requestId: activeSessionId, expiresAt: Date.now() + 10 * 60 * 1000 });
+                        // Exchange immediately. The public token stays in this
+                        // callback only; the server pins the Item token before
+                        // returning account metadata for user mapping.
+                        const pending = await service.exchangeLink(connectionKey, publicToken, undefined, activeSessionId);
+                        requireProviderAuth(authSnapshot);
+                        const accounts = renderProviderAccountBindings((pending && pending.accounts) || metadata && metadata.accounts);
+                        requireProviderAuth(authSnapshot);
+                        providerLinkPending.accounts = accounts;
+                        providerLinkStatus('Review each returned account, then confirm the mapping.');
+                    } catch (error) {
+                        if (!providerAuthCurrent(authSnapshot)) return;
+                        try {
+                            const pending = await service.linkStatus(connectionKey, activeSessionId);
+                            requireProviderAuth(authSnapshot);
+                            if (pending && pending.status === 'pending-binding') {
+                                providerLinkPending = { connectionKey, requestId: activeSessionId, accounts: renderProviderAccountBindings(pending.accounts) };
+                                requireProviderAuth(authSnapshot);
+                                providerLinkStatus('Review each returned account, then confirm the mapping.');
+                                return;
+                            }
+                        } catch (_) { /* Keep the original safe error. */ }
+                        providerLinkStatus(error.message, true);
+                    }
+                },
+                onExit: (_error, metadata) => {
+                    if (!providerAuthCurrent(authSnapshot)) return;
+                    if (!metadata || !metadata.status || metadata.status !== 'connected') {
+                        providerLinkStorageClear();
+                        providerLinkStatus('Bank connection was closed before completion.');
+                    }
+                }
+            };
+            const handler = Plaid.create(plaidOptions);
+            requireProviderAuth(authSnapshot);
+            activeProviderLinkHandler = handler;
+            handler.open();
+        }
+
+        async function resumeProviderLink() {
+            const authSnapshot = providerAuthSnapshot();
+            if (!providerAuthCurrent(authSnapshot)) return;
+            const stored = providerLinkStorageRead();
+            if (!stored) return;
+            if (stored.kind === 'pending') return resumeProviderLinkPending();
+            const oauthReturn = new URL(window.location.href).searchParams.has('oauth_state_id') || new URL(window.location.href).searchParams.has('oauth_state');
+            if (stored.kind === 'link' && oauthReturn) {
+                try { await openProviderLink(stored.mode, true); } catch (error) {
+                    if (providerAuthCurrent(authSnapshot)) { providerLinkStorageClear(); providerLinkStatus(error.message, true); }
+                }
+            }
+        }
+
+        document.getElementById('providerLinkConnect')?.addEventListener('click', async () => {
+            try { await openProviderLink('create'); } catch (error) { providerLinkStatus(error.message, true); }
+        });
+        document.getElementById('providerLinkUpdate')?.addEventListener('click', async () => {
+            try { await openProviderLink('update'); } catch (error) { providerLinkStatus(error.message, true); }
+        });
+        document.getElementById('providerLinkConfirm')?.addEventListener('click', async () => {
+            const authSnapshot = providerAuthSnapshot();
+            try {
+                requireProviderAuth(authSnapshot);
+                if (!providerLinkPending) throw new Error('No bank connection is waiting for account mapping.');
+                const bindings = {};
+                document.querySelectorAll('#providerLinkBindings select[data-provider-account-index]').forEach((element, index) => {
+                    const account = providerLinkPending.accounts[index];
+                    if (account && element.value) bindings[account.id] = element.value;
+                });
+                if (Object.keys(bindings).length !== providerLinkPending.accounts.length) throw new Error('Select a display account for every returned account.');
+                providerLinkStatus('Saving the reviewed account mapping…');
+                await window.transactionApprovalService.exchangeLink(providerLinkPending.connectionKey, undefined, bindings, providerLinkPending.requestId);
+                requireProviderAuth(authSnapshot);
+                providerLinkPending = null;
+                providerLinkStorageClear();
+                document.getElementById('providerLinkBindings').innerHTML = '';
+                document.getElementById('providerLinkConfirm').style.display = 'none';
+                providerLinkStatus('Bank connection saved disabled pending separate sync activation.');
+            } catch (error) { if (providerAuthCurrent(authSnapshot)) providerLinkStatus(error.message, true); }
+        });
 
         function reportPersistenceError(error) {
             lastPersistenceError = error;
@@ -781,7 +1053,7 @@
             const generation = expectedGeneration === undefined ? authGeneration : expectedGeneration;
             try {
                 const doc = await db.collection('shared').doc('data').get();
-                if (generation !== authGeneration || currentUser !== userAtStart || !currentUser) return;
+                if (!authLoadCurrent(generation, userAtStart)) return;
 
                 if (doc.exists) {
                     const data = doc.data();
@@ -801,14 +1073,15 @@
                     await saveToFirestore();
                 }
             } catch (error) {
-                if (generation !== authGeneration || currentUser !== userAtStart || !currentUser) return;
+                if (!authLoadCurrent(generation, userAtStart)) return;
                 console.warn("Firestore unavailable, using localStorage:", error);
                 loadData();
                 return;
             }
-            if (generation !== authGeneration || currentUser !== userAtStart || !currentUser) return;
+            if (!authLoadCurrent(generation, userAtStart)) return;
             try { await loadProtectedReview(generation); await runConfiguredOnOpenSync(generation); }
             catch (error) { reportPersistenceError(error); }
+            if (!authLoadCurrent(generation, userAtStart)) return;
             populateDateFilters();
             initializeCumulativeBanks();
             renderAll();
@@ -819,7 +1092,8 @@
             if (window.TRANSACTION_SYNC_ENABLED !== true) { bankSyncState = 'not configured'; renderReviewInbox(); return; }
             if (!service || service.serverBacked !== true || typeof service.sync !== 'function') { bankSyncState = 'disconnected'; renderReviewInbox(); return; }
             const generation = expectedGeneration === undefined ? authGeneration : expectedGeneration;
-            if (syncAttemptGeneration === generation || generation !== authGeneration || !currentUser) return;
+            const userAtStart = currentUser;
+            if (syncAttemptGeneration === generation || !authLoadCurrent(generation, userAtStart)) return;
             if (navigator.onLine === false) { bankSyncState = 'offline'; renderReviewInbox(); return; }
             const connections = Array.isArray(window.TRANSACTION_SYNC_CONNECTIONS) ? window.TRANSACTION_SYNC_CONNECTIONS.map(String).map(value => value.trim()).filter(Boolean) : [];
             if (!connections.length) { bankSyncState = 'not configured'; renderReviewInbox(); return; }
@@ -827,7 +1101,7 @@
             bankSyncState = 'syncing';
             renderReviewInbox();
             for (const connectionKey of connections) {
-                if (generation !== authGeneration || !currentUser) return;
+                if (!authLoadCurrent(generation, userAtStart)) return;
                 try {
                     await service.sync(connectionKey);
                     bankSyncState = 'fresh';
@@ -846,16 +1120,39 @@
             const opts = options || {};
             const userAtStart = currentUser;
             const generation = authGeneration;
+            const saveEpoch = acceptedStateEpoch;
             if (!userAtStart) return false;
             const state = JSON.parse(JSON.stringify(opts.snapshot || cloneAcceptedState()));
             const write = async () => {
                 if (generation !== authGeneration || currentUser !== userAtStart) throw new Error('Authentication changed before the cloud save completed.');
+                if (saveEpoch !== acceptedStateEpoch) {
+                    const error = new Error('Accepted-state save was superseded by a newer durable change.');
+                    error.code = 'STALE_ACCEPTED_SAVE';
+                    throw error;
+                }
                 const service = window.transactionApprovalService;
                 if (service && service.serverBacked === true) {
                     if (typeof service.saveAcceptedState !== 'function') throw new Error('Protected state service cannot save accepted state.');
-                    const acknowledged = await service.saveAcceptedState(state, cloudRevision);
+                    // Read the revision immediately before this queue slot
+                    // runs. Sequential settings saves in one epoch may use
+                    // the revision produced by the previous slot, while the
+                    // epoch guard rejects snapshots captured before an
+                    // independent approval, restore or reset.
+                    const expectedRevision = cloudRevision;
+                    const acknowledged = await service.saveAcceptedState(state, expectedRevision);
                     if (!acknowledged || acknowledged.ok !== true || !acknowledged.state) throw new Error('Protected state service did not acknowledge the save.');
                     if (generation !== authGeneration || currentUser !== userAtStart) throw new Error('Authentication changed before the protected save was acknowledged.');
+                    if (saveEpoch !== acceptedStateEpoch) {
+                        const error = new Error('Accepted-state save was superseded by a newer durable change.');
+                        error.code = 'STALE_ACCEPTED_SAVE';
+                        throw error;
+                    }
+                    // Advance the accepted-state epoch before the queue slot
+                    // releases. Older snapshots already waiting behind this
+                    // acknowledged accepted-state transition must be rejected
+                    // before they can reach persistence. Settings-only saves do
+                    // not opt into this invalidation and remain sequential.
+                    if (opts.acceptedStateChange === true) acceptedStateEpoch += 1;
                     cloudRevision = acknowledged.revision;
                     lastPersistenceError = null;
                     return true;
@@ -882,6 +1179,12 @@
                     transaction.set(ref, data);
                 });
                 if (generation !== authGeneration || currentUser !== userAtStart) throw new Error('Authentication changed before the cloud save was acknowledged.');
+                if (saveEpoch !== acceptedStateEpoch) {
+                    const error = new Error('Accepted-state save was superseded by a newer durable change.');
+                    error.code = 'STALE_ACCEPTED_SAVE';
+                    throw error;
+                }
+                if (opts.acceptedStateChange === true) acceptedStateEpoch += 1;
                 cloudRevision = nextRevision;
                 lastPersistenceError = null;
                 return true;
@@ -891,6 +1194,7 @@
             try {
                 return await queued;
             } catch (error) {
+                if (error && error.code === 'STALE_ACCEPTED_SAVE' && opts.throwOnFailure !== true) return false;
                 reportPersistenceError(error);
                 if (opts.throwOnFailure) throw error;
                 console.warn("Firestore save failed:", error);
@@ -933,6 +1237,21 @@
         let monthlyChart, yearlyChart;
 
         const categoryColorPalette = ['#3498db', '#e74c3c', '#2ecc71', '#f39c12', '#9b59b6', '#1abc9c', '#34495e', '#e67e22', '#c0392b', '#27ae60', '#2980b9', '#8e44ad', '#e91e63', '#00bcd4', '#ff5722', '#795548', '#607d8b', '#9c27b0', '#4caf50', '#ff9800', '#03a9f4', '#f44336', '#ffc107', '#cddc39', '#009688', '#673ab7', '#3f51b5', '#2196f3', '#ffeb3b', '#8bc34a', '#263238', '#9e9e9e', '#f06292', '#ba68c8', '#9575cd', '#7986cb', '#64b5f6', '#4fc3f7', '#4dd0e1', '#4db6ac', '#81c784', '#aed581', '#dce775', '#fff176', '#ffd54f', '#ffb74d', '#ff8a65', '#a1887f', '#90a4ae', '#f48fb1', '#ce93d8', '#b39ddb', '#9fa8da', '#82b1ff', '#81d4fa', '#80deea', '#80cbc4', '#a5d6a7', '#c5e1a5', '#dce775', '#e6ee9c', '#fff59d', '#ffe082', '#ffcc80', '#ffab91', '#bcaaa4', '#cfd8dc'];
+
+        function clearAcceptedAuthUi() {
+            document.getElementById('loginScreen').style.display = 'flex';
+            document.querySelector('.app-layout').style.display = 'none';
+            transactions = [];
+            categories = [];
+            budgets = {};
+            merchantDefaults = {};
+            categoryGroups = [];
+            categoryColors = {};
+            categoryOrder = [];
+            cloudRevision = 0;
+            clearProviderLinkUiState();
+            renderAll();
+        }
 
         function initTheme() {
             const saved = localStorage.getItem(THEME_KEY);
@@ -1562,7 +1881,7 @@
             const snapshot = JSON.parse(JSON.stringify(nextState));
             try {
                 if (user) {
-                    const saved = await saveToFirestore({ throwOnFailure: true, snapshot });
+                    const saved = await saveToFirestore({ throwOnFailure: true, snapshot, acceptedStateChange: true });
                     if (saved !== true) throw new Error('Cloud persistence was not acknowledged.');
                     if (generation !== authGeneration || user !== currentUser || !currentUser) throw new Error('Authentication changed before the accepted edit was acknowledged.');
                     if (acceptedStateSignature() !== JSON.stringify(before)) throw new Error('Accepted data changed during the edit; reload before saving.');
@@ -1908,7 +2227,10 @@
 
         function getSortedBudgetCats() {
             const allCats = Object.keys(budgets);
-            if (categoryOrder.length === 0) {
+            // Rendering an empty budget list must stay read-only. Persisting
+            // an empty order from every render queues accepted-state writes
+            // that can race a concurrent durable review approval.
+            if (categoryOrder.length === 0 && allCats.length > 0) {
                 categoryOrder = allCats;
                 saveCategoryOrder(categoryOrder);
             }
@@ -2402,15 +2724,16 @@
             const service = window.transactionApprovalService;
             if (!service || service.serverBacked !== true || typeof service.listPending !== 'function') return;
             const generation = expectedGeneration === undefined ? authGeneration : expectedGeneration;
+            const userAtStart = currentUser;
             const remoteReview = typeof service.loadReview === 'function' ? await service.loadReview() : null;
-            if (generation !== authGeneration || !currentUser) return;
+            if (!authLoadCurrent(generation, userAtStart)) return;
             if (remoteReview) {
                 if (!window.TransactionReview || typeof window.TransactionReview.validateReviewSnapshot !== 'function') throw new Error('Protected review snapshot validation is unavailable.');
                 window.TransactionReview.validateReviewSnapshot(remoteReview);
                 reviewStore.restoreReview(remoteReview);
             } else {
                 const pending = await service.listPending();
-                if (generation !== authGeneration || !currentUser) return;
+                if (!authLoadCurrent(generation, userAtStart)) return;
                 const snapshot = reviewStore.exportReview();
                 snapshot.pending = pending;
                 reviewStore.restoreReview(snapshot);
@@ -2538,7 +2861,7 @@
             }
             try {
                 if (!opts.skipCloud) {
-                    const saved = await saveToFirestore({ throwOnFailure: true, snapshot: proposed });
+                    const saved = await saveToFirestore({ throwOnFailure: true, snapshot: proposed, acceptedStateChange: true });
                     if (saved !== true) throw new Error('Cloud persistence was not acknowledged.');
                 }
                 if (generationAtStart !== authGeneration || currentUser !== userAtStart || !currentUser) throw new Error('Authentication changed before accepted data could be installed.');
@@ -2623,6 +2946,7 @@
                             durableApprovalAcknowledged = !!(acknowledged && acknowledged.ok === true);
                             if (approvalGeneration !== authGeneration || approvalUser !== currentUser || !currentUser) throw new Error('Authentication changed before approval was acknowledged.');
                             if (!acknowledged || acknowledged.ok !== true || !acknowledged.state) throw new Error('Approval service did not return a canonical acknowledged state.');
+                            acceptedStateEpoch += 1;
                             const installed = await persistApprovedReview(payload, budgetBatches, { skipCloud: true, canonicalState: acknowledged.state, expectedState: approvalBaseline, expectedGeneration: approvalGeneration, expectedUser: approvalUser });
                             if (Number.isSafeInteger(acknowledged.revision) && acknowledged.revision >= 0) cloudRevision = acknowledged.revision;
                             return installed;
@@ -3294,6 +3618,7 @@
                         const acknowledged = await service.reset(cloudRevision);
                         if (!acknowledged || acknowledged.ok !== true) throw new Error('Reset service did not acknowledge the change.');
                         if (resetGeneration !== authGeneration || resetUser !== currentUser || !currentUser) throw new Error('Authentication changed before reset was acknowledged.');
+                        acceptedStateEpoch += 1;
                         cloudRevision = acknowledged.revision;
                     } catch (error) { alert('Reset failed: ' + error.message); return; }
                 }
@@ -3309,7 +3634,7 @@
                 transactions, categories, budgets, merchantDefaults,
                 categoryGroups, categoryColors, categoryOrder,
                 review: reviewStore.exportReview()
-            }, { app: 'budget-tool' });
+            }, { app: 'budget-tool' }, { acceptedHistory: true });
             const blob = new Blob([JSON.stringify(data, null, 2)], { type: 'application/json' });
             const url = URL.createObjectURL(blob);
             const a = document.createElement('a');
@@ -3322,30 +3647,42 @@
         function importData(input) {
             const file = input.files[0];
             if (!file) return;
+            // Capture the identity before the asynchronous file read starts.
+            // A user switch or sign-out while FileReader is pending must not
+            // let the later callback authorize or install the prior user's
+            // backup in the new auth epoch.
+            const importGeneration = authGeneration;
+            const importUser = currentUser;
             const reader = new FileReader();
             reader.onload = async function(e) {
+                if (authGeneration !== importGeneration || currentUser !== importUser) {
+                    alert('Authentication changed before the backup could be read.');
+                    return;
+                }
                 const previous = cloneAcceptedState();
                 const previousReview = reviewStore.exportReview();
                 const previousBudgetBatches = [...pendingReviewBudgets.entries()].map(([batchId, value]) => [batchId, JSON.parse(JSON.stringify(value))]);
-                const previousUser = currentUser;
-                const previousGeneration = authGeneration;
+                const previousUser = importUser;
+                const previousGeneration = importGeneration;
                 try {
                     const data = JSON.parse(e.target.result);
                     const restored = TransactionReview.restoreBackup(data, { requireApproval: true, approved: confirm('Restore this validated backup? Existing accepted data will be replaced.') });
                     const nextAccepted = {
                         transactions: restored.transactions, categories: restored.categories, budgets: restored.budgets,
                         merchantDefaults: restored.merchantDefaults, categoryGroups: restored.categoryGroups,
-                        categoryColors: restored.categoryColors, categoryOrder: restored.categoryOrder
+                        categoryColors: restored.categoryColors, categoryOrder: restored.categoryOrder,
+                        ...(restored.acceptedHistoryDateCompatibility === true ? { acceptedHistoryDateCompatibility: true } : {})
                     };
                     let nextReview = restored.review || { schemaVersion: TransactionReview.VERSION, pending: [], rejected: [], accepted: [], audit: [], receipts: [], batchMeta: [] };
-                    const generation = authGeneration;
-                    const user = currentUser;
+                    const generation = importGeneration;
+                    const user = importUser;
                     if (currentUser) {
                         const service = window.transactionApprovalService;
                         if (service && service.serverBacked === true && typeof service.restore === 'function') {
                             const acknowledged = await service.restore(nextAccepted, cloudRevision);
                             if (!acknowledged || acknowledged.ok !== true || !acknowledged.state) throw new Error('Restore service did not acknowledge canonical state.');
                             if (generation !== authGeneration || user !== currentUser || !currentUser) throw new Error('Authentication changed before restore was acknowledged.');
+                            acceptedStateEpoch += 1;
                             cloudRevision = acknowledged.revision;
                             // Restore/reset intentionally invalidate server
                             // receipts. Rehydrate the review surface from
@@ -3353,11 +3690,11 @@
                             // than reinstalling stale backup receipts locally.
                             if (typeof service.loadReview === 'function') nextReview = await service.loadReview();
                         } else {
-                            const saved = await saveToFirestore({ throwOnFailure: true, snapshot: nextAccepted });
+                            const saved = await saveToFirestore({ throwOnFailure: true, snapshot: nextAccepted, acceptedStateChange: true });
                             if (saved !== true) throw new Error('Cloud persistence was not acknowledged.');
                         }
                     }
-                    if (currentUser && (generation !== authGeneration || user !== currentUser)) throw new Error('Authentication changed before restore could be installed.');
+                    if (generation !== authGeneration || user !== currentUser) throw new Error('Authentication changed before restore could be installed.');
                     transactions = nextAccepted.transactions;
                     categories = nextAccepted.categories;
                     budgets = nextAccepted.budgets;
@@ -3374,7 +3711,7 @@
                     renderAll();
                     alert('Data imported successfully!');
                 } catch (err) {
-                    if ((!previousUser && !currentUser) || (currentUser && currentUser === previousUser && authGeneration === previousGeneration)) {
+                    if (authGeneration === previousGeneration && currentUser === previousUser) {
                         restoreAcceptedState(previous);
                         try { reviewStore.restoreReview(previousReview); } catch (_) { /* The prior in-memory state was created locally and is trusted. */ }
                         pendingReviewBudgets.clear();
@@ -3415,35 +3752,61 @@
             }
         }
 
+        async function authorizeAndLoadUser(user, generation) {
+            const snapshot = { generation, user, uid: user && user.uid };
+            const service = window.transactionApprovalService;
+            if (service && service.serverBacked === true) {
+                // The configured server is the production app-user authority.
+                // A successful authenticated request is required before any
+                // shared data is rendered; the legacy email check is only a
+                // standalone fallback when no server is configured.
+                if (typeof service.listPending !== 'function') throw new Error('Configured app-user authorization is unavailable.');
+                await service.listPending();
+            } else if (!ALLOWED_EMAILS.includes((user.email || '').toLowerCase())) {
+                throw new Error('This account is not authorized.');
+            }
+            if (!providerAuthCurrent(snapshot)) return;
+            document.getElementById('loginScreen').style.display = 'none';
+            document.querySelector('.app-layout').style.display = 'flex';
+            refreshProviderLinkUi();
+            resumeProviderLink().catch(error => providerLinkStatus(error.message, true));
+            loadFromFirestore(generation);
+        }
+
         // Auth flow
         auth.onAuthStateChanged((user) => {
+            const previousUser = currentUser;
             authGeneration += 1;
             const generation = authGeneration;
+            const identityChanged = Boolean(previousUser && (!user || previousUser.uid !== user.uid));
+            if (activeProviderLinkHandler) {
+                try {
+                    if (typeof activeProviderLinkHandler.exit === 'function') activeProviderLinkHandler.exit();
+                    else if (typeof activeProviderLinkHandler.destroy === 'function') activeProviderLinkHandler.destroy();
+                } catch (_) { /* The generation guard rejects callbacks from the old user. */ }
+                activeProviderLinkHandler = null;
+            }
+            if (!user || identityChanged) {
+                providerLinkStorageClear();
+                clearProviderLinkUiState();
+            }
             syncAttemptGeneration = null;
+            if (!user || identityChanged || !previousUser) clearAcceptedAuthUi();
             currentUser = null;
             pendingReviewBudgets.clear();
             reviewStore.clear();
             if (user) {
-                if (!ALLOWED_EMAILS.includes((user.email || '').toLowerCase())) {
-                    alert('Access denied. This account is not authorized.');
-                    auth.signOut();
-                    return;
-                }
-                document.getElementById('loginScreen').style.display = 'none';
-                document.querySelector('.app-layout').style.display = 'flex';
                 currentUser = user;
-                loadFromFirestore(generation);
+                authorizeAndLoadUser(user, generation).catch(error => {
+                    if (!providerAuthCurrent({ generation, user, uid: user.uid })) return;
+                    alert(`Access denied. ${error.message}`);
+                    currentUser = null;
+                    providerLinkStorageClear();
+                    clearProviderLinkUiState();
+                    auth.signOut();
+                });
             } else {
-                document.getElementById('loginScreen').style.display = 'flex';
-                document.querySelector('.app-layout').style.display = 'none';
-                transactions = [];
-                categories = [];
-                budgets = {};
-                merchantDefaults = {};
-                categoryGroups = [];
-                categoryColors = {};
-                categoryOrder = [];
-                cloudRevision = 0;
+                refreshProviderLinkUi();
             }
         });
 

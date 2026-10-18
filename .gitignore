@@ -13,3 +13,11 @@ exports/
 .env
 .env.*
 !.env.example
+
+# Locally assembled Netlify artifacts are never committed or built by hosted CI.
+netlify/functions/_runtime/
+netlify/node_modules/
+netlify/.netlify/
+netlify/.artifact/
+netlify/public/*
+!netlify/public/.gitkeep

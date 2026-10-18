@@ -12,12 +12,42 @@ service cloud.firestore {
       return request.auth != null && request.auth.token.email_verified == true;
     }
 
+    function validEmail(value) {
+      return value is string && value.matches('^[a-z0-9._%+-]+@[a-z0-9.-]+$');
+    }
+
+    function validHouseholdId(value) {
+      return value is string && value.matches('^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$');
+    }
+
+    function validUid(value) {
+      return value is string && value.matches('^[A-Za-z0-9_-]{1,128}$');
+    }
+
     function allowedAppUser() {
-      return signedIn() && request.auth.token.email in [
-        'captainicebow@gmail.com',
-        'mgstiles13@gmail.com',
-        'zmstiles@gmail.com'
-      ];
+      return signedIn() && protectedMembership();
+    }
+
+    // UID-bound production app users are seeded by an operator through the
+    // Admin SDK. Clients cannot enroll themselves or change this boundary.
+    function protectedHouseholdConfigured() {
+      return exists(/databases/$(database)/documents/protectedAppConfig/transactionService)
+        && get(/databases/$(database)/documents/protectedAppConfig/transactionService).data.allowed == true
+        && validHouseholdId(get(/databases/$(database)/documents/protectedAppConfig/transactionService).data.householdId);
+    }
+
+    function protectedMembership() {
+      return protectedHouseholdConfigured()
+        && exists(/databases/$(database)/documents/protectedAppUsers/$(request.auth.uid))
+        && get(/databases/$(database)/documents/protectedAppUsers/$(request.auth.uid)).data.allowed == true
+        && validUid(request.auth.uid)
+        && get(/databases/$(database)/documents/protectedAppUsers/$(request.auth.uid)).data.uid == request.auth.uid
+        && validEmail(request.auth.token.email)
+        && validEmail(get(/databases/$(database)/documents/protectedAppUsers/$(request.auth.uid)).data.email)
+        && get(/databases/$(database)/documents/protectedAppUsers/$(request.auth.uid)).data.email == request.auth.token.email
+        && validHouseholdId(get(/databases/$(database)/documents/protectedAppUsers/$(request.auth.uid)).data.householdId)
+        && get(/databases/$(database)/documents/protectedAppUsers/$(request.auth.uid)).data.householdId
+          == get(/databases/$(database)/documents/protectedAppConfig/transactionService).data.householdId;
     }
 
     // Accepted history remains readable by existing app users. Client writes
@@ -48,6 +78,14 @@ service cloud.firestore {
     }
 
     match /protectedConnections/{connectionId} {
+      allow read, write: if false;
+    }
+
+    match /protectedAppUsers/{uid} {
+      allow read, write: if false;
+    }
+
+    match /protectedAppConfig/{documentId} {
       allow read, write: if false;
     }
 

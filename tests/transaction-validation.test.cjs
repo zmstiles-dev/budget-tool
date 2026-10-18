@@ -9,7 +9,7 @@ assert.match(html, /TransactionReview\.createBackup/);
 assert.match(html, /TransactionReview\.restoreBackup/);
 assert.match(html, /const result = await reviewStore\.approveSelected/);
 assert.match(html, /selectedSet\.has\(candidate\.id\) \? ' checked' : ''/);
-assert.match(html, /saveToFirestore\(\{ throwOnFailure: true, snapshot: proposed \}\)/);
+assert.match(html, /saveToFirestore\(\{ throwOnFailure: true, snapshot: proposed, acceptedStateChange: true \}\)/);
 assert.match(html, /async function copyBudgetsFromMonth\(\)/);
 assert.match(html, /await commitAcceptedState\(proposed, previous\)/);
 assert.match(html, /async function addCategory\(\)/);

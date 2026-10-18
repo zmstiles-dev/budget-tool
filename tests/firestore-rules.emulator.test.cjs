@@ -34,12 +34,68 @@ async function main() {
         const unverified = testEnv.authenticatedContext('unverified-user', {
             email: 'captainicebow@gmail.com', email_verified: false
         });
+        const seededUid = testEnv.authenticatedContext('seeded-uid', {
+            email: 'uid-member@example.test', email_verified: true
+        });
+        const wrongSeededEmail = testEnv.authenticatedContext('wrong-seeded-uid', {
+            email: 'different@example.test', email_verified: true
+        });
+        const wrongSeededHousehold = testEnv.authenticatedContext('wrong-household-uid', {
+            email: 'uid-member@example.test', email_verified: true
+        });
+        const otherHouseholdMember = testEnv.authenticatedContext('other-household-member', {
+            email: 'other-member@example.test', email_verified: true
+        });
+        const uppercaseToken = testEnv.authenticatedContext('uppercase-token', {
+            email: 'UID-MEMBER@EXAMPLE.TEST', email_verified: true
+        });
+        const emptyHouseholdMember = testEnv.authenticatedContext('empty-household-member', {
+            email: 'empty-household@example.test', email_verified: true
+        });
+        const uppercaseStoredEmail = testEnv.authenticatedContext('uppercase-stored-email', {
+            email: 'uid-member@example.test', email_verified: true
+        });
         const ref = (context, documentPath) => context.firestore().doc(documentPath);
+        await testEnv.withSecurityRulesDisabled(async adminContext => {
+            await ref(adminContext, 'protectedAppConfig/transactionService').set({ allowed: true, householdId: 'household-1' });
+            await ref(adminContext, 'protectedAppUsers/allowed-user').set({ allowed: true, uid: 'allowed-user', email: 'captainicebow@gmail.com', householdId: 'household-1' });
+            await ref(adminContext, 'protectedAppUsers/second-user').set({ allowed: true, uid: 'second-user', email: 'mgstiles13@gmail.com', householdId: 'household-1' });
+            await ref(adminContext, 'protectedAppUsers/seeded-uid').set({ allowed: true, uid: 'seeded-uid', email: 'uid-member@example.test', householdId: 'household-1' });
+            await ref(adminContext, 'protectedAppUsers/wrong-seeded-uid').set({ allowed: true, uid: 'wrong-seeded-uid', email: 'uid-member@example.test', householdId: 'household-1' });
+            await ref(adminContext, 'protectedAppUsers/wrong-household-uid').set({ allowed: true, uid: 'wrong-household-uid', email: 'uid-member@example.test', householdId: 'household-2' });
+            await ref(adminContext, 'protectedAppUsers/other-household-member').set({ allowed: true, uid: 'other-household-member', email: 'other-member@example.test', householdId: 'household-2' });
+            await ref(adminContext, 'protectedAppUsers/uppercase-token').set({ allowed: true, uid: 'uppercase-token', email: 'uid-member@example.test', householdId: 'household-1' });
+            await ref(adminContext, 'protectedAppUsers/empty-household-member').set({ allowed: true, uid: 'empty-household-member', email: 'empty-household@example.test', householdId: '' });
+            await ref(adminContext, 'protectedAppUsers/uppercase-stored-email').set({ allowed: true, uid: 'uppercase-stored-email', email: 'UID-MEMBER@EXAMPLE.TEST', householdId: 'household-1' });
+        });
         const sharedRef = ref(allowed, 'shared/data');
 
         await assertFails(ref(anonymous, 'shared/data').get());
         await assertFails(ref(unapproved, 'shared/data').get());
         await assertFails(ref(unverified, 'shared/data').get());
+        await assertSucceeds(ref(allowed, 'shared/data').get());
+        await assertSucceeds(ref(secondAllowed, 'shared/data').get());
+        await assertSucceeds(ref(seededUid, 'shared/data').get());
+        await assertFails(ref(wrongSeededEmail, 'shared/data').get());
+        await assertFails(ref(wrongSeededHousehold, 'shared/data').get());
+        await assertFails(ref(otherHouseholdMember, 'shared/data').get());
+        await assertFails(ref(uppercaseToken, 'shared/data').get());
+        await assertFails(ref(emptyHouseholdMember, 'shared/data').get());
+        await assertFails(ref(uppercaseStoredEmail, 'shared/data').get());
+        await testEnv.withSecurityRulesDisabled(async adminContext => {
+            await ref(adminContext, 'protectedAppConfig/transactionService').delete();
+        });
+        await assertFails(ref(seededUid, 'shared/data').get());
+        await testEnv.withSecurityRulesDisabled(async adminContext => {
+            await ref(adminContext, 'protectedAppConfig/transactionService').set({ allowed: true, householdId: 'household-1' });
+        });
+        await testEnv.withSecurityRulesDisabled(async adminContext => {
+            await ref(adminContext, 'protectedAppConfig/transactionService').set({ allowed: true, householdId: '   ' });
+        });
+        await assertFails(ref(seededUid, 'shared/data').get());
+        await testEnv.withSecurityRulesDisabled(async adminContext => {
+            await ref(adminContext, 'protectedAppConfig/transactionService').set({ allowed: true, householdId: 'household-1' });
+        });
         await assertFails(ref(allowed, 'protectedTransactionReview/household-1').set({ pending: [] }));
         await assertFails(ref(allowed, 'protectedAcceptedTransactions/household-1').get());
         for (const protectedPath of ['protectedConnections/chase', 'protectedSyncRuns/run-1']) {
@@ -48,7 +104,6 @@ async function main() {
         }
 
         await assertSucceeds(sharedRef.set({ transactions: [], revision: 1 }));
-        await assertSucceeds(ref(secondAllowed, 'shared/data').get());
         await assertFails(ref(unapproved, 'shared/unauthorized').set({ transactions: [], revision: 1 }));
         await assertFails(sharedRef.set({ transactions: [], revision: 3 }));
         await assertFails(sharedRef.set({ transactions: [], revision: -1 }));
@@ -65,7 +120,7 @@ async function main() {
         await assertSucceeds(legacyRef.set({ transactions: [], categories: [{ name: 'Changed' }], revision: 2 }));
         await assertFails(legacyRef.set({ transactions: [{ date: '2026-10-02', amount: -2 }], categories: [{ name: 'Changed' }], revision: 3 }));
 
-        console.log('PASS: Firestore emulator rules matrix for auth allowlist, protected collections, accepted transaction immutability, and legacy revision baseline.');
+        console.log('PASS: Firestore emulator rules matrix for protected UID membership, normalized email/household parity, protected collections, accepted transaction immutability, and legacy revision baseline.');
     } finally {
         await testEnv.cleanup();
     }

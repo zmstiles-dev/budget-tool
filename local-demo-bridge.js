@@ -29,6 +29,7 @@ const FIXTURE_UID = 'local-demo-bridge-allowed';
 const FIXTURE_PASSWORD = 'local-demo-password-1';
 const FIREBASE_ASSETS = ['firebase-app-compat.js', 'firebase-auth-compat.js', 'firebase-firestore-compat.js'];
 const APP_ASSETS = new Map([
+    ['/deployment-config.template.js', ['deployment-config.template.js', 'application/javascript; charset=utf-8']],
     ['/transaction-config.js', ['transaction-config.js', 'application/javascript; charset=utf-8']],
     ['/transaction-validation.js', ['transaction-validation.js', 'application/javascript; charset=utf-8']],
     ['/transaction-review.js', ['transaction-review.js', 'application/javascript; charset=utf-8']],
@@ -108,6 +109,8 @@ async function clearLocalDemoData(db) {
     const refs = [
         db.collection('shared').doc('data'),
         db.collection('protectedTransactionReview').doc(HOUSEHOLD_ID),
+        db.collection('protectedAppConfig').doc('transactionService'),
+        db.collection('protectedAppUsers').doc(FIXTURE_UID),
     ];
     const connections = await db.collection('protectedConnections').get();
     connections.forEach(snapshot => refs.push(snapshot.ref));
@@ -150,6 +153,8 @@ async function prepareLocalDemo(options) {
             await db.collection('shared').doc('data').get(),
             await db.collection('protectedTransactionReview').doc(HOUSEHOLD_ID).get(),
             await db.collection('protectedConnections').doc(connectionKey).get(),
+            await db.collection('protectedAppConfig').doc('transactionService').get(),
+            await db.collection('protectedAppUsers').doc(FIXTURE_UID).get(),
             ...(await db.collection('protectedSyncRuns').get()).docs
         ];
         if (existing.some(snapshot => snapshot.exists)) {
@@ -159,6 +164,11 @@ async function prepareLocalDemo(options) {
         const state = await db.collection('shared').doc('data').get();
         if (!state.exists) await db.collection('shared').doc('data').set(initialState());
         await ensureFixtureUser(auth);
+        // The local bridge mirrors the production rules contract with an
+        // emulator-only Admin seed. This is never an enrollment path in the
+        // deployed service: production membership is operator provisioned.
+        await db.collection('protectedAppConfig').doc('transactionService').set({ allowed: true, householdId: HOUSEHOLD_ID });
+        await db.collection('protectedAppUsers').doc(FIXTURE_UID).set({ allowed: true, uid: FIXTURE_UID, email: ALLOWED_EMAIL, householdId: HOUSEHOLD_ID });
         return { app, auth, db, ownsApp, environment, connectionKey, householdId: HOUSEHOLD_ID, fixtureEmail: ALLOWED_EMAIL, fixturePassword: FIXTURE_PASSWORD };
     } catch (error) {
         await closeLocalDemoContext({ app, db, ownsApp });

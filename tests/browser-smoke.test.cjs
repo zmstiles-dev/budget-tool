@@ -8,6 +8,7 @@ const { chromium } = require('playwright');
 
 const allowlistedAssets = new Map([
   ['/index.html', 'text/html; charset=utf-8'],
+  ['/deployment-config.template.js', 'application/javascript; charset=utf-8'],
   ['/transaction-config.js', 'application/javascript; charset=utf-8'],
   ['/transaction-validation.js', 'application/javascript; charset=utf-8'],
   ['/transaction-review.js', 'application/javascript; charset=utf-8'],
@@ -17,13 +18,15 @@ const allowlistedAssets = new Map([
 ]);
 const firebaseStub = [
   '(() => {',
-  '  const data = { transactions: [], categories: [], budgets: {}, merchantDefaults: {}, categoryGroups: [], categoryColors: {}, categoryOrder: [], revision: 0 };',
+  '  const data = { transactions: [{ sourceId: "old-user-visible", date: "2026-10-01", description: "Old user transaction", amount: -1.25, category: "Restaurants", account: "Checking", payment_method: "Checking", type: "expense" }], categories: [{ name: "Restaurants", type: "expense" }], budgets: {}, merchantDefaults: {}, categoryGroups: [], categoryColors: {}, categoryOrder: [], revision: 0 };',
   '  let listener;',
   '  const user = { uid: "synthetic-user", email: "captainicebow@gmail.com", getIdTokenResult: async () => ({ token: "synthetic-id-token", claims: { auth_time: 1 } }) };',
-  '  const auth = { currentUser: user, onAuthStateChanged(callback) { window.__authRegistered = true; listener = callback; setTimeout(() => { window.__authFired = true; window.__authEmail = user.email; callback(user); }, 0); }, signOut: async () => { window.__signedOut = true; auth.currentUser = null; if (listener) listener(null); }, signInWithPopup: async () => { auth.currentUser = user; if (listener) listener(user); } };',
+  '  const otherUser = { uid: "synthetic-other-user", email: "other-user@example.test", getIdTokenResult: async () => ({ token: "synthetic-other-id-token", claims: { auth_time: 2 } }) };',
+  '  const unauthorizedUser = { uid: "synthetic-unauthorized-user", email: "unauthorized@example.test", getIdTokenResult: async () => ({ token: "synthetic-unauthorized-id-token", claims: { auth_time: 3 } }) };',
+  '  const auth = { currentUser: user, onAuthStateChanged(callback) { window.__authRegistered = true; listener = callback; setTimeout(() => { window.__authFired = true; window.__authEmail = user.email; callback(auth.currentUser); }, 0); }, signOut: async () => { window.__signedOut = true; auth.currentUser = null; if (listener) listener(null); }, signInWithPopup: async () => { auth.currentUser = user; if (listener) listener(user); }, __switchUser: () => { auth.currentUser = otherUser; if (listener) listener(otherUser); }, __switchUnauthorizedUser: () => { auth.currentUser = unauthorizedUser; if (listener) listener(unauthorizedUser); }, __refreshUser: () => { if (listener) listener(auth.currentUser); } };',
   '  function authFactory() { return auth; }',
   '  authFactory.GoogleAuthProvider = function GoogleAuthProvider() {};',
-  '  const db = { collection(name) { return { doc(id) { return { async get() { return { exists: name === "shared" && id === "data", data: () => JSON.parse(JSON.stringify(data)) }; } }; } }; }, async runTransaction(callback) { window.__txReads = window.__txReads || []; window.__txWrites = window.__txWrites || []; const tx = { get: async ref => { const result = await ref.get(); window.__txReads.push(result.data().revision); return result; }, set: (ref, value) => { window.__txWrites.push(value.revision); Object.assign(data, JSON.parse(JSON.stringify(value))); } }; return callback(tx); } };',
+  '  const db = { collection(name) { return { doc(id) { return { async get() { if (name === "shared" && id === "data" && window.__delaySharedRead === true) { window.__sharedReadStarted = true; await new Promise(resolve => { window.__resolveSharedRead = resolve; }); } return { exists: name === "shared" && id === "data", data: () => JSON.parse(JSON.stringify(data)) }; } }; } }; }, async runTransaction(callback) { window.__txReads = window.__txReads || []; window.__txWrites = window.__txWrites || []; const tx = { get: async ref => { const result = await ref.get(); window.__txReads.push(result.data().revision); return result; }, set: (ref, value) => { window.__txWrites.push(value.revision); Object.assign(data, JSON.parse(JSON.stringify(value))); } }; return callback(tx); } };',
   '  function firestoreFactory() { return db; }',
   '  firestoreFactory.FieldValue = { serverTimestamp: () => ({ synthetic: true }) };',
   '  window.firebase = { initializeApp() {}, auth: authFactory, firestore: firestoreFactory };',
@@ -73,8 +76,217 @@ function createServer() {
       blockedExternalRequests.push(url);
       return route.abort('blockedbyclient');
     });
+    await page.addInitScript(() => { window.TRANSACTION_APPROVAL_ENDPOINT = ''; });
     await page.goto('http://127.0.0.1:' + port + '/index.html');
     await page.waitForFunction(() => document.querySelector('.app-layout').style.display === 'flex');
+    await page.waitForFunction(() => document.body.innerText.includes('Old user transaction'));
+    const authSwitchRegression = await page.evaluate(async () => {
+        window.__delaySharedRead = true;
+        window.__sharedReadStarted = false;
+        window.firebase.auth().__refreshUser();
+        await new Promise(resolve => { const check = () => window.__sharedReadStarted ? resolve() : setTimeout(check, 0); check(); });
+        const sameUser = {
+            appDisplay: document.querySelector('.app-layout').style.display,
+            oldTransactionVisible: document.body.innerText.includes('Old user transaction')
+        };
+        window.firebase.auth().__switchUnauthorizedUser();
+        const switched = {
+            appDisplay: document.querySelector('.app-layout').style.display,
+            loginDisplay: document.getElementById('loginScreen').style.display,
+            oldTransactionVisible: document.body.innerText.includes('Old user transaction')
+        };
+        window.__delaySharedRead = false;
+        if (typeof window.__resolveSharedRead === 'function') window.__resolveSharedRead();
+        await new Promise(resolve => setTimeout(resolve, 0));
+        const afterDelayedLoad = {
+            appDisplay: document.querySelector('.app-layout').style.display,
+            loginDisplay: document.getElementById('loginScreen').style.display,
+            oldTransactionVisible: document.body.innerText.includes('Old user transaction')
+        };
+        return { sameUser, switched, afterDelayedLoad };
+    });
+    assert.equal(authSwitchRegression.sameUser.appDisplay, 'flex', 'same-user auth refresh must preserve the accepted app UI');
+    assert.equal(authSwitchRegression.sameUser.oldTransactionVisible, true, 'same-user auth refresh must preserve accepted transactions');
+    assert.equal(authSwitchRegression.switched.appDisplay, 'none', 'identity change must hide accepted UI before authorization completes');
+    assert.equal(authSwitchRegression.switched.loginDisplay, 'flex', 'identity change must return to the pending-auth screen');
+    assert.equal(authSwitchRegression.switched.oldTransactionVisible, false, 'identity change must clear the prior user transaction UI');
+    assert.equal(authSwitchRegression.afterDelayedLoad.appDisplay, 'none', 'a delayed old-user load must not re-show the app');
+    assert.equal(authSwitchRegression.afterDelayedLoad.oldTransactionVisible, false, 'a delayed old-user load must not restore prior user data');
+    await page.evaluate(async () => { await window.firebase.auth().signInWithPopup(); });
+    await page.waitForFunction(() => document.querySelector('.app-layout').style.display === 'flex');
+    const delayedSignOutRegression = await page.evaluate(async () => {
+        window.__delaySharedRead = true;
+        window.__sharedReadStarted = false;
+        window.firebase.auth().__refreshUser();
+        await new Promise(resolve => { const check = () => window.__sharedReadStarted ? resolve() : setTimeout(check, 0); check(); });
+        await window.firebase.auth().signOut();
+        window.__delaySharedRead = false;
+        if (typeof window.__resolveSharedRead === 'function') window.__resolveSharedRead();
+        await new Promise(resolve => setTimeout(resolve, 0));
+        return {
+            appDisplay: document.querySelector('.app-layout').style.display,
+            oldTransactionVisible: document.body.innerText.includes('Old user transaction')
+        };
+    });
+    assert.equal(delayedSignOutRegression.appDisplay, 'none', 'a delayed load must not restore the app after sign-out');
+    assert.equal(delayedSignOutRegression.oldTransactionVisible, false, 'a delayed load must not restore old-user data after sign-out');
+    const delayedFileReadRegression = await page.evaluate(async () => {
+        const OriginalFileReader = window.FileReader;
+        const originalService = window.transactionApprovalService;
+        const originalConfirm = window.confirm;
+        let restoreCalls = 0;
+        window.__fileReadStarted = false;
+        window.__resolveFileRead = null;
+        window.transactionApprovalService = { ...originalService, serverBacked: true, async restore() { restoreCalls += 1; return { ok: true, revision: 1, state: {} }; } };
+        window.confirm = () => true;
+        window.FileReader = function DelayedFileReader() {
+            const real = new OriginalFileReader();
+            this.onload = null;
+            this.readAsText = file => {
+                window.__fileReadStarted = true;
+                window.__resolveFileRead = () => { real.onload = this.onload; real.readAsText(file); };
+            };
+        };
+        const backup = window.TransactionReview.createBackup({ transactions: [{ sourceId: 'file-read-stale', date: '2026-10-03', description: 'Stale file read', amount: -3, category: 'Restaurants', account: 'Checking' }], categories: [{ name: 'Restaurants', type: 'expense' }], budgets: {}, merchantDefaults: {} });
+        window.importData({ files: [new File([JSON.stringify(backup)], 'file-read-stale.json', { type: 'application/json' })] });
+        await new Promise(resolve => { const check = () => window.__fileReadStarted ? resolve() : setTimeout(check, 0); check(); });
+        await window.firebase.auth().signOut();
+        window.__resolveFileRead();
+        await new Promise(resolve => setTimeout(resolve, 0));
+        const stale = { restoreCalls, appDisplay: document.querySelector('.app-layout').style.display, staleVisible: document.body.innerText.includes('Stale file read') };
+        window.FileReader = OriginalFileReader;
+        window.transactionApprovalService = originalService;
+        window.confirm = originalConfirm;
+        return stale;
+    });
+    assert.equal(delayedFileReadRegression.restoreCalls, 0, 'a stale FileReader callback must not call the restore service');
+    assert.equal(delayedFileReadRegression.appDisplay, 'none', 'a stale FileReader callback must not show the app after sign-out');
+    assert.equal(delayedFileReadRegression.staleVisible, false, 'a stale FileReader callback must not install the selected backup');
+    await new Promise(resolve => setTimeout(resolve, 25));
+    const signedOutOfflineImport = await page.evaluate(async () => {
+        const OriginalFileReader = window.FileReader;
+        const originalConfirm = window.confirm;
+        window.__fileReadStarted = false;
+        window.__resolveFileRead = null;
+        window.confirm = () => true;
+        window.FileReader = function DelayedFileReader() {
+            const real = new OriginalFileReader();
+            this.onload = null;
+            this.readAsText = file => {
+                window.__fileReadStarted = true;
+                window.__resolveFileRead = () => { real.onload = this.onload; real.readAsText(file); };
+            };
+        };
+        const backup = window.TransactionReview.createBackup({ transactions: [{ sourceId: 'offline-file-read', date: '2026-10-04', description: 'Offline file read', amount: -4, category: 'Restaurants', account: 'Checking' }], categories: [{ name: 'Restaurants', type: 'expense' }], budgets: {}, merchantDefaults: {} });
+        window.importData({ files: [new File([JSON.stringify(backup)], 'offline-file-read.json', { type: 'application/json' })] });
+        await new Promise(resolve => { const check = () => window.__fileReadStarted ? resolve() : setTimeout(check, 0); check(); });
+        window.__resolveFileRead();
+        await new Promise(resolve => setTimeout(resolve, 50));
+        const result = { success: window.__alerts.some(message => message.includes('Data imported successfully')) };
+        window.FileReader = OriginalFileReader;
+        window.confirm = originalConfirm;
+        return result;
+    });
+    assert.equal(signedOutOfflineImport.success, true, 'an unchanged signed-out epoch must retain offline backup restore');
+    await page.evaluate(async () => { await window.firebase.auth().signInWithPopup(); });
+    await page.waitForFunction(() => document.querySelector('.app-layout').style.display === 'flex');
+    const delayedRestoreSignOutRegression = await page.evaluate(async () => {
+        const originalService = window.transactionApprovalService;
+        const originalConfirm = window.confirm;
+        let resolveReview;
+        window.__restoreLoadStarted = false;
+        window.transactionApprovalService = {
+            ...originalService,
+            serverBacked: true,
+            async restore() { return { ok: true, revision: 1, state: {} }; },
+            async loadReview() {
+                window.__restoreLoadStarted = true;
+                return new Promise(resolve => { resolveReview = resolve; });
+            }
+        };
+        window.confirm = () => true;
+        const backup = window.TransactionReview.createBackup({
+            transactions: [{ sourceId: 'delayed-restore', date: '2026-10-02', description: 'Delayed restore', amount: -2, category: 'Restaurants', account: 'Checking' }],
+            categories: [{ name: 'Restaurants', type: 'expense' }], budgets: {}, merchantDefaults: {}
+        });
+        window.importData({ files: [new File([JSON.stringify(backup)], 'delayed-restore.json', { type: 'application/json' })] });
+        await new Promise(resolve => { const check = () => window.__restoreLoadStarted ? resolve() : setTimeout(check, 0); check(); });
+        await window.firebase.auth().signOut();
+        resolveReview({ schemaVersion: 1, pending: [], rejected: [], accepted: [], audit: [], receipts: [], batchMeta: [] });
+        await new Promise(resolve => setTimeout(resolve, 0));
+        window.transactionApprovalService = originalService;
+        window.confirm = originalConfirm;
+        return {
+            appDisplay: document.querySelector('.app-layout').style.display,
+            oldTransactionVisible: document.body.innerText.includes('Delayed restore') || document.body.innerText.includes('Old user transaction')
+        };
+    });
+    assert.equal(delayedRestoreSignOutRegression.appDisplay, 'none', 'a delayed restore must not re-show the app after sign-out');
+    assert.equal(delayedRestoreSignOutRegression.oldTransactionVisible, false, 'a delayed restore must not install old-user state after sign-out');
+    const browserHistoryRoundTrip = await page.evaluate(() => {
+        const state = {
+            transactions: [{ sourceId: 'browser-legacy-history', date: 'Unknown', description: 'Historical transaction', amount: -2, category: 'Restaurants', account: 'Checking' }],
+            categories: [{ name: 'Restaurants', type: 'expense' }], budgets: {}, merchantDefaults: {}, categoryGroups: [], categoryColors: {}, categoryOrder: []
+        };
+        const first = window.TransactionReview.createBackup(state, { app: 'browser-smoke' }, { acceptedHistory: true });
+        const restored = window.TransactionReview.restoreBackup(first, { requireApproval: true, approved: true });
+        const second = window.TransactionReview.createBackup(restored, { app: 'browser-smoke' }, { acceptedHistory: true });
+        return { firstDate: first.transactions[0].date, restoredDate: restored.transactions[0].date, secondDate: second.transactions[0].date, marker: second.metadata.acceptedHistoryDateCompatibility };
+    });
+    assert.equal(browserHistoryRoundTrip.firstDate, 'Unknown', 'browser history export must preserve opaque dates');
+    assert.equal(browserHistoryRoundTrip.restoredDate, 'Unknown', 'browser history restore must preserve opaque dates');
+    assert.equal(browserHistoryRoundTrip.secondDate, 'Unknown', 'browser history repeated export must preserve opaque dates');
+    assert.deepEqual(browserHistoryRoundTrip.marker, { version: 1 });
+    await page.evaluate(async () => { await window.firebase.auth().signInWithPopup(); });
+    await page.waitForFunction(() => document.querySelector('.app-layout').style.display === 'flex');
+    const actualHistoryState = {
+        transactions: [{ sourceId: 'browser-legacy-download', date: 'Unknown', description: 'Historical download', amount: -2.5, category: 'Restaurants', account: 'Checking', payment_method: 'Checking', type: 'expense' }],
+        categories: [{ name: 'Restaurants', type: 'expense' }], budgets: {}, merchantDefaults: {}, categoryGroups: [], categoryColors: {}, categoryOrder: []
+    };
+    await page.evaluate(state => {
+        window.restoreAcceptedState(state);
+        window.__restoreTransport = null;
+        window.__restoreResponseState = null;
+        window.__originalConfirmForHistory = window.confirm;
+        window.confirm = () => true;
+        window.transactionApprovalService = {
+            serverBacked: true,
+            async restore(nextState, expectedRevision) {
+                window.__restoreTransport = JSON.parse(JSON.stringify(nextState));
+                const responseState = { ...nextState };
+                delete responseState.acceptedHistoryDateCompatibility;
+                window.__restoreResponseState = JSON.parse(JSON.stringify(responseState));
+                return { ok: true, revision: Number(expectedRevision || 0) + 1, state: responseState };
+            }
+        };
+    }, actualHistoryState);
+    const downloadPromise = page.waitForEvent('download');
+    await page.evaluate(() => window.exportData());
+    const historyDownload = await downloadPromise;
+    const historyStream = await historyDownload.createReadStream();
+    const historyChunks = [];
+    for await (const chunk of historyStream) historyChunks.push(chunk);
+    const downloadedHistory = Buffer.concat(historyChunks);
+    const downloadedHistoryJson = JSON.parse(downloadedHistory.toString('utf8'));
+    assert.equal(downloadedHistoryJson.transactions[0].date, 'Unknown', 'actual export must preserve opaque accepted-history dates');
+    assert.deepEqual(downloadedHistoryJson.metadata.acceptedHistoryDateCompatibility, { version: 1 });
+    await page.locator('#dataFileInput').setInputFiles({ name: 'opaque-history.json', mimeType: 'application/json', buffer: downloadedHistory });
+    await page.waitForFunction(() => window.__restoreTransport && window.__restoreResponseState);
+    const actualHistoryTransport = await page.evaluate(() => ({
+        requestDate: window.__restoreTransport.transactions[0].date,
+        requestMarker: window.__restoreTransport.acceptedHistoryDateCompatibility,
+        responseDate: window.__restoreResponseState.transactions[0].date,
+        responseHasMarker: Object.prototype.hasOwnProperty.call(window.__restoreResponseState, 'acceptedHistoryDateCompatibility'),
+        localDate: JSON.parse(localStorage.getItem('budget_transactions'))[0].date,
+        acceptedSignatureHasMarker: window.acceptedStateSignature().includes('acceptedHistoryDateCompatibility')
+    }));
+    assert.equal(actualHistoryTransport.requestDate, 'Unknown');
+    assert.equal(actualHistoryTransport.requestMarker, true, 'actual import must send the compatibility marker to authenticated restore');
+    assert.equal(actualHistoryTransport.responseDate, 'Unknown');
+    assert.equal(actualHistoryTransport.responseHasMarker, false, 'canonical restore response must not contain the transport marker');
+    assert.equal(actualHistoryTransport.localDate, 'Unknown');
+    assert.equal(actualHistoryTransport.acceptedSignatureHasMarker, false);
+    await page.evaluate(() => { window.confirm = window.__originalConfirmForHistory; });
     await page.locator('.nav-item[data-tab="import"]').click();
     await page.evaluate(() => window.stageReviewTransactions([{ sourceId: 'browser-smoke', date: '2026-10-01', description: 'Synthetic coffee', amount: -4.25, category: 'Restaurants', account: 'Checking', payment_method: 'Checking', type: 'expense' }], 'bank-csv'));
     await page.locator('.review-select').waitFor();
@@ -82,20 +294,257 @@ function createServer() {
     await page.waitForFunction(() => document.querySelector('.review-select') && document.querySelector('.review-select').checked === true);
     assert.equal(await page.locator('#addSelectedTransactions').isDisabled(), false, 'Add selected remained disabled after selection rerender.');
     await page.evaluate(() => {
-      window.transactionApprovalService = { serverBacked: true, async approve(payload) {
-        const transactions = payload.map(item => {
-          const accepted = { ...item };
-          ['status', 'fingerprint', 'overlap', 'revision', 'reviewedRevision', 'batchId'].forEach(key => delete accepted[key]);
-          return accepted;
-        });
-        return { ok: true, revision: 2, state: { transactions, categories: [{ name: 'Restaurants', type: 'expense' }], budgets: {}, merchantDefaults: {}, categoryGroups: [], categoryColors: {}, categoryOrder: [] } };
-      }};
+      const previousState = cloneAcceptedState();
+      const calls = [];
+      window.__staleAcceptedQueue = { previousState, oldSnapshot: JSON.stringify(previousState.transactions), calls, persistedState: null, firstStarted: false, oldCallCount: 0, secondOldReached: false };
+      window.transactionApprovalService = {
+        serverBacked: true,
+        async approve(payload) {
+          const transactions = payload.map(item => {
+            const accepted = { ...item };
+            ['status', 'fingerprint', 'overlap', 'revision', 'reviewedRevision', 'batchId'].forEach(key => delete accepted[key]);
+            return accepted;
+          });
+          return { ok: true, revision: 2, state: { transactions, categories: [{ name: 'Restaurants', type: 'expense' }], budgets: {}, merchantDefaults: {}, categoryGroups: [], categoryColors: {}, categoryOrder: [] } };
+        },
+        async saveAcceptedState(nextState, expectedRevision) {
+          const isOldSnapshot = JSON.stringify(nextState.transactions) === window.__staleAcceptedQueue.oldSnapshot;
+          calls.push({ count: nextState.transactions.length, descriptions: nextState.transactions.map(transaction => transaction.description), expectedRevision, isOldSnapshot });
+          if (isOldSnapshot) window.__staleAcceptedQueue.oldCallCount += 1;
+          if (isOldSnapshot && window.__staleAcceptedQueue.oldCallCount === 1) {
+            window.__staleAcceptedQueue.firstStarted = true;
+            return new Promise(resolve => {
+              window.__releaseStaleAcceptedSave = () => resolve({ ok: true, revision: expectedRevision + 1, state: nextState });
+            });
+          }
+          if (isOldSnapshot) window.__staleAcceptedQueue.secondOldReached = true;
+          window.__staleAcceptedQueue.persistedState = JSON.parse(JSON.stringify(nextState));
+          return { ok: true, revision: expectedRevision + 1, state: nextState };
+        }
+      };
+      // Start two old snapshots before the normal approval handler runs. The
+      // second remains behind the controlled first queue slot.
+      window.__staleAcceptedQueue.firstPromise = saveToFirestore({ snapshot: previousState });
+      window.__staleAcceptedQueue.secondPromise = null;
+    });
+    await page.waitForFunction(() => window.__staleAcceptedQueue && window.__staleAcceptedQueue.firstStarted === true);
+    await page.evaluate(() => {
+      window.__staleAcceptedQueue.secondPromise = saveToFirestore({ snapshot: window.__staleAcceptedQueue.previousState });
     });
     await page.locator('#addSelectedTransactions').click();
     await page.waitForFunction(() => document.querySelectorAll('.review-select').length === 0);
     const result = await page.evaluate(() => ({ alerts: window.__alerts.slice(), status: document.getElementById('reviewStatus').textContent }));
     assert.ok(result.alerts.some(message => message.includes('Added 1 selected transaction')), `Unexpected alerts: ${JSON.stringify(result.alerts)}`);
     assert.equal(result.status.includes('Added'), false, `Review status did not settle after approval: ${result.status}`);
+    const staleAcceptedSave = await page.evaluate(async () => {
+        window.__releaseStaleAcceptedSave();
+        const results = await Promise.all([window.__staleAcceptedQueue.firstPromise, window.__staleAcceptedQueue.secondPromise]);
+        return {
+            results,
+            calls: window.__staleAcceptedQueue.calls,
+            oldCallCount: window.__staleAcceptedQueue.oldCallCount,
+            secondOldReached: window.__staleAcceptedQueue.secondOldReached,
+            acceptedDescriptions: transactions.map(transaction => transaction.description),
+            epoch: acceptedStateEpoch
+        };
+    });
+    assert.deepEqual(staleAcceptedSave.results, [false, false], 'Both pre-approval queued saves must be rejected as stale');
+    assert.equal(staleAcceptedSave.oldCallCount, 1, `The second stale save must never reach persistence: ${JSON.stringify(staleAcceptedSave)}`);
+    assert.equal(staleAcceptedSave.secondOldReached, false, 'The second stale save must remain behind the stale queue epoch');
+    assert.deepEqual(staleAcceptedSave.acceptedDescriptions, ['Synthetic coffee'], 'The acknowledged approval must remain installed');
+
+    // Exercise the normal accepted-edit handler. Its durable save is the
+    // first queue slot; two pre-edit snapshots are intentionally enqueued
+    // behind it. The accepted-state epoch must advance from the edit's
+    // acknowledgement before either stale snapshot can reach persistence.
+    await page.evaluate(() => {
+      const editState = {
+        transactions: [{ sourceId: 'legacy-edit', sourceRevision: '1', date: '2026-10-01', description: 'Before edit', amount: -4.25, category: 'Restaurants', account: 'Checking', payment_method: 'Checking', type: 'expense' }],
+        categories: [{ name: 'Restaurants', type: 'expense' }], budgets: {}, merchantDefaults: {}, categoryGroups: [], categoryColors: {}, categoryOrder: ['Restaurants']
+      };
+      window.restoreAcceptedState(editState);
+      window.renderAll();
+      const previousState = window.cloneAcceptedState();
+      window.__legacyEditQueue = { previousState, calls: [], editStarted: false, editCompleted: false, staleCallCount: 0, secondStaleReached: false, runTransactionCalls: 0, expectedRevision: cloudRevision };
+      window.transactionApprovalService = { serverBacked: false };
+      const firestore = window.firebase.firestore();
+      window.__legacyEditQueue.originalRunTransaction = firestore.runTransaction;
+      firestore.runTransaction = async callback => {
+        window.__legacyEditQueue.runTransactionCalls += 1;
+        if (window.__legacyEditQueue.runTransactionCalls > 1) {
+          window.__legacyEditQueue.staleCallCount += 1;
+          if (window.__legacyEditQueue.staleCallCount > 1) window.__legacyEditQueue.secondStaleReached = true;
+        }
+        if (window.__legacyEditQueue.runTransactionCalls === 1) {
+          window.__legacyEditQueue.editStarted = true;
+          return new Promise((resolve, reject) => {
+            window.__releaseLegacyEdit = async () => {
+              try {
+                await callback({
+                  get: async () => ({ exists: true, data: () => ({ revision: window.__legacyEditQueue.expectedRevision }) }),
+                  set: (ref, value) => window.__legacyEditQueue.calls.push({ descriptions: value.transactions.map(transaction => transaction.description), isEdit: value.transactions.some(transaction => transaction.description === 'After edit'), expectedRevision: value.revision - 1 })
+                });
+                window.__legacyEditQueue.editCompleted = true;
+                resolve();
+              } catch (error) { reject(error); }
+            };
+          });
+        }
+        await callback({
+          get: async () => ({ exists: true, data: () => ({ revision: window.__legacyEditQueue.expectedRevision }) }),
+          set: () => {}
+        });
+      };
+      document.querySelector('.transaction').click();
+      document.getElementById('editTransDescription').value = 'After edit';
+      document.getElementById('editTransSave').click();
+    });
+    await page.waitForFunction(() => window.__legacyEditQueue && window.__legacyEditQueue.editStarted === true);
+    await page.evaluate(() => {
+      const previous = window.__legacyEditQueue.previousState;
+      window.__legacyEditQueue.firstStalePromise = window.saveToFirestore({ snapshot: previous });
+      window.__legacyEditQueue.secondStalePromise = window.saveToFirestore({ snapshot: previous });
+    });
+    await page.evaluate(() => window.__releaseLegacyEdit());
+    await page.waitForFunction(() => window.__legacyEditQueue && window.__legacyEditQueue.editCompleted === true);
+    const legacyEditQueue = await page.evaluate(async () => ({
+      staleResults: await Promise.all([window.__legacyEditQueue.firstStalePromise, window.__legacyEditQueue.secondStalePromise]),
+      calls: window.__legacyEditQueue.calls,
+      staleCallCount: window.__legacyEditQueue.staleCallCount,
+      secondStaleReached: window.__legacyEditQueue.secondStaleReached,
+      descriptions: transactions.map(transaction => transaction.description)
+    }));
+    assert.deepEqual(legacyEditQueue.staleResults, [false, false], 'Pre-edit queued saves must be rejected after the acknowledged edit');
+    assert.equal(legacyEditQueue.staleCallCount, 0, `Stale pre-edit saves must not reach persistence: ${JSON.stringify(legacyEditQueue)}`);
+    assert.equal(legacyEditQueue.secondStaleReached, false, 'The second pre-edit save must remain behind the accepted-edit epoch');
+    assert.deepEqual(legacyEditQueue.descriptions, ['After edit'], 'The acknowledged edit must remain installed');
+    await page.evaluate(() => { window.firebase.firestore().runTransaction = window.__legacyEditQueue.originalRunTransaction; });
+
+    function installProviderHarness() {
+        window.TRANSACTION_LINK_ENABLED = true;
+        window.TRANSACTION_LINK_CONNECTIONS = [{ key: 'chase', label: 'Chase' }];
+        const state = { apiCreateCalls: 0, apiExchangeCalls: 0, apiStatusCalls: 0, plaidCreateCalls: 0, options: null };
+        window.__providerHarness = state;
+        window.transactionApprovalService = {
+            serverBacked: true,
+            async listPending() { return []; },
+            async createLinkToken(connectionKey, sessionId) {
+                state.apiCreateCalls += 1;
+                return { connectionKey, sessionId, mode: 'create', linkToken: 'synthetic-link-token' };
+            },
+            async exchangeLink(connectionKey, publicToken, accountBindings, requestId) {
+                state.apiExchangeCalls += 1;
+                state.publicToken = publicToken;
+                if (publicToken) return { status: 'pending-binding', connectionKey, exchangeId: requestId, itemId: 'synthetic-item', accounts: [{ account_id: 'provider-checking', name: 'Checking', type: 'depository', subtype: 'checking' }] };
+                return { connectionKey, itemId: 'synthetic-item', accounts: [{ accountId: 'provider-checking' }], accountMap: accountBindings };
+            },
+            async linkStatus(connectionKey, requestId) {
+                state.apiStatusCalls += 1;
+                return { status: 'pending-binding', connectionKey, exchangeId: requestId, itemId: 'synthetic-item', accounts: [{ account_id: 'provider-checking', name: 'Checking', type: 'depository', subtype: 'checking' }] };
+            },
+            async updateLinkToken() { throw new Error('Synthetic browser test does not exercise update mode.'); }
+        };
+        window.Plaid = {
+            create(options) {
+                state.plaidCreateCalls += 1;
+                state.options = options;
+                return { open() { state.opened = true; } };
+            }
+        };
+    }
+    await page.addInitScript(installProviderHarness);
+    await page.evaluate(installProviderHarness);
+    const staleToken = await page.evaluate(async () => {
+        const original = window.transactionApprovalService;
+        let resolveCreate;
+        window.transactionApprovalService = { ...original, async createLinkToken() { window.__staleCreateStarted = true; return new Promise(resolve => { resolveCreate = resolve; }); } };
+        const pending = window.openProviderLink('create').then(() => 'resolved').catch(error => error.message);
+        await new Promise(resolve => { const check = () => window.__staleCreateStarted ? resolve() : setTimeout(check, 0); check(); });
+        await window.firebase.auth().signOut();
+        resolveCreate({ connectionKey: 'chase', sessionId: 'stale-session', linkToken: 'stale-token' });
+        return pending;
+    });
+    assert.match(staleToken, /Authentication changed/);
+    assert.equal(await page.evaluate(() => sessionStorage.getItem('budget_provider_link_session_v1')), null, 'stale Link-token result must not install another user session');
+    await page.evaluate(async () => { await window.firebase.auth().signInWithPopup(); });
+    await page.evaluate(installProviderHarness);
+    await page.evaluate(() => window.refreshProviderLinkUi());
+
+    const staleExchange = await page.evaluate(async () => {
+        let resolveExchange;
+        const base = window.transactionApprovalService;
+        window.transactionApprovalService = { ...base, async exchangeLink() { window.__staleExchangeStarted = true; return new Promise(resolve => { resolveExchange = resolve; }); } };
+        await window.openProviderLink('create');
+        const options = window.__providerHarness.options;
+        const pending = options.onSuccess('stale-public-token', {}).then(() => 'resolved').catch(error => error.message);
+        await new Promise(resolve => { const check = () => window.__staleExchangeStarted ? resolve() : setTimeout(check, 0); check(); });
+        window.firebase.auth().__switchUser();
+        resolveExchange({ status: 'pending-binding', accounts: [] });
+        return pending;
+    });
+    assert.equal(staleExchange, 'resolved', 'stale Link exchange callback may finish only by ignoring its result');
+    assert.equal(await page.evaluate(() => sessionStorage.getItem('budget_provider_link_session_v1')), null, 'stale Link exchange result must not render or persist for a switched user');
+    await page.evaluate(async () => { await window.firebase.auth().signInWithPopup(); });
+    await page.evaluate(installProviderHarness);
+    await page.evaluate(() => window.refreshProviderLinkUi());
+
+    const staleStatus = await page.evaluate(async () => {
+        window.providerLinkStorageWrite({ kind: 'pending', uid: window.firebase.auth().currentUser.uid, connectionKey: 'chase', requestId: 'stale-status', expiresAt: Date.now() + 60000 });
+        let resolveStatus;
+        const base = window.transactionApprovalService;
+        window.transactionApprovalService = { ...base, async linkStatus() { window.__staleStatusStarted = true; return new Promise(resolve => { resolveStatus = resolve; }); } };
+        const pending = window.resumeProviderLinkPending().then(() => 'resolved').catch(error => error.message);
+        await new Promise(resolve => { const check = () => window.__staleStatusStarted ? resolve() : setTimeout(check, 0); check(); });
+        await window.firebase.auth().signOut();
+        resolveStatus({ status: 'pending-binding', accounts: [{ account_id: 'stale-account', name: 'Stale' }] });
+        return pending;
+    });
+    assert.equal(staleStatus, 'resolved');
+    assert.equal(await page.evaluate(() => document.querySelectorAll('#providerLinkBindings select').length), 0, 'stale status result must not render account bindings');
+    await page.evaluate(async () => { await window.firebase.auth().signInWithPopup(); });
+    await page.evaluate(installProviderHarness);
+    await page.evaluate(() => window.refreshProviderLinkUi());
+
+    await page.evaluate(() => window.refreshProviderLinkUi());
+    await page.evaluate(async () => window.openProviderLink('create'));
+    const initialLink = await page.evaluate(() => ({ state: window.__providerHarness, storage: JSON.parse(sessionStorage.getItem('budget_provider_link_session_v1')) }));
+    assert.equal(initialLink.state.apiCreateCalls, 1);
+    assert.equal(initialLink.state.options.receivedRedirectUri, undefined);
+    assert.equal(initialLink.storage.kind, 'link');
+    await page.evaluate(() => history.replaceState({}, '', '/index.html?oauth_state_id=synthetic-oauth'));
+    await page.evaluate(async () => window.openProviderLink('create', true));
+    const resumedLink = await page.evaluate(() => ({ state: window.__providerHarness, url: window.__providerHarness.options.receivedRedirectUri }));
+    assert.equal(resumedLink.state.apiCreateCalls, 1, 'OAuth resume must reuse the issued Link token.');
+    assert.match(resumedLink.url, /oauth_state_id=synthetic-oauth/);
+    await page.evaluate(async () => window.__providerHarness.options.onSuccess('synthetic-public-token', {}));
+    const pendingLink = await page.evaluate(() => ({ state: window.__providerHarness, storage: JSON.parse(sessionStorage.getItem('budget_provider_link_session_v1')), raw: sessionStorage.getItem('budget_provider_link_session_v1') }));
+    assert.equal(pendingLink.state.apiExchangeCalls, 1);
+    assert.equal(pendingLink.storage.kind, 'pending');
+    assert.doesNotMatch(pendingLink.raw, /synthetic-public-token/);
+    await page.reload({ waitUntil: 'domcontentloaded' });
+    await page.waitForFunction(() => document.querySelector('.app-layout').style.display === 'flex');
+    await page.waitForTimeout(25);
+    const recoveredLink = await page.evaluate(() => ({ state: window.__providerHarness, storage: JSON.parse(sessionStorage.getItem('budget_provider_link_session_v1')), selects: document.querySelectorAll('#providerLinkBindings select').length }));
+    assert.equal(recoveredLink.state.apiCreateCalls, 0, 'Pending reload must not create another Link Item.');
+    assert.equal(recoveredLink.state.apiStatusCalls, 1, 'Pending reload must query the durable server receipt.');
+    assert.equal(recoveredLink.storage.kind, 'pending');
+    assert.equal(recoveredLink.selects, 1, 'Pending reload must render the server-returned account list.');
+    await page.evaluate(() => window.firebase.auth().__switchUser());
+    assert.equal(await page.evaluate(() => sessionStorage.getItem('budget_provider_link_session_v1')), null, 'switching users must clear the prior Link session');
+    assert.equal(await page.evaluate(() => document.querySelectorAll('#providerLinkBindings select').length), 0, 'switching users must clear the prior account-mapping UI');
+
+    const duplicateAccountLabels = await page.evaluate(() => {
+        renderProviderAccountBindings([
+            { account_id: 'chase-cff', name: 'Chase Card', type: 'credit', subtype: 'credit card', mask: '9981' },
+            { account_id: 'chase-csp', name: 'Chase Card', type: 'credit', subtype: 'credit card', mask: '1963' }
+        ]);
+        return [...document.querySelectorAll('#providerLinkBindings label')].map(label => label.firstChild.textContent);
+    });
+    assert.equal(duplicateAccountLabels.length, 2);
+    assert.match(duplicateAccountLabels[0], /Chase Card.*credit\/credit card.*9981/);
+    assert.match(duplicateAccountLabels[1], /Chase Card.*credit\/credit card.*1963/);
+    assert.notEqual(duplicateAccountLabels[0], duplicateAccountLabels[1], 'duplicate account names must remain distinguishable by bounded masks');
+
     const unsafeBudgetResults = await page.evaluate(() => ['__proto__', 'constructor', 'prototype'].map(category => {
         const values = {};
         Object.defineProperty(values, category, { value: 5, enumerable: true, configurable: true, writable: true });

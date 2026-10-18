@@ -81,11 +81,23 @@
         return candidate;
     }
 
-    function validateSnapshot(snapshot) {
+    const ACCEPTED_HISTORY_DATE_COMPATIBILITY_VERSION = 1;
+
+    function hasAcceptedHistoryDateCompatibility(snapshot) {
+        const marker = snapshot && snapshot.metadata && snapshot.metadata.acceptedHistoryDateCompatibility;
+        return marker !== undefined && marker !== null && typeof marker === 'object' && !Array.isArray(marker) && marker.version === ACCEPTED_HISTORY_DATE_COMPATIBILITY_VERSION;
+    }
+
+    function validateSnapshot(snapshot, options) {
+        const opts = options || {};
+        const allowOpaqueAcceptedHistoryDates = opts.allowOpaqueAcceptedHistoryDates === true;
         if (!snapshot || typeof snapshot !== 'object' || snapshot.schemaVersion !== VERSION) throw new Error('Unsupported backup schema version.');
         if (!Array.isArray(snapshot.transactions) || !Array.isArray(snapshot.categories)) throw new Error('Backup transactions and categories must be arrays.');
+        if (snapshot.metadata !== undefined && (!snapshot.metadata || typeof snapshot.metadata !== 'object' || Array.isArray(snapshot.metadata))) throw new Error('Backup metadata is invalid.');
+        if (snapshot.metadata && Object.prototype.hasOwnProperty.call(snapshot.metadata, 'acceptedHistoryDateCompatibility') && !hasAcceptedHistoryDateCompatibility(snapshot)) throw new Error('Backup accepted history compatibility marker is invalid.');
         snapshot.transactions.forEach((transaction, index) => {
-            if (!transaction || typeof transaction !== 'object' || Array.isArray(transaction) || !strictDate(transaction.date) || !text(transaction.description) || !text(transaction.category)) throw new Error(`Backup transaction ${index + 1} is invalid.`);
+            const dateIsValid = transaction && typeof transaction.date === 'string' && (strictDate(transaction.date) || allowOpaqueAcceptedHistoryDates);
+            if (!transaction || typeof transaction !== 'object' || Array.isArray(transaction) || !dateIsValid || !text(transaction.description) || !text(transaction.category)) throw new Error(`Backup transaction ${index + 1} is invalid.`);
             try { integerCents(transaction.amount); } catch (_) { throw new Error(`Backup transaction ${index + 1} amount is invalid.`); }
             if (transaction.account !== undefined && typeof transaction.account !== 'string') throw new Error(`Backup transaction ${index + 1} account is invalid.`);
             if (transaction.payment_method !== undefined && typeof transaction.payment_method !== 'string') throw new Error(`Backup transaction ${index + 1} payment method is invalid.`);
@@ -123,8 +135,9 @@
         return true;
     }
 
-    function createBackup(state, metadata) {
+    function createBackup(state, metadata, options) {
         const source = state || {};
+        const opts = options || {};
         const backup = {
             schemaVersion: VERSION,
             exportedAt: new Date().toISOString(),
@@ -138,7 +151,10 @@
             categoryOrder: clone(source.categoryOrder || [])
         };
         if (source.review) backup.review = clone(source.review);
-        validateSnapshot(backup);
+        const containsOpaqueDate = backup.transactions.some(transaction => transaction && typeof transaction.date === 'string' && !strictDate(transaction.date));
+        if (containsOpaqueDate && opts.acceptedHistory !== true) throw new Error('Backup contains opaque dates and must be exported from accepted history.');
+        if (containsOpaqueDate) backup.metadata.acceptedHistoryDateCompatibility = { version: ACCEPTED_HISTORY_DATE_COMPATIBILITY_VERSION };
+        validateSnapshot(backup, { allowOpaqueAcceptedHistoryDates: containsOpaqueDate });
         return backup;
     }
 
@@ -152,22 +168,23 @@
         const migrated = {
             schemaVersion: VERSION,
             exportedAt: new Date().toISOString(),
-            metadata: { legacySchemaVersion: 0, migratedFrom: 'legacy-four-field-backup' },
             transactions: clone(source.transactions),
             categories: clone(source.categories),
             budgets: clone(source.budgets),
             merchantDefaults: clone(source.merchantDefaults),
             categoryGroups: [],
             categoryColors: {},
-            categoryOrder: []
+            categoryOrder: [],
+            metadata: { legacySchemaVersion: 0, migratedFrom: 'legacy-four-field-backup', acceptedHistoryDateCompatibility: { version: ACCEPTED_HISTORY_DATE_COMPATIBILITY_VERSION } }
         };
-        validateSnapshot(migrated);
+        validateSnapshot(migrated, { allowOpaqueAcceptedHistoryDates: true });
         return migrated;
     }
 
     function restoreBackup(snapshot, options) {
         const candidate = snapshot && snapshot.schemaVersion === undefined ? migrateLegacyBackup(snapshot) : snapshot;
-        validateSnapshot(candidate);
+        const acceptedHistoryDateCompatibility = hasAcceptedHistoryDateCompatibility(candidate);
+        validateSnapshot(candidate, { allowOpaqueAcceptedHistoryDates: acceptedHistoryDateCompatibility });
         if (options && options.requireApproval && options.approved !== true) throw new Error('Restore requires explicit approval.');
         return {
             transactions: clone(candidate.transactions),
@@ -178,7 +195,8 @@
             categoryColors: clone(candidate.categoryColors || {}),
             categoryOrder: clone(candidate.categoryOrder || []),
             ...(candidate.review ? { review: clone(candidate.review) } : {}),
-            ...(candidate.metadata && candidate.metadata.legacySchemaVersion !== undefined ? { migration: clone(candidate.metadata) } : {})
+            ...(candidate.metadata && candidate.metadata.legacySchemaVersion !== undefined ? { migration: clone(candidate.metadata) } : {}),
+            ...(acceptedHistoryDateCompatibility ? { acceptedHistoryDateCompatibility: true } : {})
         };
     }
 

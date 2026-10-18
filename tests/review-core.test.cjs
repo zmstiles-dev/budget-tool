@@ -138,7 +138,41 @@ const legacy = review.restoreBackup({
     budgets: { Legacy: { '2026-10': 50 } }, merchantDefaults: {}
 });
 assert.equal(legacy.migration.migratedFrom, 'legacy-four-field-backup');
+assert.equal(legacy.acceptedHistoryDateCompatibility, true);
+const legacyOpaque = review.restoreBackup({
+    transactions: [record({ sourceId: 'legacy-four-field-opaque', date: 'Unknown' })],
+    categories: [{ name: 'Legacy', type: 'expense' }], budgets: { Legacy: { '2026-10': 50 } }, merchantDefaults: {}
+}, { requireApproval: true, approved: true });
+assert.deepEqual(legacyOpaque.transactions.map(transaction => transaction.date), ['Unknown']);
+assert.equal(legacyOpaque.acceptedHistoryDateCompatibility, true);
 assert.throws(() => review.restoreBackup({ transactions: [], categories: [], budgets: {} }), /Legacy backup/);
+
+// Accepted history may contain opaque dates from the pre-schema backup. The
+// compatibility marker is emitted only by an explicit accepted-history export,
+// preserves the exact strings, and survives repeated versioned round trips.
+const opaqueHistory = {
+    transactions: [
+        record({ sourceId: 'legacy-opaque-unknown', date: 'Unknown' }),
+        record({ sourceId: 'legacy-opaque-impossible', date: '2023-02-30' })
+    ],
+    categories: [{ name: 'Legacy', type: 'expense' }], budgets: { Legacy: { '2026-10': 50 } }, merchantDefaults: {}
+};
+assert.throws(() => review.createBackup(opaqueHistory, { app: 'budget-tool' }), /accepted history/);
+const historyBackup = review.createBackup(opaqueHistory, { app: 'budget-tool' }, { acceptedHistory: true });
+assert.deepEqual(historyBackup.metadata.acceptedHistoryDateCompatibility, { version: 1 });
+assert.throws(() => review.validateSnapshot(historyBackup), /transaction/);
+const restoredHistory = review.restoreBackup(historyBackup, { requireApproval: true, approved: true });
+assert.equal(restoredHistory.acceptedHistoryDateCompatibility, true);
+assert.deepEqual(restoredHistory.transactions.map(transaction => transaction.date), ['Unknown', '2023-02-30']);
+const repeatedHistoryBackup = review.createBackup(restoredHistory, { app: 'budget-tool' }, { acceptedHistory: true });
+assert.deepEqual(repeatedHistoryBackup.transactions, historyBackup.transactions);
+const serializedHistoryBackup = JSON.parse(JSON.stringify(historyBackup));
+assert.deepEqual(review.restoreBackup(serializedHistoryBackup).transactions, historyBackup.transactions);
+assert.deepEqual(review.restoreBackup(repeatedHistoryBackup).transactions, historyBackup.transactions);
+assert.throws(() => review.restoreBackup({ ...historyBackup, metadata: { acceptedHistoryDateCompatibility: { version: 2 } } }), /compatibility marker/);
+assert.throws(() => review.restoreBackup({ ...historyBackup, metadata: [] }), /metadata/);
+assert.throws(() => review.createBackup(opaqueHistory, [], { acceptedHistory: true }), /metadata/);
+assert.throws(() => review.createBackup({ ...opaqueHistory, transactions: [{ ...opaqueHistory.transactions[0], date: null }] }, { app: 'budget-tool' }, { acceptedHistory: true }), /transaction/);
 
 await assert.rejects(() => new review.DisabledProviderAdapter().fetchDelta(), /not configured/);
 console.log('PASS: review staging, overlap flags, rejection markers, revision-bound idempotence, cursor gating, and credential-free backup/restore contracts.');

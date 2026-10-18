@@ -1,0 +1,7 @@
+[build]
+  publish = "netlify/public"
+  functions = "netlify/functions"
+
+[functions]
+  node_bundler = "esbuild"
+  included_files = ["_runtime/**"]
