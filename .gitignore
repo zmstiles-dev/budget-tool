@@ -1,5 +1,15 @@
 .opencode/
+.codex/
 Old CSVs/
 statements/
+Statements/
 budget-data.json
 bad-data.json
+firebase-debug.log
+firestore-debug.log
+ui-debug.log
+exports/
+*.export.csv
+.env
+.env.*
+!.env.example
