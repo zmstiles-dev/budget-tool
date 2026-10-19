@@ -386,13 +386,13 @@ function request(method, url, body, origin) {
     const deploymentConfig = require(path.join(projectRoot, 'deployment-config.template.js'));
     assert.deepEqual(deploymentConfig, {
         TRANSACTION_APPROVAL_ENDPOINT: 'https://stiles-budget-tool.netlify.app/.netlify/functions/budgetTransactions',
-        TRANSACTION_LINK_ENABLED: false,
+        TRANSACTION_LINK_ENABLED: true,
         TRANSACTION_SYNC_ENABLED: false,
-        TRANSACTION_LINK_CONNECTIONS: [],
+        TRANSACTION_LINK_CONNECTIONS: ['chase', 'capital-one'],
         TRANSACTION_SYNC_CONNECTIONS: []
     });
     const deploymentPreview = JSON.parse(execFileSync(process.execPath, ['scripts/preview-deployment-config.cjs'], { cwd: projectRoot, encoding: 'utf8' }));
-    assert.deepEqual(deploymentPreview, { endpoint: deploymentConfig.TRANSACTION_APPROVAL_ENDPOINT, linkEnabled: false, syncEnabled: false, linkConnections: [], syncConnections: [] });
+    assert.deepEqual(deploymentPreview, { endpoint: deploymentConfig.TRANSACTION_APPROVAL_ENDPOINT, linkEnabled: true, syncEnabled: false, linkConnections: ['chase', 'capital-one'], syncConnections: [] });
     assert.match(browserSource, /deployment-config\.template\.js/);
     assert.match(browserSource, /receivedRedirectUri/);
     assert.match(browserSource, /sessionStorage/);

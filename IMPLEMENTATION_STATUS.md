@@ -1,6 +1,6 @@
 # Transaction review implementation status
 
-> October 18, 2026 decision update: Zach rejected Blaze and requires a genuinely
+> October 19, 2026 decision update: Zach rejected Blaze and requires a genuinely
 > free backend with no automatic paid overages. The Firebase Functions/Secret
 > Manager deployment described below is retained as tested reference work, not
 > the launch path. Netlify's current credit-based Free plan is the selected
@@ -12,11 +12,12 @@
 > are private local provisioning material, not client configuration. No account,
 > credential, membership, IAM, billing or deployment action is authorized here.
 
-Status: local release candidate on `feat/transaction-review-foundation`. The
-checkout contains the transaction review foundation, a loopback Auth/Firestore
-verification harness, and a deployable server adapter. The current readiness
-delta is local and unpublished; it performs no new deployment, live Firebase
-mutation, live bank connection, or PR update.
+Status: local frontend release candidate on `feat/transaction-review-foundation`.
+The checkout contains the transaction review foundation, a loopback
+Auth/Firestore verification harness, and a deployable server adapter. The
+reviewed backend environment has been deployed once by the root operator; this
+checkout performs no cloud mutation, live bank connection, or PR update. The
+frontend Pages publication and live Link API/Item test remain pending.
 
 `PRODUCTION_READINESS.md` and `NETLIFY_FREE_SETUP.md` are the authoritative
 current launch and operator documents. The Firebase Functions and Secret
@@ -141,10 +142,10 @@ resolution, durable Link reservation and create/exchange/update lifecycle,
 stable provider account binding, bounded provider transport, and safe error
 output. Link is server-gated by `BUDGET_LINK_ENABLED`, sync is separately
 gated by `BUDGET_SYNC_ENABLED` plus active stored connection state, and the
-browser Link card remains hidden without explicit injected configuration. The
-wrapper is locally testable but still requires separately approved deployment
-configuration, IAM, secret resources, account mapping, and deployed security
-review.
+browser Link card follows the reviewed explicit connection configuration; the backend gate remains independent. The
+wrapper is locally testable and the approved Netlify environment has been
+deployed once; frontend publication and live Link API/Item verification remain
+pending.
 
 Current official cost and eligibility constraints, checked 2026-10-18 UTC:
 
