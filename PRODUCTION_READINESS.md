@@ -229,8 +229,9 @@ deploys, preview credentials, and build plugins are not part of this path.
 Current local delta inventory:
 
 * `netlify/functions/budgetTransactions.mjs` — Netlify runtime guard, Web
-  adapter, Firebase/Admin14 composition, bounded Plaid adapter, and disabled
-  defaults.
+  adapter, Firebase/Admin14 composition, bounded Plaid adapter, disabled
+  defaults, and local-only redacted startup-stage diagnostics that preserve
+  the generic client error response.
 * `production-service.js` — shared service plus encrypted Firestore token
   vault; the existing Secret Manager reference implementation remains in the
   same file.
@@ -243,8 +244,9 @@ Current local delta inventory:
 * `deployment-config.template.js` — empty endpoint and disabled provider
   gates.
 * `tests/netlify-runtime.test.cjs` — focused guard, adapter, vault, payload,
-  rotation, tamper, concurrency, bundle import, SDK version, and inventory
-  coverage, including extracted ZIP initialization outside checkout ancestors.
+  rotation, tamper, concurrency, bundle import, SDK version, inventory, and
+  redacted startup-stage/healthy-auth coverage, including extracted ZIP
+  initialization outside checkout ancestors.
 * `PRODUCTION_READINESS.md` and `NETLIFY_FREE_SETUP.md` — this local delta's
   setup, rollout, cost, and rollback record.
 
@@ -304,6 +306,22 @@ approved process that retains every version still referenced. Review the
 protected membership, household, origin, site guard, and artifact hash before
 restoring service.
 
-No deployment, billing-account link, credential use, production membership
-write, live Link exchange, bank connection, sync activation, or user roster
-publication is authorized by this milestone.
+## Actual release status — 2026-10-18
+
+The earlier milestone authorization text above records the pre-release state.
+Subsequent explicit operator approvals produced one private production deploy:
+deploy `6ad55f9563cfe446098f255b`, from commit `c56d2a9` and the reviewed ZIP
+SHA256
+`6c9548ff5844f531966983a55bb8e687c84e8c5a6f256b0143a84cf970c96265`.
+That publish consumed 15 of the 300 current Free-plan credits, leaving 285.
+The protected household configuration and four approved existing memberships
+were seeded and independently re-read; no accepted budget records were
+modified. The temporary Netlify CLI grant was revoked afterward.
+
+The private published route currently returns the generic service-unavailable
+response. The exact startup stage is unknown because the deployed revision
+predates the local-only redacted diagnostic added afterward. The diagnostic
+change is un-deployed, and the 18 synthetic operator tests remain green; this
+does not establish live production readiness. No further publish, upload,
+redeploy, Link or sync activation, frontend endpoint change, visibility
+change, bank operation, or migration is authorized without a separate review.

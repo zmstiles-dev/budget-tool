@@ -15,6 +15,15 @@ const FUNCTION_ROUTE_PREFIX = '/.netlify/functions/budgetTransactions';
 const HOUSEHOLD_ID_PATTERN = /^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$/;
 const NETLIFY_SITE_ID_PATTERN = /^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$/;
 const KEY_ID_PATTERN = /^[A-Za-z0-9][A-Za-z0-9_-]{0,31}$/;
+const DIAGNOSTIC_STAGES = Object.freeze({
+    TRUSTED_CONTEXT: 'trusted-context',
+    REQUEST_HOST: 'request-host',
+    RUNTIME_CONFIG: 'runtime-config',
+    FIREBASE_INITIALIZATION: 'firebase-initialization',
+    RUNTIME_BUILD: 'runtime-build',
+    ADAPTER: 'adapter'
+});
+const DIAGNOSTIC_STAGE_VALUES = new Set(Object.values(DIAGNOSTIC_STAGES));
 const KNOWN_PATHS = new Set([
     '/', '/review',
     '/pending', '/stage', '/sync', '/edit', '/split', '/reject', '/defer', '/cancel', '/approve', '/restore', '/accepted-state', '/reset',
@@ -58,6 +67,28 @@ function boolean(value) {
 
 function fail(message) {
     throw new Error(message);
+}
+
+function diagnosticStage(value) {
+    return DIAGNOSTIC_STAGE_VALUES.has(value) ? value : DIAGNOSTIC_STAGES.ADAPTER;
+}
+
+function emitHandlerDiagnostic(stage, request, context) {
+    const record = {
+        event: 'budgetTransactions.handler_failure',
+        stage: diagnosticStage(stage),
+        clientResponse: 'generic',
+        redacted: true,
+        message: '[REDACTED]',
+        stack: '[REDACTED]',
+        hasRequest: Boolean(request),
+        hasContext: Boolean(context)
+    };
+    try {
+        console.error(JSON.stringify(record));
+    } catch (_) {
+        // Diagnostics must never change the fail-closed response.
+    }
 }
 
 function assertTrustedProductionContext(context, environment) {
@@ -224,9 +255,13 @@ function lazyTokenStore(production, config, firebase) {
 export async function createRuntime(options = {}) {
     const env = options.environment || process.env;
     const trustedContext = assertTrustedProductionContext(options.context, env);
+    const reportStage = typeof options.onDiagnosticStage === 'function' ? value => options.onDiagnosticStage(diagnosticStage(value)) : () => {};
+    reportStage(DIAGNOSTIC_STAGES.RUNTIME_CONFIG);
     const config = parseRuntimeConfig(env, trustedContext);
     const dependencies = options.dependencies;
+    reportStage(DIAGNOSTIC_STAGES.FIREBASE_INITIALIZATION);
     const firebase = options.firebase || initializeFirebase(config, dependencies);
+    reportStage(DIAGNOSTIC_STAGES.RUNTIME_BUILD);
     const production = options.production || runtimeRequire('production-service.js');
     const transactionConfig = options.transactionConfig || runtimeRequire('transaction-config.js');
     const providerEnabled = config.linkEnabled || config.syncEnabled;
@@ -371,16 +406,49 @@ export function createNetlifyHandler(options = {}) {
     const maxBodyBytes = Number.isSafeInteger(options.maxBodyBytes) ? options.maxBodyBytes : 2 * 1024 * 1024;
     const maxBodyReadMs = Number.isSafeInteger(options.maxBodyReadMs) ? options.maxBodyReadMs : 5000;
     let runtimePromise = null;
+    let lastRuntimeStage = DIAGNOSTIC_STAGES.RUNTIME_CONFIG;
+    let runtimeFailureStage = null;
     return async function netlifyHandler(request, context) {
+        let stage = DIAGNOSTIC_STAGES.TRUSTED_CONTEXT;
+        let waitingForRuntime = false;
         try {
             const trustedContext = assertTrustedProductionContext(context, options.environment || process.env);
+            stage = DIAGNOSTIC_STAGES.REQUEST_HOST;
             assertRequestHost(request, trustedContext);
+            stage = DIAGNOSTIC_STAGES.ADAPTER;
             const early = preflightResponse(request, options.routePrefix || FUNCTION_ROUTE_PREFIX);
             if (early) return early;
-            if (!runtimePromise) runtimePromise = Promise.resolve(factory({ context, environment: options.environment || process.env, dependencies: options.dependencies, firebase: options.firebase, production: options.production, transactionConfig: options.transactionConfig, plaidClient: options.plaidClient }));
+            if (!runtimePromise) {
+                lastRuntimeStage = DIAGNOSTIC_STAGES.RUNTIME_CONFIG;
+                stage = DIAGNOSTIC_STAGES.RUNTIME_CONFIG;
+                waitingForRuntime = true;
+                runtimePromise = Promise.resolve(factory({
+                    context,
+                    environment: options.environment || process.env,
+                    dependencies: options.dependencies,
+                    firebase: options.firebase,
+                    production: options.production,
+                    transactionConfig: options.transactionConfig,
+                    plaidClient: options.plaidClient,
+                    onDiagnosticStage: value => {
+                        lastRuntimeStage = diagnosticStage(value);
+                        stage = lastRuntimeStage;
+                    }
+                })).catch(error => {
+                    runtimeFailureStage = diagnosticStage(lastRuntimeStage);
+                    throw error;
+                });
+            } else {
+                stage = lastRuntimeStage;
+                waitingForRuntime = true;
+            }
             const runtime = await runtimePromise;
+            waitingForRuntime = false;
+            stage = DIAGNOSTIC_STAGES.ADAPTER;
             return await invokeNodeHandler(runtime.handler, request, { maxBodyBytes, maxBodyReadMs, routePrefix: options.routePrefix || FUNCTION_ROUTE_PREFIX });
         } catch (error) {
+            if (waitingForRuntime && runtimeFailureStage) stage = runtimeFailureStage;
+            emitHandlerDiagnostic(stage, request, context);
             const message = text(error && error.message);
             const status = message === 'Request body is too large.' ? 413 : message === 'Request body length is invalid.' ? 400 : message === 'Request body read timed out.' ? 408 : 503;
             const headers = { 'Content-Type': 'application/json; charset=utf-8', 'Cache-Control': 'no-store', 'Vary': 'Origin' };

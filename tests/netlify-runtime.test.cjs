@@ -88,6 +88,32 @@ function assertRejectsMessage(promise, pattern) {
     return assert.rejects(promise, error => pattern.test(String(error && error.message)));
 }
 
+async function captureConsoleErrors(callback) {
+    const records = [];
+    const original = console.error;
+    console.error = (...args) => records.push(args);
+    try {
+        return { value: await callback(), records };
+    } finally {
+        console.error = original;
+    }
+}
+
+function assertRedactedDiagnostic(records, expectedStage) {
+    assert.equal(records.length, 1, `expected one redacted diagnostic for ${expectedStage}`);
+    assert.equal(records[0].length, 1);
+    const diagnostic = JSON.parse(String(records[0][0]));
+    assert.equal(diagnostic.event, 'budgetTransactions.handler_failure');
+    assert.equal(diagnostic.stage, expectedStage);
+    assert.equal(diagnostic.clientResponse, 'generic');
+    assert.equal(diagnostic.redacted, true);
+    assert.equal(diagnostic.message, '[REDACTED]');
+    assert.equal(diagnostic.stack, '[REDACTED]');
+    assert.equal(diagnostic.hasRequest, true);
+    assert.equal(diagnostic.hasContext, true);
+    assert.doesNotMatch(JSON.stringify(diagnostic), /sensitive|secret|uid|email|private/i);
+}
+
 (async () => {
     const production = require(path.join(projectRoot, 'production-service.js'));
     const runtimePath = path.join(projectRoot, 'netlify', 'functions', 'budgetTransactions.mjs');
@@ -326,6 +352,99 @@ function assertRejectsMessage(promise, pattern) {
     assert.equal(wrongHost.status, 503);
     const warmPreview = await adapterHandler(new Request('https://synthetic.example/review', { method: 'GET' }), { deploy: { context: 'deploy-preview', published: true }, site: trustedContext().site });
     assert.equal(warmPreview.status, 503, 'every request must revalidate the production context after warm initialization');
+
+    const trustedContextFailure = runtime.createNetlifyHandler({
+        environment: base,
+        createRuntime: async () => { throw new Error('must not initialize for an untrusted deploy'); }
+    });
+    const trustedContextFailureResult = await captureConsoleErrors(() => trustedContextFailure(new Request('https://synthetic.example/review', { method: 'GET' }), { deploy: { context: 'deploy-preview', published: true }, site: trustedContext().site }));
+    assert.equal(trustedContextFailureResult.value.status, 503);
+    assertRedactedDiagnostic(trustedContextFailureResult.records, 'trusted-context');
+
+    const requestHostFailure = runtime.createNetlifyHandler({
+        environment: base,
+        createRuntime: async () => { throw new Error('must not initialize for an untrusted host'); }
+    });
+    const requestHostFailureResult = await captureConsoleErrors(() => requestHostFailure(new Request('https://other.example/review', { method: 'GET' }), trustedContext()));
+    assert.equal(requestHostFailureResult.value.status, 503);
+    assertRedactedDiagnostic(requestHostFailureResult.records, 'request-host');
+
+    const runtimeConfigFailure = runtime.createNetlifyHandler({ environment: { ...base, BUDGET_FIREBASE_PROJECT_ID: 'wrong-project' } });
+    const runtimeConfigFailureResult = await captureConsoleErrors(() => runtimeConfigFailure(new Request('https://synthetic.example/review', { method: 'GET' }), trustedContext()));
+    assert.equal(runtimeConfigFailureResult.value.status, 503);
+    assertRedactedDiagnostic(runtimeConfigFailureResult.records, 'runtime-config');
+
+    const synchronousFactoryFailure = runtime.createNetlifyHandler({
+        environment: base,
+        createRuntime: () => { throw new Error('synthetic synchronous secret and uid must never be logged'); }
+    });
+    const synchronousFactoryFailureResult = await captureConsoleErrors(() => synchronousFactoryFailure(new Request('https://synthetic.example/review', { method: 'GET' }), trustedContext()));
+    assert.equal(synchronousFactoryFailureResult.value.status, 503);
+    assertRedactedDiagnostic(synchronousFactoryFailureResult.records, 'runtime-config');
+
+    const firebaseInitializationFailure = runtime.createNetlifyHandler({
+        environment: base,
+        dependencies: { 'firebase-admin/app': () => { throw new Error('synthetic secret and uid must never be logged'); } }
+    });
+    const firebaseInitializationFailureResult = await captureConsoleErrors(() => firebaseInitializationFailure(new Request('https://synthetic.example/review', { method: 'GET' }), trustedContext()));
+    assert.equal(firebaseInitializationFailureResult.value.status, 503);
+    assertRedactedDiagnostic(firebaseInitializationFailureResult.records, 'firebase-initialization');
+
+    const runtimeBuildFailure = runtime.createNetlifyHandler({
+        environment: base,
+        createRuntime: async ({ onDiagnosticStage }) => {
+            onDiagnosticStage('runtime-build');
+            throw new Error('synthetic service secret and uid must never be logged');
+        }
+    });
+    const runtimeBuildFailureResult = await captureConsoleErrors(() => runtimeBuildFailure(new Request('https://synthetic.example/review', { method: 'GET' }), trustedContext()));
+    assert.equal(runtimeBuildFailureResult.value.status, 503);
+    assertRedactedDiagnostic(runtimeBuildFailureResult.records, 'runtime-build');
+
+    const adapterFailure = runtime.createNetlifyHandler({
+        environment: base,
+        createRuntime: async () => ({ handler: async () => { throw new Error('synthetic service secret and uid must never be logged'); } })
+    });
+    const adapterFailureResult = await captureConsoleErrors(() => adapterFailure(new Request('https://synthetic.example/review', { method: 'GET' }), trustedContext()));
+    assert.equal(adapterFailureResult.value.status, 503);
+    assertRedactedDiagnostic(adapterFailureResult.records, 'adapter');
+
+    let releaseRuntimeStage;
+    const runtimeStageGate = new Promise(resolve => { releaseRuntimeStage = resolve; });
+    let rejectDeferredRuntime;
+    const deferredRuntime = new Promise((resolve, reject) => { rejectDeferredRuntime = reject; });
+    const concurrentRuntimeFailure = runtime.createNetlifyHandler({
+        environment: base,
+        createRuntime: async ({ onDiagnosticStage }) => {
+            await runtimeStageGate;
+            onDiagnosticStage('firebase-initialization');
+            await deferredRuntime;
+        }
+    });
+    const concurrentRuntimeFailureResult = await captureConsoleErrors(async () => {
+        const first = concurrentRuntimeFailure(new Request('https://synthetic.example/review', { method: 'GET' }), trustedContext());
+        const second = concurrentRuntimeFailure(new Request('https://synthetic.example/review', { method: 'GET' }), trustedContext());
+        await Promise.resolve();
+        releaseRuntimeStage();
+        await Promise.resolve();
+        rejectDeferredRuntime(new Error('synthetic concurrent secret and uid must never be logged'));
+        return Promise.all([first, second]);
+    });
+    assert.deepEqual(concurrentRuntimeFailureResult.value.map(response => response.status), [503, 503]);
+    assert.equal(concurrentRuntimeFailureResult.records.length, 2, 'concurrent cached runtime failures must each emit one bounded diagnostic');
+    for (const record of concurrentRuntimeFailureResult.records) assertRedactedDiagnostic([record], 'firebase-initialization');
+    const cachedRuntimeFailureResult = await captureConsoleErrors(() => concurrentRuntimeFailure(new Request('https://synthetic.example/review', { method: 'GET' }), trustedContext()));
+    assert.equal(cachedRuntimeFailureResult.value.status, 503);
+    assertRedactedDiagnostic(cachedRuntimeFailureResult.records, 'firebase-initialization');
+
+    const healthyUnauthorized = runtime.createNetlifyHandler({
+        environment: base,
+        createRuntime: async () => ({ handler: async (_request, response) => { response.statusCode = 401; response.setHeader('Content-Type', 'application/json'); response.end('{"error":"Authenticated server authorization is required."}'); } })
+    });
+    const healthyUnauthorizedResult = await captureConsoleErrors(() => healthyUnauthorized(new Request('https://synthetic.example/review', { method: 'GET' }), trustedContext()));
+    assert.equal(healthyUnauthorizedResult.value.status, 401, 'a healthy runtime preserves backend auth failures instead of converting them to generic startup failures');
+    assert.equal(healthyUnauthorizedResult.records.length, 0, 'healthy backend auth responses must not emit startup diagnostics');
+
     let coldFactoryCalls = 0;
     const coldRouteHandler = runtime.createNetlifyHandler({
         environment: base,
