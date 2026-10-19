@@ -496,7 +496,7 @@ function createServer() {
 
     function installProviderHarness() {
         window.TRANSACTION_LINK_ENABLED = true;
-        window.TRANSACTION_LINK_CONNECTIONS = [{ key: 'chase', label: 'Chase' }];
+        window.TRANSACTION_LINK_CONNECTIONS = [{ key: 'chase', label: 'Chase' }, { key: 'capital-one', label: 'Capital One' }];
         const state = { apiCreateCalls: 0, apiExchangeCalls: 0, apiStatusCalls: 0, plaidCreateCalls: 0, options: null };
         window.__providerHarness = state;
         window.transactionApprovalService = {
@@ -514,7 +514,10 @@ function createServer() {
             },
             async linkStatus(connectionKey, requestId) {
                 state.apiStatusCalls += 1;
-                return { status: 'pending-binding', connectionKey, exchangeId: requestId, itemId: 'synthetic-item', accounts: [{ account_id: 'provider-checking', name: 'Checking', type: 'depository', subtype: 'checking' }] };
+                state.lastStatus = { connectionKey, requestId };
+                if (state.recoveryFail) throw new Error('Approval service request failed.');
+                if (state.recoveryRequestId && requestId !== state.recoveryRequestId) throw new Error('Wrong synthetic recovery receipt.');
+                return { status: 'pending-binding', connectionKey: state.recoveryResultConnectionKey || connectionKey, exchangeId: requestId, itemId: 'synthetic-item', accounts: [{ account_id: 'provider-checking', name: 'Checking', type: 'depository', subtype: 'checking' }] };
             },
             async updateLinkToken() { throw new Error('Synthetic browser test does not exercise update mode.'); }
         };
@@ -595,13 +598,16 @@ function createServer() {
     assert.equal(pendingLink.state.apiExchangeCalls, 1);
     assert.equal(pendingLink.storage.kind, 'pending');
     assert.doesNotMatch(pendingLink.raw, /synthetic-public-token/);
+    await page.evaluate(() => window.providerLinkStorageWrite({ kind: 'pending', uid: window.firebase.auth().currentUser.uid, connectionKey: 'capital-one', requestId: 'capital-one-recovery', expiresAt: Date.now() + 60000 }));
     await page.reload({ waitUntil: 'domcontentloaded' });
     await page.waitForFunction(() => document.querySelector('.app-layout').style.display === 'flex');
     await page.waitForTimeout(25);
-    const reloadLink = await page.evaluate(() => ({ state: window.__providerHarness, storage: JSON.parse(sessionStorage.getItem('budget_provider_link_session_v1')), selects: document.querySelectorAll('#providerLinkBindings select').length }));
+    const reloadLink = await page.evaluate(() => ({ state: window.__providerHarness, storage: JSON.parse(sessionStorage.getItem('budget_provider_link_session_v1')), selected: document.getElementById('providerLinkConnection').value, selects: document.querySelectorAll('#providerLinkBindings select').length }));
     assert.equal(reloadLink.state.apiCreateCalls, 0, 'Pending reload must not create another Link Item.');
     assert.equal(reloadLink.state.apiStatusCalls, 0, 'Pending reload must not contact the durable server receipt without a fresh user action.');
     assert.equal(reloadLink.storage.kind, 'pending');
+    assert.equal(reloadLink.storage.connectionKey, 'capital-one');
+    assert.equal(reloadLink.selected, 'capital-one', 'Pending reload must select the stored bank before offering Resume.');
     assert.equal(reloadLink.selects, 0, 'Pending reload must not render stale account mappings before explicit resume.');
     await page.locator('.nav-item[data-tab="import"]').click();
     await page.waitForFunction(() => getComputedStyle(document.getElementById('providerLinkResume')).display !== 'none');
@@ -611,6 +617,154 @@ function createServer() {
     assert.equal(recoveredLink.state.apiStatusCalls, 1, 'Explicit resume must query the durable server receipt.');
     assert.equal(recoveredLink.storage.kind, 'pending');
     assert.equal(recoveredLink.selects, 1, 'Pending reload must render the server-returned account list.');
+
+    await page.evaluate(() => {
+        window.providerLinkStorageWrite({ kind: 'pending', uid: window.firebase.auth().currentUser.uid, connectionKey: 'capital-one', requestId: 'capital-one-recovery', expiresAt: Date.now() + 60000 });
+        window.clearProviderLinkUiState();
+        document.getElementById('providerLinkConnection').value = 'capital-one';
+        document.getElementById('providerLinkResume').style.display = '';
+        const base = window.transactionApprovalService;
+        window.__resumeBaseService = base;
+        window.__resumeDeferredStarted = false;
+        window.__resumeDeferredDone = false;
+        window.transactionApprovalService = {
+            ...base,
+            linkStatus(connectionKey, requestId) {
+                window.__resumeDeferredStarted = true;
+                return new Promise(resolve => { window.__resumeDeferredResolve = resolve; }).finally(() => { window.__resumeDeferredDone = true; });
+            }
+        };
+    });
+    await page.locator('#providerLinkResume').click();
+    await page.waitForFunction(() => window.__resumeDeferredStarted === true);
+    await page.evaluate(() => {
+        const select = document.getElementById('providerLinkConnection');
+        select.value = 'chase';
+        select.dispatchEvent(new Event('change', { bubbles: true }));
+        window.__resumeDeferredResolve({ status: 'pending-binding', connectionKey: 'capital-one', accounts: [{ account_id: 'stale-resume', name: 'Stale resume' }] });
+    });
+    await page.waitForFunction(() => window.__resumeDeferredDone === true);
+    const changedResume = await page.evaluate(() => ({ selected: document.getElementById('providerLinkConnection').value, selects: document.querySelectorAll('#providerLinkBindings select').length }));
+    assert.equal(changedResume.selected, 'chase', 'A pending resume selection change must remain visible.');
+    assert.equal(changedResume.selects, 0, 'A pending resume response for the old bank must not render under the new selection.');
+    await page.evaluate(() => { window.transactionApprovalService = window.__resumeBaseService; });
+
+    const recoveryBaseline = await page.evaluate(() => {
+        const state = window.__providerHarness;
+        state.recoveryRequestId = 'capital-one-recovery';
+        state.recoveryFail = false;
+        state.recoveryResultConnectionKey = 'capital-one';
+        state.apiStatusCalls = 0;
+        sessionStorage.removeItem('budget_provider_link_session_v1');
+        document.getElementById('providerLinkConnection').value = 'capital-one';
+        return state.apiCreateCalls;
+    });
+    await page.locator('#providerLinkRecoveryToggle').click();
+    await page.waitForFunction(() => getComputedStyle(document.getElementById('providerLinkRecovery')).display !== 'none');
+    assert.equal(await page.locator('#providerLinkRecoveryCode').inputValue(), '', 'Recovery code must not be prefilled from stale browser state.');
+    await page.locator('#providerLinkRecoveryCode').fill('capital-one-recovery');
+    await page.locator('#providerLinkRecoveryResume').click();
+    await page.waitForFunction(() => document.querySelectorAll('#providerLinkBindings select').length === 1);
+    const recoveredWithoutStorage = await page.evaluate(() => ({
+        state: window.__providerHarness,
+        storage: JSON.parse(sessionStorage.getItem('budget_provider_link_session_v1')),
+        connection: window.__providerHarness.lastStatus && window.__providerHarness.lastStatus.connectionKey,
+        requestId: window.__providerHarness.lastStatus && window.__providerHarness.lastStatus.requestId,
+        createDelta: window.__providerHarness.apiCreateCalls
+    }));
+    assert.equal(recoveredWithoutStorage.createDelta, recoveryBaseline, 'Direct recovery must not create another Link Item.');
+    assert.equal(recoveredWithoutStorage.state.apiStatusCalls, 1, 'Receipt recovery must call linkStatus exactly once.');
+    assert.equal(recoveredWithoutStorage.connection, 'capital-one', 'Recovery must stay bound to the selected connection.');
+    assert.equal(recoveredWithoutStorage.requestId, 'capital-one-recovery');
+    assert.equal(recoveredWithoutStorage.storage.connectionKey, 'capital-one');
+    assert.equal(recoveredWithoutStorage.storage.requestId, 'capital-one-recovery');
+
+    const failedAfterMapping = await page.evaluate(async () => {
+        window.__providerHarness.recoveryFail = true;
+        sessionStorage.removeItem('budget_provider_link_session_v1');
+        window.showProviderLinkRecovery('capital-one');
+        document.getElementById('providerLinkRecoveryCode').value = 'capital-one-recovery';
+        await window.recoverProviderLinkFromReceipt();
+        return {
+            recoveryVisible: getComputedStyle(document.getElementById('providerLinkRecovery')).display !== 'none',
+            storage: sessionStorage.getItem('budget_provider_link_session_v1'),
+            selects: document.querySelectorAll('#providerLinkBindings select').length,
+            confirmVisible: getComputedStyle(document.getElementById('providerLinkConfirm')).display !== 'none'
+        };
+    });
+    assert.equal(failedAfterMapping.recoveryVisible, true, 'A failed recovery must leave the direct recovery control available.');
+    assert.equal(failedAfterMapping.storage, null, 'A failed recovery must not preserve a stale pending receipt.');
+    assert.equal(failedAfterMapping.selects, 0, 'A failed recovery must clear the previous bank mapping.');
+    assert.equal(failedAfterMapping.confirmVisible, false, 'A failed recovery must not leave the previous confirmation action visible.');
+    await page.evaluate(() => { window.__providerHarness.recoveryFail = false; });
+
+    const mismatchedRecovery = await page.evaluate(async () => {
+        window.__providerHarness.recoveryResultConnectionKey = 'chase';
+        window.__providerHarness.apiStatusCalls = 0;
+        sessionStorage.removeItem('budget_provider_link_session_v1');
+        window.clearProviderLinkUiState();
+        window.showProviderLinkRecovery('capital-one');
+        document.getElementById('providerLinkRecoveryCode').value = 'capital-one-recovery';
+        await window.recoverProviderLinkFromReceipt();
+        return {
+            statusCalls: window.__providerHarness.apiStatusCalls,
+            storage: sessionStorage.getItem('budget_provider_link_session_v1'),
+            selects: document.querySelectorAll('#providerLinkBindings select').length,
+            creates: window.__providerHarness.apiCreateCalls
+        };
+    });
+    assert.equal(mismatchedRecovery.statusCalls, 1, 'A recovery receipt must be checked once.');
+    assert.equal(mismatchedRecovery.storage, null, 'A receipt returned for another connection must not be persisted.');
+    assert.equal(mismatchedRecovery.selects, 0, 'A mismatched receipt must not render account bindings.');
+    assert.equal(mismatchedRecovery.creates, recoveryBaseline, 'A mismatched receipt must not create a replacement Link Item.');
+    await page.evaluate(() => { window.__providerHarness.recoveryResultConnectionKey = 'capital-one'; });
+
+    const expiredRecovery = await page.evaluate(async () => {
+        window.__providerHarness.apiStatusCalls = 0;
+        window.providerLinkStorageWrite({ kind: 'pending', uid: window.firebase.auth().currentUser.uid, connectionKey: 'capital-one', requestId: 'expired-recovery', expiresAt: Date.now() - 1 });
+        await window.resumeProviderLink({ userAction: true });
+        document.getElementById('providerLinkConnection').value = 'capital-one';
+        document.getElementById('providerLinkRecoveryToggle').click();
+        return { storage: sessionStorage.getItem('budget_provider_link_session_v1'), statusCalls: window.__providerHarness.apiStatusCalls, selects: document.querySelectorAll('#providerLinkBindings select').length, visible: getComputedStyle(document.getElementById('providerLinkRecovery')).display !== 'none' };
+    });
+    assert.equal(expiredRecovery.storage, null, 'Expired recovery receipts must be removed.');
+    assert.equal(expiredRecovery.statusCalls, 0, 'Expired recovery receipts must not call the backend.');
+    assert.equal(expiredRecovery.selects, 0, 'Expired recovery receipts must clear account mapping UI.');
+    assert.equal(expiredRecovery.visible, true, 'Expired storage must leave the direct recovery control available without a new Link attempt.');
+
+    const failedRecovery = await page.evaluate(async () => {
+        window.__providerHarness.recoveryFail = true;
+        window.showProviderLinkRecovery('capital-one');
+        document.getElementById('providerLinkRecoveryCode').value = 'capital-one-recovery';
+        await window.recoverProviderLinkFromReceipt();
+        return { recoveryVisible: getComputedStyle(document.getElementById('providerLinkRecovery')).display !== 'none', storage: sessionStorage.getItem('budget_provider_link_session_v1'), selects: document.querySelectorAll('#providerLinkBindings select').length };
+    });
+    assert.equal(failedRecovery.recoveryVisible, true, 'Failed receipt recovery must leave the recovery control available.');
+    assert.equal(failedRecovery.storage, null, 'Failed receipt recovery must not create browser state.');
+    assert.equal(failedRecovery.selects, 0, 'Failed receipt recovery must not render account mappings.');
+    const deferredRecovery = await page.evaluate(async () => {
+        let resolveStatus;
+        const base = window.transactionApprovalService;
+        window.__providerHarness.recoveryFail = false;
+        window.__providerHarness.apiStatusCalls = 0;
+        window.providerLinkStorageClear();
+        window.showProviderLinkRecovery('capital-one');
+        document.getElementById('providerLinkRecoveryCode').value = 'capital-one-recovery';
+        window.transactionApprovalService = { ...base, async linkStatus() { window.__deferredRecoveryStarted = true; return new Promise(resolve => { resolveStatus = resolve; }); } };
+        const pending = window.recoverProviderLinkFromReceipt();
+        await new Promise(resolve => { const check = () => window.__deferredRecoveryStarted ? resolve() : setTimeout(check, 0); check(); });
+        const select = document.getElementById('providerLinkConnection');
+        select.value = 'chase';
+        select.dispatchEvent(new Event('change', { bubbles: true }));
+        resolveStatus({ status: 'pending-binding', connectionKey: 'capital-one', accounts: [{ account_id: 'stale-recovery', name: 'Stale recovery' }] });
+        await pending;
+        window.transactionApprovalService = base;
+        return { storage: sessionStorage.getItem('budget_provider_link_session_v1'), selects: document.querySelectorAll('#providerLinkBindings select').length, selected: select.value };
+    });
+    assert.equal(deferredRecovery.storage, null, 'A bank selection change must prevent deferred recovery from installing state.');
+    assert.equal(deferredRecovery.selects, 0, 'A bank selection change must prevent deferred recovery bindings from rendering.');
+    assert.equal(deferredRecovery.selected, 'chase', 'The selected bank change must be retained after rejecting stale recovery data.');
+    await page.evaluate(() => { window.__providerHarness.recoveryFail = false; });
     await page.evaluate(() => window.firebase.auth().__switchUser());
     assert.equal(await page.evaluate(() => sessionStorage.getItem('budget_provider_link_session_v1')), null, 'switching users must clear the prior Link session');
     assert.equal(await page.evaluate(() => document.querySelectorAll('#providerLinkBindings select').length), 0, 'switching users must clear the prior account-mapping UI');
