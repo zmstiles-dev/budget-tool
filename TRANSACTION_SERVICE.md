@@ -40,6 +40,39 @@ provider integration must bind stable provider account IDs explicitly and
 reject unmapped IDs. Enabling `/sync` requires a provider, owner mapping,
 connection resolver, protected endpoint, and `syncEnabled: true`.
 
+The production Link metadata guard requires Chase `ins_56` and US Capital One
+`ins_128026` before exchanging a public token. This is defense in depth; the
+server's Item verification remains authoritative. On-open sync has a separate
+durable activation gate at `protectedAppConfig/transactionService`: the
+trusted operator keeps `syncActivation.enabled` false until both finalized
+connection records are independently verified. Activation binds exactly
+`chase` and `capital-one`, the inclusive cutoff `2026-10-09`, owner and
+household, Item IDs, vault references, mapping policy revision, expected
+institutions, and stable mapping hashes. Hashes cover account IDs, type,
+subtype, currency, and explicit aliases while excluding cursor, lease,
+last-sync, and other volatile sync fields. Every `/sync` request fresh-reads
+the activation and both connection records, and rejects disabled, unresolved,
+owner-mismatched, household-mismatched, or mapping-mismatched state. The
+authenticated metadata-only `/sync-readiness` route performs the same check
+without provider calls or writes; the frontend checks it before any on-open
+provider request. A disabled or not-yet-activated configuration returns a
+bounded `ready:false` response, so an inactive sync gate is a normal state and
+does not become a provider call or a generic server failure. The local
+synthetic dry-run packet is under
+`D:\Documents\Codex\.assistant-storage\budget-tool-verification\free-backend-research\sync-activation-operator-20261019-r1`;
+it performs no activation write.
+
+The protected disconnect path is an explicit authenticated `POST` for the
+configured unfinished target slot. Its immutable plan pins the target owner,
+household, Item, institution, exchange receipt, encrypted-vault reference,
+final mapping hash, replacement owner, and final connection. The transaction
+rechecks those pins immediately before and after provider removal. A started
+or ambiguous disconnect ledger blocks every create, exchange, status, and
+finalize path until an operator performs read-only reconciliation. After a
+successful removal, only the designated replacement owner may claim the
+retired slot; a failed Link-token request may resume the same session, while a
+different session or owner remains blocked.
+
 The protected backend verifies the Firebase Admin ID token, operator-seeded UID
 membership, fixed household configuration, connection ownership, and expected revisions
 before every mutation. Pending inbox state is separate from accepted history.

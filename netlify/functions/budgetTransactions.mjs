@@ -39,20 +39,20 @@ const DIAGNOSTIC_ERROR_CODES = new Set([
 ]);
 const KNOWN_PATHS = new Set([
     '/', '/review',
-    '/pending', '/stage', '/sync', '/edit', '/split', '/reject', '/defer', '/cancel', '/approve', '/restore', '/accepted-state', '/reset',
+    '/pending', '/stage', '/sync', '/sync-readiness', '/edit', '/split', '/reject', '/defer', '/cancel', '/approve', '/restore', '/accepted-state', '/reset',
     '/link-token', '/link/create', '/plaid/link-token', '/plaid/link/create',
     '/link-exchange', '/link/exchange', '/plaid/exchange', '/plaid/link/exchange',
-    '/link-update', '/link/update', '/plaid/update', '/plaid/link/update',
+    '/link-update', '/link/update', '/plaid/update', '/plaid/link/update', '/link-disconnect', '/link/disconnect', '/plaid/disconnect', '/plaid/link/disconnect',
     '/link-status', '/link/status', '/plaid/status', '/plaid/link/status'
 ]);
 const ROUTE_METHODS = new Map([
     ['/', new Set(['GET', 'POST'])], ['/review', new Set(['GET', 'POST'])], ['/pending', new Set(['GET'])],
-    ['/stage', new Set(['POST'])], ['/sync', new Set(['POST'])], ['/edit', new Set(['POST'])], ['/split', new Set(['POST'])],
+    ['/stage', new Set(['POST'])], ['/sync', new Set(['POST'])], ['/sync-readiness', new Set(['GET'])], ['/edit', new Set(['POST'])], ['/split', new Set(['POST'])],
     ['/reject', new Set(['POST'])], ['/defer', new Set(['POST'])], ['/cancel', new Set(['POST'])], ['/approve', new Set(['POST'])],
     ['/restore', new Set(['POST'])], ['/accepted-state', new Set(['POST'])], ['/reset', new Set(['POST'])],
     ['/link-token', new Set(['POST'])], ['/link/create', new Set(['POST'])], ['/plaid/link-token', new Set(['POST'])], ['/plaid/link/create', new Set(['POST'])],
     ['/link-exchange', new Set(['POST'])], ['/link/exchange', new Set(['POST'])], ['/plaid/exchange', new Set(['POST'])], ['/plaid/link/exchange', new Set(['POST'])],
-    ['/link-update', new Set(['POST'])], ['/link/update', new Set(['POST'])], ['/plaid/update', new Set(['POST'])], ['/plaid/link/update', new Set(['POST'])],
+    ['/link-update', new Set(['POST'])], ['/link/update', new Set(['POST'])], ['/plaid/update', new Set(['POST'])], ['/plaid/link/update', new Set(['POST'])], ['/link-disconnect', new Set(['POST'])], ['/link/disconnect', new Set(['POST'])], ['/plaid/disconnect', new Set(['POST'])], ['/plaid/link/disconnect', new Set(['POST'])],
     ['/link-status', new Set(['GET', 'POST'])], ['/link/status', new Set(['GET', 'POST'])], ['/plaid/status', new Set(['GET', 'POST'])], ['/plaid/link/status', new Set(['GET', 'POST'])]
 ]);
 
@@ -345,7 +345,7 @@ function lazyPlaidClient(clientId, clientSecret, dependencies) {
         const response = await getClient().transactionsSync(payload, options);
         return response && response.data;
     };
-    return { linkTokenCreate: call('linkTokenCreate'), itemPublicTokenExchange: call('itemPublicTokenExchange'), accountsGet: call('accountsGet'), itemGet: call('itemGet'), transactionsSync };
+    return { linkTokenCreate: call('linkTokenCreate'), itemPublicTokenExchange: call('itemPublicTokenExchange'), accountsGet: call('accountsGet'), itemGet: call('itemGet'), itemRemove: call('itemRemove'), transactionsSync };
 }
 
 function disabledTokenStore() {
@@ -400,7 +400,8 @@ export async function createRuntime(options = {}) {
         async linkTokenCreate() { fail('Provider operations are disabled by server configuration.'); },
         async itemPublicTokenExchange() { fail('Provider operations are disabled by server configuration.'); },
         async accountsGet() { fail('Provider operations are disabled by server configuration.'); },
-        async itemGet() { fail('Provider operations are disabled by server configuration.'); }
+        async itemGet() { fail('Provider operations are disabled by server configuration.'); },
+        async itemRemove() { fail('Provider operations are disabled by server configuration.'); }
     };
     const accountAliases = transactionConfig.accountDisplayNames;
     return production.createProductionService({
@@ -427,10 +428,36 @@ export async function createRuntime(options = {}) {
         },
         expectedInstitutions: config.expectedInstitutions,
         requireExpectedInstitutions: true,
+        cleanupPlan: production.createProtectedDisconnectPlan({
+            db: firebase.db,
+            householdId: config.householdId,
+            configCollection: PINNED_CONFIG_COLLECTION,
+            configDocument: PINNED_CONFIG_DOCUMENT,
+            connectionsCollection: 'protectedConnections'
+        }),
         redirectUri: config.redirectUri,
         activeConnectionKeys: config.activeKeys,
         linkEnabled: config.linkEnabled,
         syncEnabled: config.syncEnabled,
+        syncReadiness: production.createProtectedSyncReadiness({
+            db: firebase.db,
+            householdId: config.householdId,
+            expectedInstitutions: config.expectedInstitutions,
+            requiredConnectionKeys: ['chase', 'capital-one'],
+            mappingPolicies: {
+                chase: { expectedCount: 4, aliases: {
+                    'Checking Account': { type: 'depository', subtype: 'checking', currency: 'USD' },
+                    CFF: { type: 'credit', subtype: 'credit card', currency: 'USD' },
+                    CFU: { type: 'credit', subtype: 'credit card', currency: 'USD' },
+                    CSP: { type: 'credit', subtype: 'credit card', currency: 'USD' }
+                } },
+                'capital-one': { expectedCount: 1, aliases: { 'Ven X': { type: 'credit', subtype: 'credit card', currency: 'USD' } } }
+            },
+            cutoverDate: transactionConfig.FIRST_SYNC_CUTOVER_DATE,
+            configCollection: PINNED_CONFIG_COLLECTION,
+            configDocument: PINNED_CONFIG_DOCUMENT,
+            connectionsCollection: 'protectedConnections'
+        }),
         maxPages: 20,
         maxRetries: 1,
         maxMutationRestarts: 2,

@@ -81,6 +81,14 @@ function createServer() {
     await page.goto('http://127.0.0.1:' + port + '/index.html');
     await page.waitForFunction(() => document.querySelector('.app-layout').style.display === 'flex');
     await page.waitForFunction(() => document.body.innerText.includes('Old user transaction'));
+    const identityPanel = await page.evaluate(() => ({
+        visible: getComputedStyle(document.getElementById('authIdentityPanel')).display !== 'none',
+        email: document.getElementById('authIdentityEmail').textContent,
+        switchVisible: getComputedStyle(document.getElementById('authSwitchAccount')).display !== 'none'
+    }));
+    assert.equal(identityPanel.visible, true, 'Authenticated UI must show the current account identity.');
+    assert.equal(identityPanel.email, 'captainicebow@gmail.com', 'Authenticated UI must show the verified account email.');
+    assert.equal(identityPanel.switchVisible, true, 'Authenticated UI must expose explicit account switching.');
     const authenticatedLoadPersistence = await page.evaluate(async () => {
         const originalService = window.transactionApprovalService;
         let serverSaveCalls = 0;
@@ -236,6 +244,67 @@ function createServer() {
     assert.equal(delayedFileReadRegression.restoreCalls, 0, 'a stale FileReader callback must not call the restore service');
     assert.equal(delayedFileReadRegression.appDisplay, 'none', 'a stale FileReader callback must not show the app after sign-out');
     assert.equal(delayedFileReadRegression.staleVisible, false, 'a stale FileReader callback must not install the selected backup');
+    const delayedCsvImportSwitchRegression = await page.evaluate(async () => {
+        const OriginalFileReader = window.FileReader;
+        const originalParse = window.Papa.parse;
+        let resolveFileRead;
+        window.__csvReadStarted = false;
+        window.Papa.parse = () => ({ data: [['Date', 'Description', 'Amount'], ['10/05/2026', 'Stale CSV row', '-3.00']], errors: [] });
+        window.FileReader = function DelayedCsvReader() {
+            const real = new OriginalFileReader();
+            this.onload = null;
+            this.readAsText = file => {
+                window.__csvReadStarted = true;
+                resolveFileRead = () => { real.onload = this.onload; real.readAsText(file); };
+            };
+        };
+        document.getElementById('bankCsvAccount').value = 'Checking Account';
+        const alertCount = window.__alerts.length;
+        window.handleNewImport([new File(['ignored'], 'stale.csv', { type: 'text/csv' })]);
+        await new Promise(resolve => { const check = () => window.__csvReadStarted ? resolve() : setTimeout(check, 0); check(); });
+        window.firebase.auth().__switchUnauthorizedUser();
+        resolveFileRead();
+        await new Promise(resolve => setTimeout(resolve, 25));
+        const result = {
+            stagedAlert: window.__alerts.slice(alertCount).some(message => String(message).includes('Staged')),
+            staleRowVisible: document.body.innerText.includes('Stale CSV row'),
+            previewHidden: document.getElementById('importPreview').classList.contains('hidden')
+        };
+        window.FileReader = OriginalFileReader;
+        window.Papa.parse = originalParse;
+        return result;
+    });
+    assert.equal(delayedCsvImportSwitchRegression.stagedAlert, false, 'a CSV FileReader callback from a prior auth epoch must not stage transactions');
+    assert.equal(delayedCsvImportSwitchRegression.staleRowVisible, false, 'a CSV FileReader callback from a prior auth epoch must not render imported rows');
+    assert.equal(delayedCsvImportSwitchRegression.previewHidden, true, 'a user switch must clear a pending CSV import preview');
+    const delayedHistoricalCsvSwitchRegression = await page.evaluate(async () => {
+        const originalParse = window.Papa.parse;
+        let finishParse;
+        window.__historicalCsvReadStarted = false;
+        window.Papa.parse = (_file, options) => {
+            window.__historicalCsvReadStarted = true;
+            finishParse = () => options.complete({ data: [['Date', 'Description', 'Amount'], ['10/05/2026', 'Stale history row', '-3.00']], errors: [] });
+        };
+        const alertCount = window.__alerts.length;
+        window.handleFiles([new File(['ignored'], 'stale-history.csv', { type: 'text/csv' })]);
+        await new Promise(resolve => { const check = () => window.__historicalCsvReadStarted ? resolve() : setTimeout(check, 0); check(); });
+        window.firebase.auth().__switchUnauthorizedUser();
+        finishParse();
+        await new Promise(resolve => setTimeout(resolve, 25));
+        const result = {
+            stagedAlert: window.__alerts.slice(alertCount).some(message => String(message).includes('Staged')),
+            staleRowVisible: document.body.innerText.includes('Stale history row'),
+            previewHidden: document.getElementById('importPreview').classList.contains('hidden'),
+            stats: document.getElementById('importStats').textContent
+        };
+        window.Papa.parse = originalParse;
+        return result;
+    });
+    assert.equal(delayedHistoricalCsvSwitchRegression.stagedAlert, false, 'a historical CSV callback from a prior auth epoch must not stage transactions');
+    assert.equal(delayedHistoricalCsvSwitchRegression.staleRowVisible, false, 'a stale historical CSV callback must not render imported rows');
+    assert.equal(delayedHistoricalCsvSwitchRegression.previewHidden, true, 'a user switch must clear a pending historical CSV import preview');
+    await page.evaluate(async () => { await window.firebase.auth().signInWithPopup(); });
+    await page.waitForFunction(() => document.querySelector('.app-layout').style.display === 'flex');
     await new Promise(resolve => setTimeout(resolve, 25));
     const signedOutOfflineImport = await page.evaluate(async () => {
         const OriginalFileReader = window.FileReader;
@@ -497,7 +566,8 @@ function createServer() {
     function installProviderHarness() {
         window.TRANSACTION_LINK_ENABLED = true;
         window.TRANSACTION_LINK_CONNECTIONS = [{ key: 'chase', label: 'Chase' }, { key: 'capital-one', label: 'Capital One' }];
-        const state = { apiCreateCalls: 0, apiExchangeCalls: 0, apiStatusCalls: 0, plaidCreateCalls: 0, options: null };
+        window.TRANSACTION_LINK_EXPECTED_INSTITUTIONS = { chase: 'ins_56', 'capital-one': 'ins_128026' };
+        const state = { apiCreateCalls: 0, apiExchangeCalls: 0, apiStatusCalls: 0, disconnectCalls: 0, plaidCreateCalls: 0, options: null };
         window.__providerHarness = state;
         window.transactionApprovalService = {
             serverBacked: true,
@@ -519,7 +589,8 @@ function createServer() {
                 if (state.recoveryRequestId && requestId !== state.recoveryRequestId) throw new Error('Wrong synthetic recovery receipt.');
                 return { status: 'pending-binding', connectionKey: state.recoveryResultConnectionKey || connectionKey, exchangeId: requestId, itemId: 'synthetic-item', accounts: [{ account_id: 'provider-checking', name: 'Checking', type: 'depository', subtype: 'checking' }] };
             },
-            async updateLinkToken() { throw new Error('Synthetic browser test does not exercise update mode.'); }
+            async updateLinkToken() { throw new Error('Synthetic browser test does not exercise update mode.'); },
+            async disconnectLink(connectionKey) { state.disconnectCalls += 1; state.disconnectedKey = connectionKey; return { status: 'removed', connectionKey }; }
         };
         window.Plaid = {
             create(options) {
@@ -546,6 +617,20 @@ function createServer() {
     await page.evaluate(async () => { await window.firebase.auth().signInWithPopup(); });
     await page.evaluate(installProviderHarness);
     await page.evaluate(() => window.refreshProviderLinkUi());
+    const disconnectUi = await page.evaluate(async () => {
+        const originalConfirm = window.confirm;
+        window.confirm = () => true;
+        document.getElementById('providerLinkConnection').value = 'capital-one';
+        document.getElementById('providerLinkConnection').dispatchEvent(new Event('change', { bubbles: true }));
+        document.getElementById('providerLinkDisconnect').click();
+        await new Promise(resolve => setTimeout(resolve, 0));
+        window.confirm = originalConfirm;
+        return { calls: window.__providerHarness.disconnectCalls, key: window.__providerHarness.disconnectedKey, status: document.getElementById('providerLinkStatus').textContent };
+    });
+    assert.equal(disconnectUi.calls, 1, 'Disconnect requires an explicit authenticated UI action.');
+    assert.equal(disconnectUi.key, 'capital-one');
+    assert.match(disconnectUi.status, /Bank connection removed/);
+    await page.evaluate(() => window.refreshProviderLinkUi());
 
     const staleExchange = await page.evaluate(async () => {
         let resolveExchange;
@@ -553,7 +638,7 @@ function createServer() {
         window.transactionApprovalService = { ...base, async exchangeLink() { window.__staleExchangeStarted = true; return new Promise(resolve => { resolveExchange = resolve; }); } };
         await window.openProviderLink('create');
         const options = window.__providerHarness.options;
-        const pending = options.onSuccess('stale-public-token', {}).then(() => 'resolved').catch(error => error.message);
+        const pending = options.onSuccess('stale-public-token', { institution: { institution_id: 'ins_56' } }).then(() => 'resolved').catch(error => error.message);
         await new Promise(resolve => { const check = () => window.__staleExchangeStarted ? resolve() : setTimeout(check, 0); check(); });
         window.firebase.auth().__switchUser();
         resolveExchange({ status: 'pending-binding', accounts: [] });
@@ -582,6 +667,25 @@ function createServer() {
     await page.evaluate(installProviderHarness);
     await page.evaluate(() => window.refreshProviderLinkUi());
 
+    const wrongInstitution = await page.evaluate(async () => {
+        await window.openProviderLink('create');
+        const before = window.__providerHarness.apiExchangeCalls;
+        await window.__providerHarness.options.onSuccess('wrong-institution-public-token', { institution: { institution_id: 'ins_128026' } });
+        return { before, after: window.__providerHarness.apiExchangeCalls, storage: sessionStorage.getItem('budget_provider_link_session_v1') };
+    });
+    assert.equal(wrongInstitution.after, wrongInstitution.before, 'Wrong Link institution metadata must not exchange a public token');
+    assert.equal(wrongInstitution.storage, null, 'Wrong Link institution metadata must clear temporary Link storage');
+    const missingInstitution = await page.evaluate(async () => {
+        await window.openProviderLink('create');
+        const before = window.__providerHarness.apiExchangeCalls;
+        await window.__providerHarness.options.onSuccess('missing-institution-public-token', {});
+        return { before, after: window.__providerHarness.apiExchangeCalls, storage: sessionStorage.getItem('budget_provider_link_session_v1') };
+    });
+    assert.equal(missingInstitution.after, missingInstitution.before, 'Missing Link institution metadata must not exchange a public token');
+    assert.equal(missingInstitution.storage, null, 'Missing Link institution metadata must clear temporary Link storage');
+    await page.evaluate(installProviderHarness);
+    await page.evaluate(() => window.refreshProviderLinkUi());
+
     await page.evaluate(() => window.refreshProviderLinkUi());
     await page.evaluate(async () => window.openProviderLink('create'));
     const initialLink = await page.evaluate(() => ({ state: window.__providerHarness, storage: JSON.parse(sessionStorage.getItem('budget_provider_link_session_v1')) }));
@@ -593,7 +697,7 @@ function createServer() {
     const resumedLink = await page.evaluate(() => ({ state: window.__providerHarness, url: window.__providerHarness.options.receivedRedirectUri }));
     assert.equal(resumedLink.state.apiCreateCalls, 1, 'OAuth resume must reuse the issued Link token.');
     assert.match(resumedLink.url, /oauth_state_id=synthetic-oauth/);
-    await page.evaluate(async () => window.__providerHarness.options.onSuccess('synthetic-public-token', {}));
+    await page.evaluate(async () => window.__providerHarness.options.onSuccess('synthetic-public-token', { institution: { institution_id: 'ins_56' } }));
     const pendingLink = await page.evaluate(() => ({ state: window.__providerHarness, storage: JSON.parse(sessionStorage.getItem('budget_provider_link_session_v1')), raw: sessionStorage.getItem('budget_provider_link_session_v1') }));
     assert.equal(pendingLink.state.apiExchangeCalls, 1);
     assert.equal(pendingLink.storage.kind, 'pending');

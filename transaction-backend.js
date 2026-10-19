@@ -1345,8 +1345,10 @@
         async createLinkToken(connectionKey, sessionId) { return this.request('link-token', { connectionKey, mode: 'create', ...(sessionId ? { sessionId } : {}) }); }
         async exchangeLink(connectionKey, publicToken, accountBindings, requestId) { return this.request('link-exchange', { connectionKey, ...(publicToken ? { publicToken } : {}), ...(accountBindings ? { accountBindings } : {}), requestId }); }
         async linkStatus(connectionKey, requestId) { return this.request('link-status', { connectionKey, requestId }); }
+        async disconnectLink(connectionKey) { return this.request('link-disconnect', { connectionKey }); }
         async updateLinkToken(connectionKey) { return this.request('link-update', { connectionKey, mode: 'update' }); }
         async sync(connectionKey) { return this.request('sync', { connectionKey }); }
+        async syncReadiness() { return this.get('sync-readiness'); }
 
         async edit(candidateId, patch, expectedRevision) { return this.request('edit', { candidateId, patch, expectedRevision }); }
         async split(candidateId, parts, expectedRevision) { return this.request('split', { candidateId, parts, expectedRevision }); }
@@ -1407,7 +1409,7 @@
             let requestStage = 'backend';
             try {
                 const url = new URL(request.url || '/', 'http://localhost');
-                requestStage = url.pathname === '/sync' ? 'sync' : 'backend';
+                requestStage = url.pathname === '/sync' || url.pathname === '/sync-readiness' ? 'sync' : 'backend';
                 applyCors(request, response);
                 if (request.method === 'OPTIONS') return jsonResponse(response, 204, {});
                 const auth = await authenticate(request);
@@ -1421,6 +1423,10 @@
                 let result;
                 if (url.pathname === '/pending' && request.method === 'GET') result = await backend.listPending(auth);
                 else if (url.pathname === '/review' && request.method === 'GET' && typeof backend.exportReview === 'function') result = await backend.exportReview(auth);
+                else if (url.pathname === '/sync-readiness' && request.method === 'GET' && typeof opts.syncReadiness === 'function') {
+                    const readiness = await opts.syncReadiness(auth);
+                    result = { ready: readiness && readiness.ready === true, revision: readiness && readiness.revision, cutoffDate: readiness && readiness.cutoffDate, connectionKeys: readiness && readiness.connectionKeys };
+                }
                 else if (url.pathname === '/stage' && request.method === 'POST') {
                     const source = text(body.source || body.records && body.records[0] && body.records[0].source || 'manual-csv').toLowerCase();
                     if (!['manual-csv', 'bank-csv', 'historical-csv'].includes(source)) throw new Error('Browser staging is limited to CSV observations.');
@@ -1740,6 +1746,7 @@
             this.connectionOwners = opts.connectionOwners || {};
             this.connectionEnabled = typeof opts.connectionEnabled === 'function' ? opts.connectionEnabled : null;
             this.connectionDisabled = opts.connectionDisabled || {};
+            this.syncReadiness = typeof opts.syncReadiness === 'function' ? opts.syncReadiness : null;
             this.maxDurationMs = Number.isSafeInteger(opts.maxDurationMs) && opts.maxDurationMs > 0 ? opts.maxDurationMs : null;
         }
 
@@ -1770,6 +1777,10 @@
             const opts = options || {};
             const connection = text(connectionKey);
             if (!connection) throw new Error('Sync connection key is required.');
+            if (this.syncReadiness) {
+                const readiness = await this.syncReadiness(user, connection);
+                if (!readiness || readiness.ready !== true || text(readiness.cutoffDate) !== this.cutoverDate) throw new Error('Sync activation is not ready.');
+            }
             const runId = text(opts.runId || uniqueRunId(connection, this.clock));
             const now = Date.now();
             const requestedDeadline = Number.isSafeInteger(opts.deadlineAt) ? opts.deadlineAt : null;

@@ -303,6 +303,11 @@
             <div class="nav-item" data-tab="categories">Categories</div>
             <div class="nav-item" data-tab="import">Import</div>
             <div class="sidebar-bottom">
+                <div id="authIdentityPanel" style="display:none;margin-bottom:12px;padding:10px;border:1px solid var(--border);border-radius:8px;">
+                    <div style="font-size:0.78rem;color:var(--muted);">Signed in as</div>
+                    <div id="authIdentityEmail" style="margin:3px 0 8px;word-break:break-word;"></div>
+                    <button class="btn btn-secondary" id="authSwitchAccount" type="button" style="width:100%;padding:6px 8px;">Switch account</button>
+                </div>
                 <div class="theme-toggle" id="themeToggle">
                     <div class="switch"></div>
                     <span>Dark Mode</span>
@@ -464,6 +469,7 @@
                 <div style="display:flex;gap:8px;flex-wrap:wrap;margin-top:12px;">
                     <button class="btn btn-primary" id="providerLinkConnect">Connect bank</button>
                     <button class="btn btn-secondary" id="providerLinkUpdate">Update connection</button>
+                    <button class="btn btn-secondary" id="providerLinkDisconnect" style="display:none;">Disconnect unfinished Capital One connection</button>
                     <button class="btn btn-secondary" id="providerLinkResume" style="display:none;">Resume account mapping</button>
                 </div>
                 <button class="btn btn-secondary" id="providerLinkRecoveryToggle" type="button" style="margin-top:8px;">Recover unfinished connection</button>
@@ -757,6 +763,11 @@
             });
         }
         const provider = new firebase.auth.GoogleAuthProvider();
+        function googleSignInProvider(selectAccount) {
+            const value = new firebase.auth.GoogleAuthProvider();
+            if (selectAccount && value && typeof value.setCustomParameters === 'function') value.setCustomParameters({ prompt: 'select_account' });
+            return value;
+        }
         if (window.TRANSACTION_APPROVAL_ENDPOINT && !window.transactionApprovalService && window.TransactionBackend && typeof window.TransactionBackend.BrowserApprovalClient === 'function') {
             window.transactionApprovalService = new window.TransactionBackend.BrowserApprovalClient({ endpoint: window.TRANSACTION_APPROVAL_ENDPOINT, auth });
         }
@@ -804,11 +815,36 @@
                 .filter(value => /^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$/.test(String(value.key || '')) && value.label);
         }
 
+        function expectedProviderInstitution(connectionKey) {
+            const map = window.TRANSACTION_LINK_EXPECTED_INSTITUTIONS;
+            const value = map && typeof map === 'object' && !Array.isArray(map) ? map[connectionKey] : '';
+            return typeof value === 'string' ? value.trim() : '';
+        }
+
+        function returnedProviderInstitution(metadata) {
+            const institution = metadata && metadata.institution;
+            const value = institution && (institution.institution_id || institution.institutionId);
+            return typeof value === 'string' ? value.trim() : '';
+        }
+
         function providerLinkStatus(message, error) {
             const element = document.getElementById('providerLinkStatus');
             if (!element) return;
             element.textContent = message || '';
             element.style.color = error ? 'var(--danger)' : 'var(--muted)';
+        }
+
+        function refreshAuthIdentityUi() {
+            const panel = document.getElementById('authIdentityPanel');
+            const email = document.getElementById('authIdentityEmail');
+            if (!panel || !email) return;
+            if (!currentUser) {
+                panel.style.display = 'none';
+                email.textContent = '';
+                return;
+            }
+            panel.style.display = '';
+            email.textContent = String(currentUser.email || currentUser.uid || 'Authenticated account');
         }
 
         function clearProviderLinkUiState() {
@@ -829,15 +865,18 @@
         function refreshProviderLinkUi() {
             const card = document.getElementById('providerLinkCard');
             const select = document.getElementById('providerLinkConnection');
+            const disconnect = document.getElementById('providerLinkDisconnect');
             if (!card || !select) return;
             const enabled = window.TRANSACTION_LINK_ENABLED === true && window.transactionApprovalService && typeof window.transactionApprovalService.createLinkToken === 'function';
             const connections = providerLinkConnections();
             if (!enabled || !connections.length || !currentUser) {
                 card.style.display = 'none';
+                if (disconnect) disconnect.style.display = 'none';
                 return;
             }
             card.style.display = '';
             select.innerHTML = connections.map(value => `<option value="${String(value.key).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/"/g, '&quot;')}">${String(value.label).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/"/g, '&quot;')}</option>`).join('');
+            if (disconnect) disconnect.style.display = String(select.value || '').trim() === 'capital-one' ? '' : 'none';
         }
 
         let providerLinkSdkPromise = null;
@@ -1025,6 +1064,14 @@
                     }
                     try {
                         requireProviderAuth(authSnapshot);
+                        const expectedInstitution = expectedProviderInstitution(connectionKey);
+                        const returnedInstitution = returnedProviderInstitution(metadata);
+                        if (!expectedInstitution || returnedInstitution !== expectedInstitution) {
+                            providerLinkStorageClear();
+                            clearProviderLinkUiState();
+                            providerLinkStatus('The connected institution did not match this bank slot. Stop and verify the existing connection before attempting another connection.', true);
+                            return;
+                        }
                         providerLinkStorageClear();
                         providerLinkPending = { connectionKey, requestId: activeSessionId, accounts: [] };
                         providerLinkStorageWrite({ kind: 'pending', uid: authSnapshot.uid, connectionKey, requestId: activeSessionId, expiresAt: Date.now() + 10 * 60 * 1000 });
@@ -1134,10 +1181,33 @@
         });
         document.getElementById('providerLinkConnection')?.addEventListener('change', () => {
             clearProviderLinkUiState();
+            const disconnect = document.getElementById('providerLinkDisconnect');
+            const select = document.getElementById('providerLinkConnection');
+            if (disconnect) disconnect.style.display = String(select && select.value || '').trim() === 'capital-one' ? '' : 'none';
             providerLinkStatus('Select Recover unfinished connection again for the new bank.');
         });
         document.getElementById('providerLinkUpdate')?.addEventListener('click', async () => {
             try { await openProviderLink('update'); } catch (error) { providerLinkStatus(error.message, true); }
+        });
+        document.getElementById('providerLinkDisconnect')?.addEventListener('click', async () => {
+            const authSnapshot = providerAuthSnapshot();
+            const select = document.getElementById('providerLinkConnection');
+            const connectionKey = String(select && select.value || '').trim();
+            try {
+                requireProviderAuth(authSnapshot);
+                if (!window.transactionApprovalService || typeof window.transactionApprovalService.disconnectLink !== 'function') throw new Error('Authenticated disconnect is unavailable.');
+                if (connectionKey !== 'capital-one' || !providerLinkConnections().some(connection => connection.key === connectionKey)) throw new Error('The selected bank is not the approved unfinished Capital One cleanup target.');
+                if (typeof window.confirm === 'function' && !window.confirm('Disconnect this bank connection? This removes only the selected provider Item after server checks.')) return;
+                providerLinkStatus('Disconnecting the selected bank connection…');
+                await window.transactionApprovalService.disconnectLink(connectionKey);
+                requireProviderAuth(authSnapshot);
+                if (!select || String(select.value || '').trim() !== connectionKey) throw new Error('The selected bank changed while disconnecting.');
+                providerLinkStorageClear();
+                clearProviderLinkUiState();
+                providerLinkStatus('Bank connection removed. A replacement connection requires the approved account mapping flow.');
+            } catch (error) {
+                if (providerAuthCurrent(authSnapshot)) providerLinkStatus(error.message, true);
+            }
         });
         document.getElementById('providerLinkConfirm')?.addEventListener('click', async () => {
             const authSnapshot = providerAuthSnapshot();
@@ -1243,6 +1313,16 @@
             const userAtStart = currentUser;
             if (syncAttemptGeneration === generation || !authLoadCurrent(generation, userAtStart)) return;
             if (navigator.onLine === false) { bankSyncState = 'offline'; renderReviewInbox(); return; }
+            if (typeof service.syncReadiness === 'function') {
+                try {
+                    const readiness = await service.syncReadiness();
+                    if (!authLoadCurrent(generation, userAtStart)) return;
+                    if (!readiness || readiness.ready !== true) { bankSyncState = 'not configured'; renderReviewInbox(); return; }
+                } catch (_) {
+                    if (!authLoadCurrent(generation, userAtStart)) return;
+                    bankSyncState = 'not configured'; renderReviewInbox(); return;
+                }
+            }
             const connections = Array.isArray(window.TRANSACTION_SYNC_CONNECTIONS) ? window.TRANSACTION_SYNC_CONNECTIONS.map(String).map(value => value.trim()).filter(Boolean) : [];
             if (!connections.length) { bankSyncState = 'not configured'; renderReviewInbox(); return; }
             syncAttemptGeneration = generation;
@@ -1382,11 +1462,23 @@
         let newImportQueue = [];
         let newImportIndex = 0;
         let newImportAccount = '';
+        let activeNewImport = null;
+        let activeHistoryImport = null;
         let monthlyChart, yearlyChart;
 
         const categoryColorPalette = ['#3498db', '#e74c3c', '#2ecc71', '#f39c12', '#9b59b6', '#1abc9c', '#34495e', '#e67e22', '#c0392b', '#27ae60', '#2980b9', '#8e44ad', '#e91e63', '#00bcd4', '#ff5722', '#795548', '#607d8b', '#9c27b0', '#4caf50', '#ff9800', '#03a9f4', '#f44336', '#ffc107', '#cddc39', '#009688', '#673ab7', '#3f51b5', '#2196f3', '#ffeb3b', '#8bc34a', '#263238', '#9e9e9e', '#f06292', '#ba68c8', '#9575cd', '#7986cb', '#64b5f6', '#4fc3f7', '#4dd0e1', '#4db6ac', '#81c784', '#aed581', '#dce775', '#fff176', '#ffd54f', '#ffb74d', '#ff8a65', '#a1887f', '#90a4ae', '#f48fb1', '#ce93d8', '#b39ddb', '#9fa8da', '#82b1ff', '#81d4fa', '#80deea', '#80cbc4', '#a5d6a7', '#c5e1a5', '#dce775', '#e6ee9c', '#fff59d', '#ffe082', '#ffcc80', '#ffab91', '#bcaaa4', '#cfd8dc'];
 
         function clearAcceptedAuthUi() {
+            if (activeNewImport) activeNewImport.cancelled = true;
+            activeNewImport = null;
+            if (activeHistoryImport) activeHistoryImport.cancelled = true;
+            activeHistoryImport = null;
+            newImportQueue = [];
+            newImportIndex = 0;
+            newImportAccount = '';
+            pendingImport = [];
+            pendingImportBudgets = {};
+            document.getElementById('importPreview')?.classList.add('hidden');
             document.getElementById('loginScreen').style.display = 'flex';
             document.querySelector('.app-layout').style.display = 'none';
             transactions = [];
@@ -3254,13 +3346,21 @@
             if (window.__BUDGET_TOOL_LOCAL_LIMITED_UI__ === true) { alert('CSV import is disabled in this local demo.'); return; }
             if (!files || files.length === 0) return;
             const fileArray = Array.from(files).sort((a, b) => a.name.localeCompare(b.name));
-            let totalTransactions = 0;
-            let processedFiles = 0;
+            const batch = { generation: authGeneration, user: currentUser, totalTransactions: 0, processedFiles: 0, cancelled: false };
+            if (activeHistoryImport) activeHistoryImport.cancelled = true;
+            activeHistoryImport = batch;
+            const batchIsCurrent = () => !batch.cancelled && activeHistoryImport === batch && authGeneration === batch.generation && currentUser === batch.user;
+            const cancelBatch = () => {
+                batch.cancelled = true;
+                if (activeHistoryImport === batch) activeHistoryImport = null;
+            };
 
             const processNextFile = (index) => {
+                if (!batchIsCurrent()) return;
                 if (index >= fileArray.length) {
+                    cancelBatch();
                     renderReviewInbox();
-                    alert(`Staged ${totalTransactions} historical transaction${totalTransactions === 1 ? '' : 's'} from ${processedFiles} file${processedFiles === 1 ? '' : 's'}. Review and explicitly add selected rows to change accepted data.`);
+                    alert(`Staged ${batch.totalTransactions} historical transaction${batch.totalTransactions === 1 ? '' : 's'} from ${batch.processedFiles} file${batch.processedFiles === 1 ? '' : 's'}. Review and explicitly add selected rows to change accepted data.`);
                     return;
                 }
 
@@ -3269,16 +3369,18 @@
 
                 Papa.parse(file, {
                     complete: (results) => {
+                        if (!batchIsCurrent()) return;
                         try {
                             if (results.errors && results.errors.length) throw new Error('CSV parsing failed. Check delimiter and quoting.');
                             const parsed = parseImportData(results.data, fileName);
                             const fileTransactions = parsed.transactions;
                             stageReviewTransactions(fileTransactions, 'historical-csv', { budgets: parsed.budgets, fileName });
-                            totalTransactions += fileTransactions.length;
-                            processedFiles++;
+                            batch.totalTransactions += fileTransactions.length;
+                            batch.processedFiles++;
                             document.getElementById('importStats').textContent = `Staged ${index + 1} of ${fileArray.length} files. Accepted data is unchanged.`;
                             processNextFile(index + 1);
                         } catch (error) {
+                            cancelBatch();
                             alert('Historical import stopped: ' + error.message + ' No rows from this file were added.');
                         }
                     }
@@ -3675,21 +3777,42 @@
             const source = document.getElementById('bankCsvSource').value;
             const account = document.getElementById('bankCsvAccount').value;
             if (!account) { alert('Select the CSV account first.'); return; }
-            newImportQueue = [];
+            const batch = {
+                generation: authGeneration,
+                user: currentUser,
+                queue: [],
+                account: '',
+                cancelled: false
+            };
+            if (activeNewImport) activeNewImport.cancelled = true;
+            activeNewImport = batch;
+            newImportQueue = batch.queue;
             newImportIndex = 0;
             newImportAccount = '';
+            const batchIsCurrent = () => !batch.cancelled && activeNewImport === batch && authGeneration === batch.generation && currentUser === batch.user;
+            const cancelBatch = () => {
+                batch.cancelled = true;
+                if (activeNewImport === batch) {
+                    activeNewImport = null;
+                    newImportQueue = [];
+                    newImportIndex = 0;
+                    newImportAccount = '';
+                }
+            };
 
             const fileArray = Array.from(files);
 
             const processNext = (idx) => {
+                if (!batchIsCurrent()) return;
                 if (idx >= fileArray.length) {
-                    if (newImportQueue.length === 0) {
+                    if (batch.queue.length === 0) {
+                        cancelBatch();
                         alert('No transactions found in the selected file(s).');
                         return;
                     }
-                    const staged = stageReviewTransactions(newImportQueue, 'bank-csv', { source, account, fileNames: fileArray.map(file => file.name) });
+                    const staged = stageReviewTransactions(batch.queue, 'bank-csv', { source, account, fileNames: fileArray.map(file => file.name) });
                     pendingImport = [];
-                    newImportQueue = [];
+                    cancelBatch();
                     alert(`Staged ${staged.length} bank transaction${staged.length === 1 ? '' : 's'}. Review and explicitly add selected rows; accepted data is unchanged.`);
                     return;
                 }
@@ -3697,20 +3820,26 @@
                 const file = fileArray[idx];
                 const reader = new FileReader();
                 reader.onload = (e) => {
+                    if (!batchIsCurrent()) return;
                     try {
                         const text = e.target.result;
                         const results = Papa.parse(text, { skipEmptyLines: true });
                         if (results.errors.length) throw new Error('CSV parsing failed. Check delimiter, quoting and columns.');
                         const parsed = parseBankStatement(results.data, file.name, source, account);
-                        if (parsed.account && !newImportAccount) newImportAccount = parsed.account;
-                        newImportQueue = newImportQueue.concat(parsed.transactions);
+                        if (parsed.account && !batch.account) batch.account = parsed.account;
+                        batch.queue = batch.queue.concat(parsed.transactions);
+                        newImportQueue = batch.queue;
                         processNext(idx + 1);
                     } catch (error) {
-                        newImportQueue = [];
+                        cancelBatch();
                         alert('Import stopped: ' + error.message);
                     }
                 };
-                reader.onerror = () => { newImportQueue = []; alert('Could not read CSV file. Nothing from this batch was imported.'); };
+                reader.onerror = () => {
+                    if (!batchIsCurrent()) return;
+                    cancelBatch();
+                    alert('Could not read CSV file. Nothing from this batch was imported.');
+                };
                 reader.readAsText(file);
             };
 
@@ -3913,6 +4042,7 @@
             if (!providerAuthCurrent(snapshot)) return;
             document.getElementById('loginScreen').style.display = 'none';
             document.querySelector('.app-layout').style.display = 'flex';
+            refreshAuthIdentityUi();
             refreshProviderLinkUi();
             resumeProviderLink().catch(error => providerLinkStatus(error.message, true));
             loadFromFirestore(generation);
@@ -3938,19 +4068,24 @@
             syncAttemptGeneration = null;
             if (!user || identityChanged || !previousUser) clearAcceptedAuthUi();
             currentUser = null;
+            refreshAuthIdentityUi();
             pendingReviewBudgets.clear();
             reviewStore.clear();
             if (user) {
                 currentUser = user;
+                refreshAuthIdentityUi();
                 authorizeAndLoadUser(user, generation).catch(error => {
                     if (!providerAuthCurrent({ generation, user, uid: user.uid })) return;
                     alert(`Access denied. ${error.message}`);
                     currentUser = null;
+                    refreshAuthIdentityUi();
                     providerLinkStorageClear();
                     clearProviderLinkUiState();
+                    clearAcceptedAuthUi();
                     auth.signOut();
                 });
             } else {
+                refreshAuthIdentityUi();
                 refreshProviderLinkUi();
             }
         });
@@ -3960,6 +4095,16 @@
                 console.error("Sign-in error:", error);
                 alert("Sign-in failed: " + error.message);
             });
+        });
+
+        document.getElementById('authSwitchAccount')?.addEventListener('click', async () => {
+            try {
+                await auth.signOut();
+                await auth.signInWithPopup(googleSignInProvider(true));
+            } catch (error) {
+                if (currentUser) providerLinkStatus('Account switch failed: ' + error.message, true);
+                else alert('Account switch failed: ' + error.message);
+            }
         });
 
         document.getElementById('themeToggle').addEventListener('click', toggleTheme);
