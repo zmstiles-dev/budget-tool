@@ -385,7 +385,7 @@ function request(method, url, body, origin) {
     const browserSource = fs.readFileSync(path.join(projectRoot, 'index.html'), 'utf8');
     const deploymentConfig = require(path.join(projectRoot, 'deployment-config.template.js'));
     assert.deepEqual(deploymentConfig, {
-        TRANSACTION_APPROVAL_ENDPOINT: '',
+        TRANSACTION_APPROVAL_ENDPOINT: 'https://stiles-budget-tool.netlify.app/.netlify/functions/budgetTransactions',
         TRANSACTION_LINK_ENABLED: false,
         TRANSACTION_SYNC_ENABLED: false,
         TRANSACTION_LINK_CONNECTIONS: [],

@@ -879,6 +879,11 @@
         }
 
         async function resumeProviderLinkPending() {
+            if (window.TRANSACTION_LINK_ENABLED !== true) {
+                providerLinkStorageClear();
+                clearProviderLinkUiState();
+                return;
+            }
             const authSnapshot = providerAuthSnapshot();
             const stored = providerLinkStorageRead();
             const service = window.transactionApprovalService;
@@ -976,6 +981,11 @@
         }
 
         async function resumeProviderLink() {
+            if (window.TRANSACTION_LINK_ENABLED !== true) {
+                providerLinkStorageClear();
+                clearProviderLinkUiState();
+                return;
+            }
             const authSnapshot = providerAuthSnapshot();
             if (!providerAuthCurrent(authSnapshot)) return;
             const stored = providerLinkStorageRead();

@@ -80,6 +80,29 @@ function createServer() {
     await page.goto('http://127.0.0.1:' + port + '/index.html');
     await page.waitForFunction(() => document.querySelector('.app-layout').style.display === 'flex');
     await page.waitForFunction(() => document.body.innerText.includes('Old user transaction'));
+    const disabledProviderResume = await page.evaluate(async () => {
+        const originalEnabled = window.TRANSACTION_LINK_ENABLED;
+        const originalService = window.transactionApprovalService;
+        let statusCalls = 0;
+        window.TRANSACTION_LINK_ENABLED = false;
+        window.transactionApprovalService = { async linkStatus() { statusCalls += 1; throw new Error('disabled Link must not call the backend'); } };
+        window.providerLinkStorageWrite({ kind: 'pending', uid: window.firebase.auth().currentUser.uid, connectionKey: 'chase', requestId: 'disabled-stale', expiresAt: Date.now() + 60000 });
+        await window.resumeProviderLink();
+        const result = {
+            statusCalls,
+            storage: sessionStorage.getItem('budget_provider_link_session_v1'),
+            pendingCleared: providerLinkPending === null,
+            bindingSelects: document.querySelectorAll('#providerLinkBindings select').length
+        };
+        window.TRANSACTION_LINK_ENABLED = originalEnabled;
+        if (originalService === undefined) delete window.transactionApprovalService;
+        else window.transactionApprovalService = originalService;
+        return result;
+    });
+    assert.equal(disabledProviderResume.statusCalls, 0, 'disabled Link resume must not call the backend for stale provider state');
+    assert.equal(disabledProviderResume.storage, null, 'disabled Link resume must clear stale provider session storage');
+    assert.equal(disabledProviderResume.pendingCleared, true, 'disabled Link resume must clear stale in-memory provider state');
+    assert.equal(disabledProviderResume.bindingSelects, 0, 'disabled Link resume must not render stale account mappings');
     const authSwitchRegression = await page.evaluate(async () => {
         window.__delaySharedRead = true;
         window.__sharedReadStarted = false;

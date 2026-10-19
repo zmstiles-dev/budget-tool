@@ -12,7 +12,7 @@
     const defaults = {
         // The Netlify site URL and site ID are assigned only during the approved
         // backend/frontend cutover. An unknown endpoint must fail closed.
-        TRANSACTION_APPROVAL_ENDPOINT: '',
+        TRANSACTION_APPROVAL_ENDPOINT: 'https://stiles-budget-tool.netlify.app/.netlify/functions/budgetTransactions',
         TRANSACTION_LINK_ENABLED: false,
         TRANSACTION_SYNC_ENABLED: false,
         TRANSACTION_LINK_CONNECTIONS: [],
