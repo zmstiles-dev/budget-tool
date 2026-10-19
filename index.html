@@ -1093,6 +1093,10 @@
             catch (error) { reportPersistenceError(error); }
             if (!authLoadCurrent(generation, userAtStart)) return;
             populateDateFilters();
+            // Rendering an authenticated snapshot must stay read-only. The
+            // cumulative-bank initializer may derive missing display values,
+            // but loading a user must never enqueue a cloud save for that
+            // derived state.
             initializeCumulativeBanks();
             renderAll();
         }
@@ -1350,7 +1354,6 @@
             buildMerchantDefaults();
             populateDateFilters();
             populateCategoryFilters();
-            applyImportedBudgets({});
             initializeCumulativeBanks();
             populateCategoryGroupDropdown();
             renderAll();
@@ -1438,7 +1441,6 @@
                     }
                 }
             });
-            saveCategories();
          }
 
          function getAllMonths(startMonth, endMonth) {
@@ -2242,7 +2244,6 @@
             // that can race a concurrent durable review approval.
             if (categoryOrder.length === 0 && allCats.length > 0) {
                 categoryOrder = allCats;
-                saveCategoryOrder(categoryOrder);
             }
             const ordered = categoryOrder.filter(c => allCats.includes(c));
             const newCats = allCats.filter(c => !ordered.includes(c));
