@@ -167,13 +167,19 @@ BUDGET_PLAID_CLIENT_ID=<approved client ID>
 PLAID_REDIRECT_URI=https://zmstiles-dev.github.io/<approved OAuth path>
 ```
 
+Enter the approved nonsecret production settings through the site environment
+mechanism; keep their names and values out of chat and build output:
+
+```text
+BUDGET_FIREBASE_CLIENT_EMAIL=<runtime identity email>
+BUDGET_TOKEN_CURRENT_KEY_ID=<active AES key ID>
+```
+
 Enter secret values only through the approved Netlify site mechanism, never in
 chat, source, command arguments, logs, or build output:
 
 ```text
-BUDGET_FIREBASE_CLIENT_EMAIL=<runtime credential value>
 BUDGET_FIREBASE_PRIVATE_KEY=<runtime credential value>
-BUDGET_TOKEN_CURRENT_KEY_ID=<active AES key ID>
 BUDGET_TOKEN_KEYRING_JSON=<bounded JSON of base64url AES-256 keys>
 BUDGET_PLAID_CLIENT_SECRET=<only after Link approval>
 ```
