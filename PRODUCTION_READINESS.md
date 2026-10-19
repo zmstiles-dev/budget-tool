@@ -1,21 +1,22 @@
 # Production readiness
 
-> Status: local implementation delta, October 18, 2026. The selected launch
-> candidate is a manually deployed Netlify Free site. No deployment, billing
-> change, credential entry, membership seed, provider request, or production
-> data write is authorized by this checkout.
+> Status: local frontend release delta, October 19, 2026. The reviewed Netlify
+> backend environment is configured and its single approved production
+> redeploy was confirmed by read-only reconciliation. This checkout performs
+> no cloud writes; the frontend Pages publication and a live Link API/Item test
+> remain pending.
 
 The project is `budget-tool-sync`. The approved future Netlify site display
 name is `Stiles-Budget-Tool`, with proposed normalized slug
-`stiles-budget-tool`. No Netlify site currently exists, so its site ID and
-production hostname remain unset; the runtime must reject guessed values. The
+`stiles-budget-tool` is the approved existing Netlify site with the reviewed ID and production hostname; runtime checks still reject any different binding. The
 existing Firebase Auth and Firestore services remain the identity and data
 stores; Firestore is in `nam5`, and the project currently has Spark billing
 with no billing account linked. Firebase
 Functions and Secret Manager code remains in this repository as a tested
 reference path. It is not the selected launch transport because Functions
-requires Blaze. The active Netlify implementation is locally testable but
-still requires a later operator setup and approval.
+requires Blaze. The active Netlify implementation has been configured and
+deployed once under the approved operator flow. Its Link API path has not yet
+been exercised and no provider Item has been created.
 
 The Free plan decision is based on Netlify's current credit plan: 300 monthly
 credits, with hard project pausing when the credit balance is exhausted and no
@@ -32,12 +33,9 @@ AI agent, Git integration, hosted build, fork/PR build, or preview with
 credentials is part of the approved path.
 
 The reviewed Netlify account dashboard shows the Free plan with 300 monthly
-credits and zero existing projects. No site exists for this application. The
-visible site-creation surface currently exposes AI, Git, or upload choices but
-no empty-site creation control. Therefore the first-publish sequence below is
-conditional on a separately approved private human operator API/CLI flow that
-can create an empty site and configure it before publishing. This checkout
-does not grant, read, or use those credentials. Current plan references are
+credits. The approved private site exists and its separately approved one-use
+environment redeploy is complete; this checkout does not grant, read, or use
+operator credentials. Current plan references are
 [Netlify pricing](https://www.netlify.com/pricing/),
 [credit-based pricing plans](https://docs.netlify.com/manage/accounts-and-billing/billing/billing-for-credit-based-plans/credit-based-pricing-plans/),
 and [How credits work](https://docs.netlify.com/manage/accounts-and-billing/billing/billing-for-credit-based-plans/how-credits-work/).
@@ -56,8 +54,8 @@ Plaid credentials, or token-vault keys:
   `BUDGET_NETLIFY_SITE_HOST`.
 
 Missing, preview, unpublished, malformed, old-deploy, or wrong-site context
-fails closed. The site ID and host are intentionally unset in this checkout;
-no deployment URL is guessed. The function uses the current Netlify defaults
+fails closed. The source contains no credential values; the deployed site ID
+and host are bound through the approved production environment. The function uses current Netlify defaults
 for region and memory, and does not carry over Firebase-only region or memory
 settings. Node 24 is the selected runtime. The modern Netlify function's
 documented 60-second limit is bounded internally by the provider deadlines.
@@ -80,10 +78,11 @@ rules, membership, and frontend cutover are coordinated. There is no
 administrator review role and no browser access to provider credentials.
 
 The exact browser origin remains
-`https://zmstiles-dev.github.io`. `deployment-config.template.js` now has an
-empty endpoint and both provider gates disabled. A later approved frontend
-publication supplies the exact Netlify endpoint and an explicit allowlist; it
-does not enable Link or sync by itself.
+`https://zmstiles-dev.github.io`. `deployment-config.template.js` now carries the reviewed Link-only endpoint
+default, enables only the explicit Chase and US Capital One connection keys,
+and keeps sync disabled with an empty sync connection list. The backend Link
+gate is configured in the approved production environment; this frontend
+change does not perform provider requests or create an Item.
 
 ## Encrypted token vault
 
@@ -119,7 +118,9 @@ not used by the Netlify runtime and are not read by local tests.
 
 ## Link and sync lifecycle
 
-Link and sync default to disabled. When separately approved, the backend uses
+The checked-in frontend Link-only candidate enables the two explicit connection
+keys, while sync remains disabled. The backend Link gate is configured and
+deployed, but its provider API path remains untested; when exercised it uses
 the existing durable lifecycle:
 
 1. A transaction reserves a connection slot for the authenticated UID,
@@ -152,17 +153,18 @@ on identity changes. Server-verified account type and masked final four are
 shown to distinguish duplicate display names; selecting a mask never creates
 an implicit binding.
 
-## Operator setup after approval
+## Operator configuration record
 
-The following is a setup checklist, not an instruction to perform it in this
-checkout. Use the isolated future site named `Stiles-Budget-Tool` (proposed
-slug `stiles-budget-tool`) and enter values through the approved site
-secret/configuration interface. No site currently exists; record its actual
-returned site ID and production hostname before setting the pinned values
-below. Never guess either value or put secret values in chat, source, CLI
-arguments, build logs, Git configuration, previews, or pull requests.
+The following records the approved production configuration without exposing
+values. It is not an instruction to repeat or mutate the environment. Use the
+approved site `stiles-budget-tool` at
+`stiles-budget-tool.netlify.app` and enter values through the approved site
+secret/configuration interface. Its public site ID is retained only in the
+operator evidence; never guess or replace pinned site metadata. Never put
+secret values in chat, source, CLI arguments, build logs, Git configuration,
+previews, or pull requests.
 
-Nonsecret values that must be decided later:
+Nonsecret values recorded by the approved operator:
 
 ```text
 BUDGET_NETLIFY_SITE_ID=<approved isolated site ID>
@@ -171,16 +173,16 @@ BUDGET_FIREBASE_PROJECT_ID=budget-tool-sync
 BUDGET_HOUSEHOLD_ID=<approved protected household ID>
 BUDGET_CONNECTION_KEYS=chase,capital-one
 BUDGET_ACTIVE_CONNECTION_KEYS=
-BUDGET_EXPECTED_INSTITUTION_CHASE=<verified institution ID>
-BUDGET_EXPECTED_INSTITUTION_CAPITAL_ONE=<verified institution ID>
-BUDGET_LINK_ENABLED=false
+BUDGET_EXPECTED_INSTITUTION_CHASE=ins_56
+BUDGET_EXPECTED_INSTITUTION_CAPITAL_ONE=ins_128026
+BUDGET_LINK_ENABLED=true
 BUDGET_SYNC_ENABLED=false
 BUDGET_PLAID_CLIENT_ID=<approved client ID>
-PLAID_REDIRECT_URI=https://zmstiles-dev.github.io/<approved OAuth path>
+PLAID_REDIRECT_URI=https://zmstiles-dev.github.io/budget-tool/
 ```
 
-Secret values are entered only by the authorized operator through the
-approved site mechanism:
+Secret values were entered only by the authorized operator through the
+approved site mechanism and are intentionally omitted here:
 
 ```text
 BUDGET_FIREBASE_CLIENT_EMAIL=<runtime credential value>
@@ -191,24 +193,18 @@ BUDGET_PLAID_CLIENT_SECRET=<provider client secret, only for approved Link use>
 ```
 
 The runtime does not create credentials, keys, sites, secrets, Items, or
-membership documents. The four approved existing app users are seeded later
-by a separately authorized operator through the fixed protected paths. The
-proposed household namespace `stiles-budget` is only a candidate and must be
-checked against the existing protected configuration before setup.
+membership documents. The four approved existing app users and protected
+household configuration were seeded and independently re-read through the
+fixed protected paths. No Item has been created and no provider API request
+has been exercised.
 
-For the lowest-credit first real deployment, use the separately approved
-private operator API/CLI flow to create the empty isolated site with the
-approved display name and proposed slug, record its actual ID and hostname,
-and complete the nonsecret runtime setting and private human-entered secrets
-before the first production function upload. Then publish the single reviewed
-function ZIP once. That successful production deploy costs 15
-credits. If the platform flow requires publishing a placeholder before
-configuration can be entered, that placeholder is still a production deploy;
-two successful publishes would cost 30 credits. Avoid that sequence when the
-site/API flow permits configuration before the first publish. Failed deploys
-cost no deploy credits, but no preview or branch deployment should be used as
-a testing substitute because request, compute, and bandwidth usage still
-consume credits.
+The single reviewed production function redeploy was completed under the
+approved one-use allowance. Its upload acknowledgment was ambiguous, so the
+operator performed GET-only reconciliation and confirmed the resulting
+production deploy; no upload retry was sent. Do not publish another function
+artifact. Failed deploys cost no deploy credits, but no preview or branch
+deployment should be used as a testing substitute because request, compute,
+and bandwidth usage still consume credits.
 
 ## Artifact and source boundaries
 
@@ -241,8 +237,8 @@ Current local delta inventory:
 * `scripts/prepare-netlify.cjs`, `scripts/bundle-netlify.cjs`,
   `netlify/netlify.toml`, and
   `netlify/public/.gitkeep` — isolated manual artifact assembly.
-* `deployment-config.template.js` — empty endpoint and disabled provider
-  gates.
+* `deployment-config.template.js` — reviewed endpoint with Link-only Chase/Capital
+  One defaults, sync disabled, and an empty sync connection list.
 * `tests/netlify-runtime.test.cjs` — focused guard, adapter, vault, payload,
   rotation, tamper, concurrency, bundle import, SDK version, inventory, and
   redacted startup-stage/healthy-auth coverage, including extracted ZIP
@@ -318,10 +314,20 @@ The protected household configuration and four approved existing memberships
 were seeded and independently re-read; no accepted budget records were
 modified. The temporary Netlify CLI grant was revoked afterward.
 
-The private published route currently returns the generic service-unavailable
-response. The exact startup stage is unknown because the deployed revision
-predates the local-only redacted diagnostic added afterward. The diagnostic
-change is un-deployed, and the 18 synthetic operator tests remain green; this
-does not establish live production readiness. No further publish, upload,
-redeploy, Link or sync activation, frontend endpoint change, visibility
-change, bank operation, or migration is authorized without a separate review.
+The earlier private published route returned the generic service-unavailable
+response. That historical revision predates the local-only redacted diagnostic
+and the later approved Link-only redeploy recorded below. The diagnostic and
+Link-only environment changes were subsequently reviewed; the live Link API
+path still has not been exercised. No additional publish, upload, redeploy,
+Link or sync activation, frontend endpoint change, visibility change, bank
+operation, or migration is authorized without a separate review.
+
+## Current Link-only status — 2026-10-19
+
+The approved frontend candidate enables Link for `chase` and `capital-one`, with
+server-verified institution markers `ins_56` and `ins_128026`. The production
+backend environment is Link-enabled; sync and active connection state remain
+empty/disabled. The single redeploy (`6ad6462cbe96255113bf6364`) was confirmed
+by GET-only reconciliation after an ambiguous upload acknowledgment. The
+frontend Pages publication and live Link API/Item test remain pending; this
+checkout does not expose provider credentials or create an Item.

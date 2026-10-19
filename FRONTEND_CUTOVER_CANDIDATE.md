@@ -2,8 +2,9 @@
 
 This is a local review artifact for the coordinated frontend/backend rollout.
 The candidate file is not loaded by `index.html`. The checked-in template now
-assigns the reviewed production request path while Link, sync, and active
-connections remain disabled.
+assigns the reviewed production request path. The approved Link-only candidate
+exposes the two explicit connection keys for the separate backend gate; sync
+and active connections remain disabled/empty.
 
 The reviewed nonsecret candidate targets the existing Netlify site, with the
 current visibility setting making production public and Deploy Previews private:
@@ -13,7 +14,7 @@ site ID: a429bdf1-47c9-4bb0-9e9d-7f5cdf8d416d
 site host: stiles-budget-tool.netlify.app
 function endpoint: https://stiles-budget-tool.netlify.app/.netlify/functions/budgetTransactions
 browser origin: https://zmstiles-dev.github.io
-Link: false
+Link: true (chase, capital-one)
 sync: false
 active connections: empty
 ```
@@ -25,16 +26,16 @@ now carries this exact endpoint. The browser obtains a
 Firebase ID token through its existing signed-in Firebase user; no token or
 Netlify cookie is copied into configuration.
 
-The reviewed endpoint-only edit is preserved outside the checkout at
+The earlier endpoint-only edit is preserved outside the checkout at
 `D:\Documents\Codex\.assistant-storage\budget-tool-verification\free-backend-research\endpoint-activation.patch`
 (SHA-256
-`c10d9c7d810fcb1585978d96a534a339eae6a7a0a985ee9b471264f577f067b8`). It
-changes only the template endpoint; the provider gates and connection
-allowlists remain disabled and empty. The patch is now applied to the checked-in
-template and covered by `tests/frontend-cutover-candidate.test.cjs`.
+`c10d9c7d810fcb1585978d96a534a339eae6a7a0a985ee9b471264f577f067b8`). The
+checked-in template now includes the separately reviewed Link-only flip
+(`chase`, `capital-one`); sync and active connections remain disabled/empty.
+The resulting defaults are covered by `tests/frontend-cutover-candidate.test.cjs`.
 
 The current private accepted-history checkpoint supplied for this cutover is
-`D:\Documents\Codex\private\budget-tool\cutover-checkpoint-20261019T150028Z`.
+`D:\Documents\Codex\private\budget-tool\cutover-checkpoint-20261019T160449Z`.
 Its reviewed metadata records 2,807 transactions, 4 opaque legacy dates, and
 SHA-256
 `83f130c2bdbbec3e1345c4f065df397f8ff3c4d59acad61346a8f0bde8887826`.
@@ -48,7 +49,7 @@ The current cutover record is:
    do not normalize dates, overwrite `shared/data`, export secrets, or treat
    the ignored `budget-data.json` as a new backup. The code rollback baseline is
    `b807c5dc052a601916dc536238df4e5ec77a93c2`, and the main rollback baseline
-   is `875321f100b33c33499d8c09bcf9918c3aa10465`. Before opening the normal app
+   is `209c000765c2c4ded54d23997723a0f83af59dbe`. Before opening the normal app
    for validation, a private manifest must record the checkpoint path/count/hash,
    deployed-rules bytes/hash, and served frontend commit/file hash. Missing or
    mismatched `shared/data` count/hash is a hard stop because the app's missing
@@ -60,16 +61,22 @@ The current cutover record is:
    migration is part of this candidate.
 3. Netlify currently has production public and Deploy Previews private, using
    **Private** with **Applies to: Previews only**. The function artifact is
-   unchanged. Link and sync remain disabled and active connections remain empty.
+   unchanged. The approved production environment is Link-enabled for `chase`
+   and `capital-one`; sync remains disabled and active connections remain
+   empty. The single redeploy was confirmed by GET-only reconciliation after
+   an ambiguous upload acknowledgment. No live Link API request or Item
+   creation has been performed.
 4. GitHub Pages is configured as **Deploy from a branch**, branch `main`, path
    `/`. Merging the reviewed frontend change to `main` is the endpoint
-   publication event and is still pending. No Netlify function redeploy is
-   required.
+   publication event and is still pending. The separately approved one-use
+   Netlify environment redeploy is complete and must not be repeated or used
+   to change the function artifact.
 5. After that Pages deployment is published, fetch
    `https://zmstiles-dev.github.io/budget-tool/` and verify the served page
    origin is exactly `https://zmstiles-dev.github.io` and the served
-   `deployment-config.template.js` contains the approved endpoint, disabled
-   Link/sync gates, and empty active-connection list. Verify the Pages commit is
+   `deployment-config.template.js` contains the approved endpoint, Link-only
+   defaults for `chase` and `capital-one`, disabled sync, and an empty
+   active-connection list. Verify the Pages commit is
    the approved `main` revision; a local checkout is insufficient.
 6. A signed-in, review-only browser check with an existing approved user remains
    pending. Run it only after the served-config check and the `shared/data`

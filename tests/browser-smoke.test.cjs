@@ -598,9 +598,17 @@ function createServer() {
     await page.reload({ waitUntil: 'domcontentloaded' });
     await page.waitForFunction(() => document.querySelector('.app-layout').style.display === 'flex');
     await page.waitForTimeout(25);
+    const reloadLink = await page.evaluate(() => ({ state: window.__providerHarness, storage: JSON.parse(sessionStorage.getItem('budget_provider_link_session_v1')), selects: document.querySelectorAll('#providerLinkBindings select').length }));
+    assert.equal(reloadLink.state.apiCreateCalls, 0, 'Pending reload must not create another Link Item.');
+    assert.equal(reloadLink.state.apiStatusCalls, 0, 'Pending reload must not contact the durable server receipt without a fresh user action.');
+    assert.equal(reloadLink.storage.kind, 'pending');
+    assert.equal(reloadLink.selects, 0, 'Pending reload must not render stale account mappings before explicit resume.');
+    await page.locator('.nav-item[data-tab="import"]').click();
+    await page.waitForFunction(() => getComputedStyle(document.getElementById('providerLinkResume')).display !== 'none');
+    await page.locator('#providerLinkResume').click();
     const recoveredLink = await page.evaluate(() => ({ state: window.__providerHarness, storage: JSON.parse(sessionStorage.getItem('budget_provider_link_session_v1')), selects: document.querySelectorAll('#providerLinkBindings select').length }));
     assert.equal(recoveredLink.state.apiCreateCalls, 0, 'Pending reload must not create another Link Item.');
-    assert.equal(recoveredLink.state.apiStatusCalls, 1, 'Pending reload must query the durable server receipt.');
+    assert.equal(recoveredLink.state.apiStatusCalls, 1, 'Explicit resume must query the durable server receipt.');
     assert.equal(recoveredLink.storage.kind, 'pending');
     assert.equal(recoveredLink.selects, 1, 'Pending reload must render the server-returned account list.');
     await page.evaluate(() => window.firebase.auth().__switchUser());

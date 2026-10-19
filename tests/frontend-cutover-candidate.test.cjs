@@ -23,9 +23,9 @@ assert.deepEqual(candidate.TRANSACTION_LINK_CONNECTIONS, []);
 assert.deepEqual(candidate.TRANSACTION_SYNC_CONNECTIONS, []);
 
 assert.equal(template.TRANSACTION_APPROVAL_ENDPOINT, candidate.endpoint);
-assert.equal(template.TRANSACTION_LINK_ENABLED, false);
+assert.equal(template.TRANSACTION_LINK_ENABLED, true);
 assert.equal(template.TRANSACTION_SYNC_ENABLED, false);
-assert.deepEqual(template.TRANSACTION_LINK_CONNECTIONS, []);
+assert.deepEqual(template.TRANSACTION_LINK_CONNECTIONS, ['chase', 'capital-one']);
 assert.deepEqual(template.TRANSACTION_SYNC_CONNECTIONS, []);
 assert.match(indexSource, /deployment-config\.template\.js/);
 assert.doesNotMatch(indexSource, /deployment-config\.production-candidate\.example\.js/);
@@ -33,12 +33,12 @@ assert.doesNotMatch(indexSource, /deployment-config\.production-candidate\.examp
 const activeBrowser = {};
 vm.runInNewContext(fs.readFileSync(templatePath, 'utf8'), { window: activeBrowser });
 assert.equal(activeBrowser.TRANSACTION_APPROVAL_ENDPOINT, candidate.endpoint);
-assert.equal(activeBrowser.TRANSACTION_LINK_ENABLED, false);
+assert.equal(activeBrowser.TRANSACTION_LINK_ENABLED, true);
 assert.equal(activeBrowser.TRANSACTION_SYNC_ENABLED, false);
-assert.deepEqual(Array.from(activeBrowser.TRANSACTION_LINK_CONNECTIONS), []);
+assert.deepEqual(Array.from(activeBrowser.TRANSACTION_LINK_CONNECTIONS), ['chase', 'capital-one']);
 assert.deepEqual(Array.from(activeBrowser.TRANSACTION_SYNC_CONNECTIONS), []);
 assert.equal(activeBrowser.__BUDGET_TOOL_DEPLOYMENT_CONFIG__.endpoint, candidate.endpoint);
-assert.equal(activeBrowser.__BUDGET_TOOL_DEPLOYMENT_CONFIG__.linkEnabled, false);
+assert.equal(activeBrowser.__BUDGET_TOOL_DEPLOYMENT_CONFIG__.linkEnabled, true);
 assert.equal(activeBrowser.__BUDGET_TOOL_DEPLOYMENT_CONFIG__.syncEnabled, false);
 
 const browser = { TRANSACTION_APPROVAL_ENDPOINT: '', TRANSACTION_LINK_ENABLED: false, TRANSACTION_SYNC_ENABLED: false };
@@ -48,4 +48,4 @@ assert.equal(browser.TRANSACTION_LINK_ENABLED, false);
 assert.equal(browser.TRANSACTION_SYNC_ENABLED, false);
 assert.equal(browser.__BUDGET_TOOL_PRODUCTION_CUTOVER_CANDIDATE__.endpoint, candidate.endpoint);
 
-console.log('PASS: production endpoint candidate is exact, namespaced, disabled, and excluded from frontend bootstrap.');
+console.log('PASS: approved template enables Link-only Chase/Capital One defaults; sync and inert candidate remain disabled.');

@@ -464,6 +464,7 @@
                 <div style="display:flex;gap:8px;flex-wrap:wrap;margin-top:12px;">
                     <button class="btn btn-primary" id="providerLinkConnect">Connect bank</button>
                     <button class="btn btn-secondary" id="providerLinkUpdate">Update connection</button>
+                    <button class="btn btn-secondary" id="providerLinkResume" style="display:none;">Resume account mapping</button>
                 </div>
                 <div id="providerLinkBindings" style="margin-top:14px;"></div>
                 <button class="btn btn-primary" id="providerLinkConfirm" style="display:none;margin-top:12px;">Confirm account mapping</button>
@@ -804,8 +805,10 @@
             providerLinkPending = null;
             const bindings = document.getElementById('providerLinkBindings');
             const confirm = document.getElementById('providerLinkConfirm');
+            const resume = document.getElementById('providerLinkResume');
             if (bindings) bindings.innerHTML = '';
             if (confirm) confirm.style.display = 'none';
+            if (resume) resume.style.display = 'none';
         }
 
         function refreshProviderLinkUi() {
@@ -895,6 +898,8 @@
                 const accounts = renderProviderAccountBindings(result.accounts);
                 requireProviderAuth(authSnapshot);
                 providerLinkPending = { connectionKey: stored.connectionKey, requestId: stored.requestId, accounts };
+                const resume = document.getElementById('providerLinkResume');
+                if (resume) resume.style.display = 'none';
                 providerLinkStatus('A reviewed account mapping is waiting to be completed.');
             } catch (error) {
                 if (providerAuthCurrent(authSnapshot)) providerLinkStatus(error.message, true);
@@ -980,7 +985,7 @@
             handler.open();
         }
 
-        async function resumeProviderLink() {
+        async function resumeProviderLink({ userAction = false } = {}) {
             if (window.TRANSACTION_LINK_ENABLED !== true) {
                 providerLinkStorageClear();
                 clearProviderLinkUiState();
@@ -990,7 +995,21 @@
             if (!providerAuthCurrent(authSnapshot)) return;
             const stored = providerLinkStorageRead();
             if (!stored) return;
-            if (stored.kind === 'pending') return resumeProviderLinkPending();
+            if (stored.kind === 'pending') {
+                // A stale receipt may survive a reload. Do not contact the
+                // provider service during ordinary auth/bootstrap; only an
+                // explicit user action may resume account mapping. OAuth
+                // return handling below remains an intentional continuation.
+                if (!userAction) {
+                    const card = document.getElementById('providerLinkCard');
+                    const resume = document.getElementById('providerLinkResume');
+                    if (card) card.style.display = '';
+                    if (resume) resume.style.display = '';
+                    providerLinkStatus('A reviewed account mapping is waiting. Choose Resume to continue.');
+                    return;
+                }
+                return resumeProviderLinkPending();
+            }
             const oauthReturn = new URL(window.location.href).searchParams.has('oauth_state_id') || new URL(window.location.href).searchParams.has('oauth_state');
             if (stored.kind === 'link' && oauthReturn) {
                 try { await openProviderLink(stored.mode, true); } catch (error) {
@@ -1000,7 +1019,19 @@
         }
 
         document.getElementById('providerLinkConnect')?.addEventListener('click', async () => {
-            try { await openProviderLink('create'); } catch (error) { providerLinkStatus(error.message, true); }
+            try {
+                const stored = providerLinkStorageRead();
+                if (stored && stored.kind === 'pending') {
+                    providerLinkStatus('A reviewed account mapping is waiting. Choose Resume to continue.');
+                    const resume = document.getElementById('providerLinkResume');
+                    if (resume) resume.style.display = '';
+                    return;
+                }
+                await openProviderLink('create');
+            } catch (error) { providerLinkStatus(error.message, true); }
+        });
+        document.getElementById('providerLinkResume')?.addEventListener('click', async () => {
+            try { await resumeProviderLink({ userAction: true }); } catch (error) { providerLinkStatus(error.message, true); }
         });
         document.getElementById('providerLinkUpdate')?.addEventListener('click', async () => {
             try { await openProviderLink('update'); } catch (error) { providerLinkStatus(error.message, true); }

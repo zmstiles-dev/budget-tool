@@ -2,21 +2,19 @@
 
 This guide is for a later authorized operator. The approved future site
 display name is `Stiles-Budget-Tool`, with proposed normalized slug
-`stiles-budget-tool`. No site currently exists; its ID and production
-hostname must come from the approved site-creation response and must never be
-guessed. The guide is intentionally written without actual user IDs, emails,
-credentials, site IDs, provider secrets, or production values. The current
-checkout is a local, disabled-by-default implementation.
+`stiles-budget-tool` is the approved existing site with the reviewed ID and production hostname recorded below; runtime checks still reject any different binding. The guide is intentionally written without actual user IDs, emails,
+credentials, or provider secret values. The approved site is
+`stiles-budget-tool` (`a429bdf1-47c9-4bb0-9e9d-7f5cdf8d416d`) at
+`stiles-budget-tool.netlify.app`. The checked-in frontend is now a Link-only
+candidate; the approved production backend is Link-enabled, and sync stays
+disabled. The live Link API path has not yet been exercised.
 
 ## Before setup
 
 The reviewed Netlify account dashboard shows the Free plan with 300 monthly
-credits and zero existing projects. No site exists for this application. The
-visible site-creation surface currently exposes AI, Git, or upload choices but
-no empty-site creation control. Therefore the first-publish sequence below is
-conditional on a separately approved private human operator API/CLI flow that
-can create an empty site and configure it before publishing. This guide does
-not grant, read, or use those credentials.
+credits. The approved private site exists and its separately approved one-use
+environment redeploy is complete; this guide does not grant, read, or use
+operator credentials.
 
 Confirm that the isolated Netlify site is the approved project and that the
 current Free plan still provides the documented 300 monthly credits with hard
@@ -154,20 +152,21 @@ BUDGET_FIREBASE_PROJECT_ID=budget-tool-sync
 BUDGET_HOUSEHOLD_ID=<approved protected household ID>
 BUDGET_CONNECTION_KEYS=chase,capital-one
 BUDGET_ACTIVE_CONNECTION_KEYS=
-BUDGET_LINK_ENABLED=false
+BUDGET_LINK_ENABLED=true
 BUDGET_SYNC_ENABLED=false
 ```
 
-Provider values stay unset until their separate approval:
+The approved provider settings are recorded below by name only; their secret
+values are not reproduced:
 
 ```text
-BUDGET_EXPECTED_INSTITUTION_CHASE=<verified institution ID>
-BUDGET_EXPECTED_INSTITUTION_CAPITAL_ONE=<verified institution ID>
-BUDGET_PLAID_CLIENT_ID=<approved client ID>
-PLAID_REDIRECT_URI=https://zmstiles-dev.github.io/<approved OAuth path>
+BUDGET_EXPECTED_INSTITUTION_CHASE=ins_56
+BUDGET_EXPECTED_INSTITUTION_CAPITAL_ONE=ins_128026
+BUDGET_PLAID_CLIENT_ID=<operator-entered Plaid production client ID>
+PLAID_REDIRECT_URI=https://zmstiles-dev.github.io/budget-tool/
 ```
 
-Enter the approved nonsecret production settings through the site environment
+The approved nonsecret production settings were entered through the site environment
 mechanism; keep their names and values out of chat and build output:
 
 ```text
@@ -175,7 +174,7 @@ BUDGET_FIREBASE_CLIENT_EMAIL=<runtime identity email>
 BUDGET_TOKEN_CURRENT_KEY_ID=<active AES key ID>
 ```
 
-Enter secret values only through the approved Netlify site mechanism, never in
+Secret values were entered only through the approved Netlify site mechanism, never in
 chat, source, command arguments, logs, or build output:
 
 ```text
@@ -185,26 +184,26 @@ BUDGET_PLAID_CLIENT_SECRET=<only after Link approval>
 ```
 
 The runtime uses Firebase Admin14 with the existing project and requires the
-approved dedicated runtime identity email. The application must later be
-seeded through the fixed `protectedAppUsers/{uid}` and
-`protectedAppConfig/transactionService` paths. Seed exactly the approved
-existing app users after matching each exact UID, verified lowercase email,
-and household. Do not auto-enroll the current Auth roster or create a signup
-path. No client can write or read those protected documents.
+approved dedicated runtime identity email. The application was seeded through
+the fixed `protectedAppUsers/{uid}` and `protectedAppConfig/transactionService`
+paths for exactly the approved existing app users. No client can write or read
+those protected documents.
 
 ## Activation order
 
-1. Deploy the reviewed trusted artifact with Link and sync disabled.
-2. Verify the site guard, exact origin
+1. Verify the site guard, exact origin
    `https://zmstiles-dev.github.io`, Firebase token verification, protected
    membership/config, and review/accepted server mutations.
-3. Publish the frontend endpoint only after those checks. The checked-in
-   template intentionally leaves it empty; endpoint publication is a
-   coordinated cutover.
-4. Approve Link separately after institution IDs, redirect URI, account
-   coverage, and fixed slots are verified. Link stores encrypted durable token
-   versions and never exposes credentials to the browser.
-5. Keep sync disabled until its own live activation approval.
+2. The four nonsecret Link-only settings and two provider secret destinations
+   are already configured. The exact redirect URI and `ins_56`/`ins_128026`
+   were verified by the operator.
+3. The one reviewed production redeploy is complete. Its upload acknowledgment
+   was ambiguous, so GET-only reconciliation confirmed publication; do not retry
+   or issue another deploy.
+4. Publish the checked-in Pages frontend candidate after backend readiness.
+   It enables only Link for Chase and US Capital One.
+5. Keep sync disabled and the active connection list empty until its own live
+   activation approval.
 
 ## Rollback and key rotation
 

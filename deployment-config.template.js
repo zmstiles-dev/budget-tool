@@ -4,8 +4,8 @@
  * emulator harnesses, or an explicitly injected test endpoint remain the
  * authority for their own run.
  *
- * Link and sync stay disabled until the separately reviewed backend rollout
- * applies the matching server gates and protected membership configuration.
+ * The reviewed Link-only frontend candidate enables the two explicit connection
+ * keys. Sync stays disabled until its separate backend activation approval.
  */
 (function applyBudgetDeploymentDefaults(global) {
     if (!global) return;
@@ -13,9 +13,9 @@
         // The Netlify site URL and site ID are assigned only during the approved
         // backend/frontend cutover. An unknown endpoint must fail closed.
         TRANSACTION_APPROVAL_ENDPOINT: 'https://stiles-budget-tool.netlify.app/.netlify/functions/budgetTransactions',
-        TRANSACTION_LINK_ENABLED: false,
+        TRANSACTION_LINK_ENABLED: true,
         TRANSACTION_SYNC_ENABLED: false,
-        TRANSACTION_LINK_CONNECTIONS: [],
+        TRANSACTION_LINK_CONNECTIONS: ['chase', 'capital-one'],
         TRANSACTION_SYNC_CONNECTIONS: []
     };
     Object.keys(defaults).forEach(key => {
