@@ -466,6 +466,15 @@
                     <button class="btn btn-secondary" id="providerLinkUpdate">Update connection</button>
                     <button class="btn btn-secondary" id="providerLinkResume" style="display:none;">Resume account mapping</button>
                 </div>
+                <button class="btn btn-secondary" id="providerLinkRecoveryToggle" type="button" style="margin-top:8px;">Recover unfinished connection</button>
+                <div id="providerLinkRecovery" style="display:none;margin-top:12px;padding:10px;border:1px solid var(--border);border-radius:8px;">
+                    <strong>Recover unfinished connection</strong>
+                    <label style="display:block;margin-top:8px;">Recovery code
+                        <input id="providerLinkRecoveryCode" type="text" inputmode="text" autocomplete="off" maxlength="128" spellcheck="false">
+                    </label>
+                    <small style="display:block;margin-top:6px;color:var(--muted);">Use only the approved recovery code for the selected bank. This resumes account mapping without creating another bank connection.</small>
+                    <button class="btn btn-secondary" id="providerLinkRecoveryResume" style="margin-top:8px;">Recover account mapping</button>
+                </div>
                 <div id="providerLinkBindings" style="margin-top:14px;"></div>
                 <button class="btn btn-primary" id="providerLinkConfirm" style="display:none;margin-top:12px;">Confirm account mapping</button>
                 <div id="providerLinkStatus" style="margin-top:12px;color:var(--muted);" aria-live="polite"></div>
@@ -765,6 +774,7 @@
         let syncAttemptGeneration = null;
         let bankSyncState = 'not configured';
         let providerLinkPending = null;
+        let providerLinkRecoveryConnectionKey = null;
         let activeProviderLinkHandler = null;
 
         function providerAuthSnapshot() {
@@ -806,9 +816,14 @@
             const bindings = document.getElementById('providerLinkBindings');
             const confirm = document.getElementById('providerLinkConfirm');
             const resume = document.getElementById('providerLinkResume');
+            const recovery = document.getElementById('providerLinkRecovery');
+            const recoveryId = document.getElementById('providerLinkRecoveryCode');
+            providerLinkRecoveryConnectionKey = null;
             if (bindings) bindings.innerHTML = '';
             if (confirm) confirm.style.display = 'none';
             if (resume) resume.style.display = 'none';
+            if (recovery) recovery.style.display = 'none';
+            if (recoveryId) recoveryId.value = '';
         }
 
         function refreshProviderLinkUi() {
@@ -858,10 +873,15 @@
                 const value = JSON.parse(sessionStorage.getItem(PROVIDER_LINK_STORAGE_KEY) || 'null');
                 if (!value || value.uid !== (currentUser && currentUser.uid) || !Number.isSafeInteger(value.expiresAt) || value.expiresAt <= Date.now()) {
                     sessionStorage.removeItem(PROVIDER_LINK_STORAGE_KEY);
+                    clearProviderLinkUiState();
                     return null;
                 }
                 return value;
-            } catch (_) { return null; }
+            } catch (_) {
+                providerLinkStorageClear();
+                clearProviderLinkUiState();
+                return null;
+            }
         }
         function providerLinkStorageWrite(value) {
             try { sessionStorage.setItem(PROVIDER_LINK_STORAGE_KEY, JSON.stringify(value)); } catch (_) { /* A reload can require a fresh user action. */ }
@@ -881,6 +901,58 @@
             return normalized;
         }
 
+        function showProviderLinkRecovery(connectionKey) {
+            const key = String(connectionKey || '').trim();
+            if (!providerLinkConnections().some(connection => connection.key === key)) return;
+            clearProviderLinkUiState();
+            providerLinkRecoveryConnectionKey = key;
+            const recovery = document.getElementById('providerLinkRecovery');
+            const recoveryId = document.getElementById('providerLinkRecoveryCode');
+            if (recovery) recovery.style.display = '';
+            if (recoveryId) {
+                recoveryId.value = '';
+                recoveryId.focus();
+            }
+            const selected = providerLinkConnections().find(connection => connection.key === key);
+            providerLinkStatus(`An unfinished ${selected ? selected.label : 'bank'} connection can be recovered without creating another connection.`, true);
+        }
+
+        async function recoverProviderLinkFromReceipt() {
+            if (window.TRANSACTION_LINK_ENABLED !== true) {
+                providerLinkStorageClear();
+                clearProviderLinkUiState();
+                return;
+            }
+            const authSnapshot = providerAuthSnapshot();
+            const service = window.transactionApprovalService;
+            const select = document.getElementById('providerLinkConnection');
+            const recoveryCode = document.getElementById('providerLinkRecoveryCode');
+            const requestId = String(recoveryCode && recoveryCode.value || '').trim();
+            const selectedConnectionKey = String(select && select.value || '').trim();
+            const connectionKey = providerLinkRecoveryConnectionKey || selectedConnectionKey;
+            if (!providerAuthCurrent(authSnapshot) || !service || typeof service.linkStatus !== 'function') throw new Error('Fresh authenticated server authorization is unavailable.');
+            if (selectedConnectionKey !== connectionKey) throw new Error('Select the bank that matches this recovery code.');
+            if (!/^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$/.test(requestId)) throw new Error('The recovery code is invalid.');
+            if (!providerLinkConnections().some(connection => connection.key === connectionKey)) throw new Error('The selected bank connection is not configured.');
+            try {
+                const result = await service.linkStatus(connectionKey, requestId);
+                requireProviderAuth(authSnapshot);
+                if (!select || String(select.value || '').trim() !== connectionKey) throw new Error('The selected bank changed while recovery was loading.');
+                if (!result || result.connectionKey !== connectionKey || result.status !== 'pending-binding') throw new Error('The approved recovery receipt is not awaiting mapping for the selected bank.');
+                const accounts = renderProviderAccountBindings(result.accounts);
+                requireProviderAuth(authSnapshot);
+                if (String(select.value || '').trim() !== connectionKey) throw new Error('The selected bank changed while recovery was loading.');
+                providerLinkPending = { connectionKey, requestId, accounts };
+                providerLinkStorageWrite({ kind: 'pending', uid: authSnapshot.uid, connectionKey, requestId, expiresAt: Date.now() + 10 * 60 * 1000 });
+                const recovery = document.getElementById('providerLinkRecovery');
+                if (recovery) recovery.style.display = 'none';
+                const selected = providerLinkConnections().find(connection => connection.key === connectionKey);
+                providerLinkStatus(`Recovered ${selected ? selected.label : 'bank'} account mapping. Review each returned account, then confirm.`);
+            } catch (error) {
+                if (providerAuthCurrent(authSnapshot)) providerLinkStatus(error.message, true);
+            }
+        }
+
         async function resumeProviderLinkPending() {
             if (window.TRANSACTION_LINK_ENABLED !== true) {
                 providerLinkStorageClear();
@@ -891,12 +963,21 @@
             const stored = providerLinkStorageRead();
             const service = window.transactionApprovalService;
             if (!providerAuthCurrent(authSnapshot) || !stored || stored.kind !== 'pending' || !service || typeof service.linkStatus !== 'function') return;
+            const select = document.getElementById('providerLinkConnection');
+            if (!providerLinkConnections().some(connection => connection.key === stored.connectionKey)) {
+                providerLinkStorageClear();
+                clearProviderLinkUiState();
+                return;
+            }
+            if (!select || String(select.value || '').trim() !== stored.connectionKey) throw new Error('Select the bank that matches this recovery code.');
             try {
                 const result = await service.linkStatus(stored.connectionKey, stored.requestId);
                 requireProviderAuth(authSnapshot);
-                if (result.status !== 'pending-binding') { providerLinkStorageClear(); return; }
+                if (String(select.value || '').trim() !== stored.connectionKey) throw new Error('The selected bank changed while recovery was loading.');
+                if (result.connectionKey !== stored.connectionKey || result.status !== 'pending-binding') { providerLinkStorageClear(); return; }
                 const accounts = renderProviderAccountBindings(result.accounts);
                 requireProviderAuth(authSnapshot);
+                if (String(select.value || '').trim() !== stored.connectionKey) throw new Error('The selected bank changed while recovery was loading.');
                 providerLinkPending = { connectionKey: stored.connectionKey, requestId: stored.requestId, accounts };
                 const resume = document.getElementById('providerLinkResume');
                 if (resume) resume.style.display = 'none';
@@ -1003,6 +1084,13 @@
                 if (!userAction) {
                     const card = document.getElementById('providerLinkCard');
                     const resume = document.getElementById('providerLinkResume');
+                    const select = document.getElementById('providerLinkConnection');
+                    if (!providerLinkConnections().some(connection => connection.key === stored.connectionKey)) {
+                        providerLinkStorageClear();
+                        clearProviderLinkUiState();
+                        return;
+                    }
+                    if (select) select.value = stored.connectionKey;
                     if (card) card.style.display = '';
                     if (resume) resume.style.display = '';
                     providerLinkStatus('A reviewed account mapping is waiting. Choose Resume to continue.');
@@ -1028,10 +1116,25 @@
                     return;
                 }
                 await openProviderLink('create');
-            } catch (error) { providerLinkStatus(error.message, true); }
+            } catch (error) {
+                providerLinkStatus(error.message, true);
+                const select = document.getElementById('providerLinkConnection');
+                if (error && error.diagnostic && error.diagnostic.status === 409) showProviderLinkRecovery(select && select.value);
+            }
         });
         document.getElementById('providerLinkResume')?.addEventListener('click', async () => {
             try { await resumeProviderLink({ userAction: true }); } catch (error) { providerLinkStatus(error.message, true); }
+        });
+        document.getElementById('providerLinkRecoveryResume')?.addEventListener('click', async () => {
+            try { await recoverProviderLinkFromReceipt(); } catch (error) { providerLinkStatus(error.message, true); }
+        });
+        document.getElementById('providerLinkRecoveryToggle')?.addEventListener('click', () => {
+            const select = document.getElementById('providerLinkConnection');
+            showProviderLinkRecovery(select && select.value);
+        });
+        document.getElementById('providerLinkConnection')?.addEventListener('change', () => {
+            clearProviderLinkUiState();
+            providerLinkStatus('Select Recover unfinished connection again for the new bank.');
         });
         document.getElementById('providerLinkUpdate')?.addEventListener('click', async () => {
             try { await openProviderLink('update'); } catch (error) { providerLinkStatus(error.message, true); }
