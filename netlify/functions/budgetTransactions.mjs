@@ -66,6 +66,18 @@ function dependencyRequire(name, dependencies) {
     return require(name);
 }
 
+async function dependencyImport(name, dependencies) {
+    if (dependencies && typeof dependencies[name] === 'function') return dependencies[name]();
+    // Keep these imports literal so the trusted prebuilt Netlify bundle can
+    // inline the Admin auth bridge.  A variable import would force the
+    // production runtime to load firebase-admin/auth through CommonJS;
+    // firebase-admin 14's jwks-rsa dependency then requires ESM jose.
+    if (name === 'firebase-admin/app') return import('firebase-admin/app');
+    if (name === 'firebase-admin/auth') return import('firebase-admin/auth');
+    if (name === 'firebase-admin/firestore') return import('firebase-admin/firestore');
+    return import(name);
+}
+
 function text(value) {
     return String(value ?? '').trim();
 }
@@ -240,7 +252,7 @@ function parseRuntimeConfig(environment, trustedContext) {
     return Object.freeze({ projectId, householdId, connectionKeys, activeKeys, expectedInstitutions, secretNames, redirectUri, linkEnabled, syncEnabled, firebaseProjectId, firebaseClientEmail, firebasePrivateKey, provider: null });
 }
 
-function initializeFirebase(config, dependencies, diagnostics = {}) {
+async function initializeFirebase(config, dependencies, diagnostics = {}) {
     const state = firebaseDiagnosticState(config);
     const reportState = () => {
         if (typeof diagnostics.onDiagnosticState === 'function') diagnostics.onDiagnosticState(Object.freeze({ ...state }));
@@ -253,13 +265,13 @@ function initializeFirebase(config, dependencies, diagnostics = {}) {
     let appModule;
     let authModule;
     let firestoreModule;
-    appModule = dependencyRequire('firebase-admin/app', dependencies);
+    appModule = await dependencyImport('firebase-admin/app', dependencies);
     state.sdkApp = true;
     reportState();
-    authModule = dependencyRequire('firebase-admin/auth', dependencies);
+    authModule = await dependencyImport('firebase-admin/auth', dependencies);
     state.sdkAuth = true;
     reportState();
-    firestoreModule = dependencyRequire('firebase-admin/firestore', dependencies);
+    firestoreModule = await dependencyImport('firebase-admin/firestore', dependencies);
     state.sdkFirestore = true;
     reportState();
     const appName = 'budgetTransactions';
@@ -372,7 +384,7 @@ export async function createRuntime(options = {}) {
         reportStage(DIAGNOSTIC_STAGES.FIREBASE_INITIALIZATION);
         firebase = options.firebase;
     } else {
-        firebase = initializeFirebase(config, dependencies, {
+        firebase = await initializeFirebase(config, dependencies, {
             onDiagnosticStage: reportStage,
             onDiagnosticState: options.onDiagnosticState
         });

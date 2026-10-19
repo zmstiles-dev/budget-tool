@@ -168,7 +168,14 @@ async function main() {
         format: 'esm',
         platform: 'node',
         target: 'node24',
-        packages: 'external',
+        // Bundle Firebase Admin's auth bridge.  Admin 14's auth path contains
+        // a CommonJS jwks-rsa require of ESM jose; leaving the whole SDK
+        // external makes that path fail in Netlify's Node 24 function loader.
+        // Keep the large service clients external and ship their reviewed
+        // production closure below.
+        packages: 'bundle',
+        external: ['firebase-admin/app', 'firebase-admin/firestore', 'plaid', '@google-cloud/firestore', 'google-gax', 'google-auth-library'],
+        banner: { js: "import { createRequire as __netlifyCreateRequire } from 'node:module'; const require = __netlifyCreateRequire(import.meta.url);" },
         sourcemap: false,
         metafile: true,
         logLevel: 'warning'
@@ -195,7 +202,11 @@ async function main() {
     const restoreNodeResolution = isolateNodeResolution();
     try {
         const { zipFunctions } = await import(pathToFileURL(zipItPath).href);
-        fs.copyFileSync(entry, path.join(staging, 'budgetTransactions.mjs'));
+        // Feed the same bundle whose digest is recorded in manifest.json into
+        // ZISI.  Staging the raw source here would silently undo the auth
+        // bridge above and put the CommonJS jwks-rsa -> ESM jose failure back
+        // into the uploaded ZIP.
+        fs.copyFileSync(bundle, path.join(staging, 'budgetTransactions.mjs'));
         fs.mkdirSync(path.join(staging, '_runtime'));
         for (const entryName of runtimeEntries) copySafeTree(path.join(runtimeSource, entryName), path.join(staging, '_runtime', entryName));
         fs.copyFileSync(path.join(netlifyDir, 'package.json'), path.join(staging, 'package.json'));

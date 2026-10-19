@@ -259,7 +259,7 @@ function assertRedactedDiagnostic(records, expectedStage, expectedErrorCode = 'u
         'firebase-admin/auth': () => ({ getAuth() {} }),
         'firebase-admin/firestore': () => ({ getFirestore() {} })
     };
-    await assertRejectsMessage(Promise.resolve().then(() => runtime.initializeFirebase({ firebaseProjectId: 'budget-tool-sync', firebaseClientEmail: 'budget-transactions-runtime@budget-tool-sync.iam.gserviceaccount.com', firebasePrivateKey: 'synthetic' }, wrongAppDependencies)), /Firebase runtime credentials/);
+    await assertRejectsMessage(runtime.initializeFirebase({ firebaseProjectId: 'budget-tool-sync', firebaseClientEmail: 'budget-transactions-runtime@budget-tool-sync.iam.gserviceaccount.com', firebasePrivateKey: 'synthetic' }, wrongAppDependencies), /Firebase runtime credentials/);
     const providerOverrides = { BUDGET_LINK_ENABLED: 'true', BUDGET_EXPECTED_INSTITUTION_CHASE: 'ins-synthetic-chase', BUDGET_EXPECTED_INSTITUTION_CAPITAL_ONE: 'ins-synthetic-capital', PLAID_REDIRECT_URI: 'https://zmstiles-dev.github.io/oauth/callback' };
     const providerConfig = runtime.parseRuntimeConfig({ ...base, ...providerOverrides }, runtime.assertTrustedProductionContext(trustedContext(), base));
     assert.equal(typeof providerConfig.provider.readClientSecret, 'function');
@@ -449,7 +449,7 @@ function assertRedactedDiagnostic(records, expectedStage, expectedErrorCode = 'u
         'firebase-admin/auth': () => ({ getAuth: app => ({ app }) }),
         'firebase-admin/firestore': () => ({ getFirestore: app => ({ app }) })
     };
-    const initializedFirebase = runtime.initializeFirebase(firebaseConfig, successfulFirebaseDependencies, {
+    const initializedFirebase = await runtime.initializeFirebase(firebaseConfig, successfulFirebaseDependencies, {
         onDiagnosticStage: stage => firebaseStages.push(stage),
         onDiagnosticState: state => firebaseStates.push(state)
     });
@@ -470,7 +470,7 @@ function assertRedactedDiagnostic(records, expectedStage, expectedErrorCode = 'u
         ...base,
         BUDGET_FIREBASE_PRIVATE_KEY: '-----BEGIN PRIVATE KEY-----\nsynthetic\n-----END PRIVATE KEY-----'
     }, runtime.assertTrustedProductionContext(trustedContext(), base));
-    runtime.initializeFirebase(realNewlineConfig, {
+    await runtime.initializeFirebase(realNewlineConfig, {
         ...successfulFirebaseDependencies,
         'firebase-admin/app': () => ({
             getApps: () => [],
@@ -509,7 +509,7 @@ function assertRedactedDiagnostic(records, expectedStage, expectedErrorCode = 'u
     assertRedactedDiagnostic(appValidationFailureResult.records, 'firebase-app-validation', 'unknown', { sdkApp: true, sdkAuth: true, sdkFirestore: true, appLookup: true, appValidated: false });
 
     const existingFirebaseStages = [];
-    const existingFirebase = runtime.initializeFirebase(firebaseConfig, {
+    const existingFirebase = await runtime.initializeFirebase(firebaseConfig, {
         'firebase-admin/app': () => ({
             getApps: () => [{ name: 'budgetTransactions', options: { projectId: 'budget-tool-sync', credential: { clientEmail: 'budget-transactions-runtime@budget-tool-sync.iam.gserviceaccount.com' } } }],
             cert: () => { throw new Error('existing app must not parse a new certificate'); },
@@ -752,6 +752,46 @@ function assertRedactedDiagnostic(records, expectedStage, expectedErrorCode = 'u
         try {
             const isolatedReview = await isolated.default(new Request('https://synthetic.example/.netlify/functions/budgetTransactions/review', { method: 'GET', headers: { authorization: 'Bearer malformed', origin: 'https://zmstiles-dev.github.io' } }), trustedContext());
             assert.equal(isolatedReview.status, 401, 'isolated archive must resolve the real Admin14 handler before rejecting malformed authentication');
+            // Netlify's Node 24 loader rejects the CommonJS jwks-rsa -> ESM
+            // jose edge unless the trusted bundle carries the auth bridge.
+            // Exercise the extracted upload with that loader mode, using only
+            // an in-memory synthetic credential and a malformed bearer token.
+            // The old external-SDK archive returned 503/ERR_REQUIRE_ESM here;
+            // the bundled auth path must reach the normal 401 boundary.
+            const childCode = `
+                import { default as handler } from ${JSON.stringify(pathToFileURL(isolatedSource).href)};
+                const context = { deploy: { context: 'production', published: true }, site: { id: 'site-synthetic', url: 'https://synthetic.example' } };
+                const response = await handler(new Request('https://synthetic.example/.netlify/functions/budgetTransactions/review', { method: 'GET', headers: { authorization: 'Bearer malformed', origin: 'https://zmstiles-dev.github.io' } }), context);
+                const body = await response.text();
+                if (response.status !== 401 || !body.includes('Authenticated user is not an existing app user.')) process.exit(2);
+                console.log(JSON.stringify({ status: response.status }));
+            `;
+            const childEnvironment = {
+                Path: process.env.Path || process.env.PATH,
+                SystemRoot: process.env.SystemRoot,
+                TEMP: proofParent,
+                TMP: proofParent,
+                TMPDIR: proofParent,
+                BUDGET_NETLIFY_SITE_ID: isolatedEnvironment.BUDGET_NETLIFY_SITE_ID,
+                BUDGET_NETLIFY_SITE_HOST: isolatedEnvironment.BUDGET_NETLIFY_SITE_HOST,
+                BUDGET_FIREBASE_PROJECT_ID: isolatedEnvironment.BUDGET_FIREBASE_PROJECT_ID,
+                BUDGET_FIREBASE_CLIENT_EMAIL: isolatedEnvironment.BUDGET_FIREBASE_CLIENT_EMAIL,
+                BUDGET_FIREBASE_PRIVATE_KEY: isolatedEnvironment.BUDGET_FIREBASE_PRIVATE_KEY,
+                BUDGET_HOUSEHOLD_ID: isolatedEnvironment.BUDGET_HOUSEHOLD_ID,
+                BUDGET_CONNECTION_KEYS: isolatedEnvironment.BUDGET_CONNECTION_KEYS,
+                BUDGET_ACTIVE_CONNECTION_KEYS: isolatedEnvironment.BUDGET_ACTIVE_CONNECTION_KEYS,
+                BUDGET_LINK_ENABLED: isolatedEnvironment.BUDGET_LINK_ENABLED,
+                BUDGET_SYNC_ENABLED: isolatedEnvironment.BUDGET_SYNC_ENABLED,
+                FIREBASE_AUTH_EMULATOR_HOST: isolatedEnvironment.FIREBASE_AUTH_EMULATOR_HOST
+            };
+            const childOutput = execFileSync(process.execPath, ['--no-experimental-require-module', '--input-type=module', '-e', childCode], {
+                cwd: proofRoot,
+                env: childEnvironment,
+                encoding: 'utf8',
+                stdio: ['ignore', 'pipe', 'pipe']
+            });
+            assert.match(childOutput, /"status":401/);
+            assert.doesNotMatch(childOutput, /ERR_REQUIRE_ESM/);
         } finally {
             for (const [key, value] of Object.entries(previousEnvironment)) {
                 if (value === undefined) delete process.env[key]; else process.env[key] = value;
