@@ -115,8 +115,9 @@ whose `budgetTransactions` value is the SHA-256 digest of
 bytes to
 `PUT /api/v1/deploys/{deploy_id}/functions/budgetTransactions?runtime=nodejs24.x&invocation_mode=stream`.
 The deploy manifest must also carry a `functions_config` entry for
-`budgetTransactions` with `runtime: nodejs24.x`, `invocation_mode: stream`, and
-`build_data` identifying the v2 API and bootstrap version. The reviewed
+`budgetTransactions` with `build_data` identifying the v2 API and bootstrap
+version. The `runtime=nodejs24.x&invocation_mode=stream` query belongs on the
+function ZIP upload request. The reviewed
 archive's generated function metadata records the same contract:
 `runtimeAPIVersion=2`, `runtimeVersion=nodejs24.x`, `invocationMode=stream`,
 `entryFilename=___netlify-entry-point.mjs`, and the ZISI v2 bootstrap version.
