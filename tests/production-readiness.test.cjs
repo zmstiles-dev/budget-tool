@@ -16,12 +16,12 @@ function clone(value) {
 class FakeDb {
     constructor() { this.docs = new Map(); this.transactionQueue = Promise.resolve(); }
     collection(name) {
+        const docs = this.docs;
         return { doc: id => {
             const key = `${name}/${id}`;
             return {
                 async get() {
-                    const value = this.docs;
-                    return { exists: value.has(key), data: () => clone(value.get(key)) };
+                    return { exists: docs.has(key), data: () => clone(docs.get(key)) };
                 }
             };
         } };
@@ -159,6 +159,190 @@ function request(method, url, body, origin) {
     assert.equal(pendingCalls.exchange, 1, 'retry after binding validation must reuse the pinned Item');
     assert.equal(pendingSecrets.addCalls.length, 1, 'retry after binding validation must not add another secret version');
     assert.equal(pendingCalls.accounts, 4, 'retry may refresh the validated provider account list');
+
+    const cleanupDb = new FakeDb();
+    thisDb = cleanupDb;
+    const cleanupAuth = { uid: 'cleanup-owner', email: 'cleanup@example.test', householdId: 'household-1', tokenVerified: true };
+    const cleanupFinal = { connectionKey: 'chase', ownerUid: 'different-approved-owner', householdId: cleanupAuth.householdId, itemId: 'working-chase-item', secretName: 'projects/budget-tool-sync/secrets/chase', secretVersion: 'projects/budget-tool-sync/secrets/chase/versions/7', enabled: false, accounts: [{ account_id: 'chase-checking', name: 'Checking Account', type: 'depository', subtype: 'checking', balances: { iso_currency_code: 'USD' } }], accountMap: { 'chase-checking': 'Checking Account' } };
+    const cleanupFinalMappingHash = production.mappingMetadataDigest('chase', cleanupFinal);
+    cleanupDb.docs.set('protectedAppConfig/transactionService', {
+        allowed: true,
+        householdId: cleanupAuth.householdId,
+        syncActivation: { enabled: false },
+        cleanupPlan: {
+            enabled: true,
+            householdId: cleanupAuth.householdId,
+            targetConnectionKey: 'capital-one',
+            targetItemId: 'wrong-item',
+            targetOwnerUid: cleanupAuth.uid,
+            targetInstitution: 'ins_56',
+            targetExchangeId: 'wrong-exchange',
+            targetSecretName: 'projects/budget-tool-sync/secrets/capital-one',
+            targetSecretVersion: 'projects/budget-tool-sync/secrets/capital-one/versions/1',
+            finalConnectionKey: 'chase',
+            finalItemId: 'working-chase-item',
+            finalInstitution: 'ins_56',
+            finalOwnerUid: cleanupFinal.ownerUid,
+            replacementOwnerUid: cleanupFinal.ownerUid,
+            finalSecretName: cleanupFinal.secretName,
+            finalSecretVersion: cleanupFinal.secretVersion,
+            finalMappingHash: cleanupFinalMappingHash
+        }
+    });
+    cleanupDb.docs.set('protectedConnections/capital-one', {
+        connectionKey: 'capital-one', ownerUid: cleanupAuth.uid, householdId: cleanupAuth.householdId,
+        pendingExchange: { exchangeId: 'wrong-exchange', itemId: 'wrong-item', secretName: 'projects/budget-tool-sync/secrets/capital-one', secretVersion: 'projects/budget-tool-sync/secrets/capital-one/versions/1' },
+        exchangeLedger: { 'wrong-exchange': { status: 'pending-binding', itemId: 'wrong-item', secretVersion: 'projects/budget-tool-sync/secrets/capital-one/versions/1' } }
+    });
+    cleanupDb.docs.set('protectedConnections/chase', cleanupFinal);
+    cleanupDb.docs.set('shared/data', { transactions: [{ id: 'accepted-cleanup-sentinel', date: 'opaque-old-date' }] });
+    const cleanupSeedDocs = new Map([...cleanupDb.docs.entries()].map(([key, value]) => [key, clone(value)]));
+    function seededCleanupDb() {
+        const seeded = new FakeDb();
+        seeded.docs = new Map([...cleanupSeedDocs.entries()].map(([key, value]) => [key, clone(value)]));
+        return seeded;
+    }
+    const cleanupConnections = new production.FirestoreProviderConnectionRepository({ db: cleanupDb, allowedConnectionKeys: ['capital-one', 'chase'] });
+    const cleanupPlan = production.createProtectedDisconnectPlan({ db: cleanupDb, householdId: cleanupAuth.householdId });
+    let itemRemoveCalls = 0;
+    let replacementLinkCalls = 0;
+    const cleanupLifecycle = new production.PlaidLinkLifecycle({
+        client: {
+            async itemGet() { return { data: { item: { item_id: 'wrong-item', institution_id: 'ins_56' } } }; },
+            async itemRemove() { itemRemoveCalls += 1; return { data: { request_id: 'cleanup-request' } }; },
+            async linkTokenCreate() { replacementLinkCalls += 1; return { data: { link_token: `replacement-link-${replacementLinkCalls}` } }; }
+        },
+        connections: cleanupConnections,
+        tokenStore: { async resolveAccessToken() { return 'cleanup-access-token'; } },
+        accountAliases: ['Ven X'],
+        cleanupPlan,
+        clock: () => '2026-10-18T12:00:00.000Z'
+    });
+    const replacementAuth = { uid: 'different-approved-owner', email: 'replacement@example.test', householdId: cleanupAuth.householdId, tokenVerified: true };
+    const cleanupFinalBefore = clone(cleanupFinal);
+    const acceptedCleanupBefore = clone((await cleanupDb.collection('shared').doc('data').get()).data());
+    await assert.rejects(() => cleanupLifecycle.createLinkToken(replacementAuth, { connectionKey: 'capital-one', sessionId: 'before-removal' }), /authorized|reconciliation/);
+    await assert.rejects(() => cleanupLifecycle.createLinkToken(cleanupAuth, { connectionKey: 'capital-one', sessionId: 'pending-removal' }), /reconciliation/);
+    assert.deepEqual(await cleanupLifecycle.disconnect(cleanupAuth, { connectionKey: 'capital-one' }), { status: 'removed', connectionKey: 'capital-one' });
+    assert.equal(itemRemoveCalls, 1, 'targeted cleanup must remove the provider Item once');
+    const cleanedTarget = (await cleanupDb.collection('protectedConnections').doc('capital-one').get()).data();
+    assert.equal(cleanedTarget.pendingExchange, undefined);
+    assert.equal(cleanedTarget.exchangeLedger['wrong-exchange'], undefined);
+    assert.equal(cleanedTarget.disconnectLedger['wrong-exchange'].status, 'removed');
+    assert.equal(cleanedTarget.retiredCleanup.status, 'removed');
+    assert.equal(cleanedTarget.retiredCleanup.oldOwnerUid, cleanupAuth.uid);
+    assert.equal(cleanedTarget.retiredCleanup.replacementOwnerUid, replacementAuth.uid);
+    assert.deepEqual((await cleanupDb.collection('protectedConnections').doc('chase').get()).data(), cleanupFinalBefore, 'cleanup must preserve the working Chase record');
+    assert.deepEqual((await cleanupDb.collection('shared').doc('data').get()).data(), acceptedCleanupBefore, 'cleanup must preserve accepted history');
+
+    const concurrentDb = seededCleanupDb();
+    thisDb = concurrentDb;
+    let concurrentRemoveCalls = 0;
+    const concurrentConnections = new production.FirestoreProviderConnectionRepository({ db: concurrentDb, allowedConnectionKeys: ['capital-one', 'chase'] });
+    const concurrentPlan = production.createProtectedDisconnectPlan({ db: concurrentDb, householdId: cleanupAuth.householdId });
+    const concurrentLifecycle = new production.PlaidLinkLifecycle({
+        client: { async itemGet() { return { data: { item: { item_id: 'wrong-item', institution_id: 'ins_56' } } }; }, async itemRemove() { concurrentRemoveCalls += 1; return { data: { request_id: 'concurrent-cleanup' } }; } },
+        connections: concurrentConnections, tokenStore: { async resolveAccessToken() { return 'cleanup-access-token'; } }, accountAliases: ['Ven X'], cleanupPlan: concurrentPlan,
+        clock: () => '2026-10-18T12:00:00.000Z'
+    });
+    const concurrentResults = await Promise.allSettled([concurrentLifecycle.disconnect(cleanupAuth, { connectionKey: 'capital-one' }), concurrentLifecycle.disconnect(cleanupAuth, { connectionKey: 'capital-one' })]);
+    assert.equal(concurrentRemoveCalls, 1, 'concurrent cleanup claims must dispatch one provider removal');
+    assert.equal(concurrentResults.filter(result => result.status === 'fulfilled').length, 1);
+    assert.equal(concurrentResults.filter(result => result.status === 'rejected').length, 1);
+
+    const providerFailureDb = seededCleanupDb();
+    thisDb = providerFailureDb;
+    let providerFailureRemoveCalls = 0;
+    const providerFailureConnections = new production.FirestoreProviderConnectionRepository({ db: providerFailureDb, allowedConnectionKeys: ['capital-one', 'chase'] });
+    const providerFailurePlan = production.createProtectedDisconnectPlan({ db: providerFailureDb, householdId: cleanupAuth.householdId });
+    const providerFailureLifecycle = new production.PlaidLinkLifecycle({
+        client: { async itemGet() { return { data: { item: { item_id: 'wrong-item', institution_id: 'ins_56' } } }; }, async itemRemove() { providerFailureRemoveCalls += 1; throw new Error('synthetic provider dispatch failure'); } },
+        connections: providerFailureConnections, tokenStore: { async resolveAccessToken() { return 'cleanup-access-token'; } }, accountAliases: ['Ven X'], cleanupPlan: providerFailurePlan,
+        clock: () => '2026-10-18T12:00:00.000Z'
+    });
+    await assert.rejects(() => providerFailureLifecycle.disconnect(cleanupAuth, { connectionKey: 'capital-one' }), /Provider cleanup failed/);
+    await assert.rejects(() => providerFailureLifecycle.disconnect(cleanupAuth, { connectionKey: 'capital-one' }), /reconciliation/);
+    assert.equal(providerFailureRemoveCalls, 1, 'a provider failure after dispatch must block a second removal');
+
+    const claimRaceDb = seededCleanupDb();
+    thisDb = claimRaceDb;
+    let claimRaceRemoveCalls = 0;
+    const claimRaceConnections = new production.FirestoreProviderConnectionRepository({ db: claimRaceDb, allowedConnectionKeys: ['capital-one', 'chase'] });
+    const claimRacePlan = production.createProtectedDisconnectPlan({ db: claimRaceDb, householdId: cleanupAuth.householdId });
+    let claimRaceReads = 0;
+    const claimRaceLifecycle = new production.PlaidLinkLifecycle({
+        client: { async itemGet() { claimRaceReads += 1; if (claimRaceReads === 1) { const config = claimRaceDb.docs.get('protectedAppConfig/transactionService'); config.cleanupPlan.finalMappingHash = 'f'.repeat(64); } return { data: { item: { item_id: 'wrong-item', institution_id: 'ins_56' } } }; }, async itemRemove() { claimRaceRemoveCalls += 1; return { data: { request_id: 'must-not-dispatch' } }; } },
+        connections: claimRaceConnections, tokenStore: { async resolveAccessToken() { return 'cleanup-access-token'; } }, accountAliases: ['Ven X'], cleanupPlan: claimRacePlan,
+        clock: () => '2026-10-18T12:00:00.000Z'
+    });
+    await assert.rejects(() => claimRaceLifecycle.disconnect(cleanupAuth, { connectionKey: 'capital-one' }), /preconditions/);
+    assert.equal(claimRaceRemoveCalls, 0, 'claim-time plan changes must block provider removal');
+
+    const commitFailureDb = seededCleanupDb();
+    thisDb = commitFailureDb;
+    const commitFailureRunTransaction = FakeDb.prototype.runTransaction;
+    let commitFailureTransactions = 0;
+    commitFailureDb.runTransaction = async callback => { commitFailureTransactions += 1; if (commitFailureTransactions === 2) throw new Error('synthetic metadata commit failure'); return commitFailureRunTransaction.call(commitFailureDb, callback); };
+    let commitFailureRemoveCalls = 0;
+    const commitFailureConnections = new production.FirestoreProviderConnectionRepository({ db: commitFailureDb, allowedConnectionKeys: ['capital-one', 'chase'] });
+    const commitFailurePlan = production.createProtectedDisconnectPlan({ db: commitFailureDb, householdId: cleanupAuth.householdId });
+    const commitFailureLifecycle = new production.PlaidLinkLifecycle({
+        client: { async itemGet() { return { data: { item: { item_id: 'wrong-item', institution_id: 'ins_56' } } }; }, async itemRemove() { commitFailureRemoveCalls += 1; return { data: { request_id: 'commit-failure-cleanup' } }; } },
+        connections: commitFailureConnections, tokenStore: { async resolveAccessToken() { return 'cleanup-access-token'; } }, accountAliases: ['Ven X'], cleanupPlan: commitFailurePlan,
+        clock: () => '2026-10-18T12:00:00.000Z'
+    });
+    await assert.rejects(() => commitFailureLifecycle.disconnect(cleanupAuth, { connectionKey: 'capital-one' }), /reconciliation/);
+    await assert.rejects(() => commitFailureLifecycle.disconnect(cleanupAuth, { connectionKey: 'capital-one' }), /reconciliation/);
+    assert.equal(commitFailureRemoveCalls, 1, 'a metadata commit failure after removal must remain terminal');
+
+    const wrongProviderDb = seededCleanupDb();
+    thisDb = wrongProviderDb;
+    let wrongProviderRemoveCalls = 0;
+    const wrongProviderConnections = new production.FirestoreProviderConnectionRepository({ db: wrongProviderDb, allowedConnectionKeys: ['capital-one', 'chase'] });
+    const wrongProviderPlan = production.createProtectedDisconnectPlan({ db: wrongProviderDb, householdId: cleanupAuth.householdId });
+    const wrongProviderLifecycle = new production.PlaidLinkLifecycle({
+        client: { async itemGet() { return { data: { item: { item_id: 'different-item', institution_id: 'ins_56' } } }; }, async itemRemove() { wrongProviderRemoveCalls += 1; return { data: { request_id: 'must-not-dispatch' } }; } },
+        connections: wrongProviderConnections, tokenStore: { async resolveAccessToken() { return 'cleanup-access-token'; } }, accountAliases: ['Ven X'], cleanupPlan: wrongProviderPlan,
+        clock: () => '2026-10-18T12:00:00.000Z'
+    });
+    await assert.rejects(() => wrongProviderLifecycle.disconnect(cleanupAuth, { connectionKey: 'capital-one' }), /does not match cleanup target/);
+    assert.equal(wrongProviderRemoveCalls, 0, 'provider identity mismatch must not call item removal');
+    const retryDb = new FakeDb();
+    thisDb = retryDb;
+    retryDb.docs.set('protectedConnections/capital-one', cleanedTarget);
+    let retryLinkCalls = 0;
+    const retryLifecycle = new production.PlaidLinkLifecycle({
+        client: { async linkTokenCreate() { retryLinkCalls += 1; if (retryLinkCalls === 1) throw new Error('synthetic provider failure'); return { data: { link_token: 'replacement-link-retry' } }; } },
+        connections: new production.FirestoreProviderConnectionRepository({ db: retryDb, allowedConnectionKeys: ['capital-one'], clock: () => '2026-10-18T12:00:00.000Z' }),
+        tokenStore: { async resolveAccessToken() { return 'unused'; } },
+        accountAliases: ['Ven X'],
+        clock: () => '2026-10-18T12:00:00.000Z'
+    });
+    await assert.rejects(() => retryLifecycle.createLinkToken(replacementAuth, { connectionKey: 'capital-one', sessionId: 'replacement-retry-session' }), /Plaid Link request failed/);
+    const failedRetry = (await retryDb.collection('protectedConnections').doc('capital-one').get()).data();
+    assert.equal(failedRetry.retiredCleanup.replacementClaim.status, 'consumed');
+    assert.equal(failedRetry.linkReservation.status, 'needs-reconciliation');
+    const retried = await retryLifecycle.createLinkToken(replacementAuth, { connectionKey: 'capital-one', sessionId: 'replacement-retry-session' });
+    assert.equal(retried.linkToken, 'replacement-link-retry', 'the designated owner may resume the same failed Link-token session without a second Item claim');
+    assert.equal(retryLinkCalls, 2);
+    const recoveryGuardDb = new FakeDb();
+    const recoveryGuardRecord = JSON.parse(JSON.stringify(cleanedTarget));
+    recoveryGuardRecord.linkReservation = { status: 'needs-reconciliation', sessionId: 'guard-session' };
+    recoveryGuardRecord.retiredCleanup.replacementClaim = { status: 'consumed', consumedAt: '2026-10-18T12:00:00.000Z' };
+    recoveryGuardDb.docs.set('protectedConnections/capital-one', recoveryGuardRecord);
+    thisDb = recoveryGuardDb;
+    const recoveryGuardConnections = new production.FirestoreProviderConnectionRepository({ db: recoveryGuardDb, allowedConnectionKeys: ['capital-one'], clock: () => '2026-10-18T12:00:00.000Z' });
+    await assert.rejects(() => recoveryGuardConnections.reserveLinkToken('capital-one', cleanupAuth, 'guard-session', 'create', 60000), /authorized/,
+        'A same-session recovery must recheck the designated replacement owner inside the transaction.');
+    thisDb = cleanupDb;
+    await assert.rejects(() => cleanupLifecycle.createLinkToken(cleanupAuth, { connectionKey: 'capital-one', sessionId: 'old-owner-after-removal' }), /authorized/);
+    const replacementResult = await cleanupLifecycle.createLinkToken(replacementAuth, { connectionKey: 'capital-one', sessionId: 'replacement-session' });
+    assert.equal(replacementResult.linkToken, 'replacement-link-1');
+    assert.equal(replacementLinkCalls, 1, 'only the designated replacement owner may consume the retired-slot claim');
+    await assert.rejects(() => cleanupLifecycle.createLinkToken(replacementAuth, { connectionKey: 'capital-one', sessionId: 'replacement-retry' }), /reconciliation/);
+    assert.equal(replacementLinkCalls, 1, 'a consumed retired-slot claim cannot create a second Item');
+    await assert.rejects(() => cleanupLifecycle.disconnect(cleanupAuth, { connectionKey: 'capital-one' }), /configured|preconditions/);
+    assert.equal(itemRemoveCalls, 1, 'a completed cleanup cannot be retried');
 
     const ledgerDb = new FakeDb();
     thisDb = ledgerDb;
@@ -366,6 +550,81 @@ function request(method, url, body, origin) {
     await disabledHandler(request('POST', '/link-token', {}, production.PRODUCTION_ORIGIN), disabledResponse);
     assert.equal(JSON.parse(disabledResponse.body).error, 'Provider Link operations are disabled by server configuration.');
 
+    const readinessResponse = response();
+    const readinessHandler = production.createProductionHttpHandler({
+        authenticate: async () => auth,
+        lifecycle: { createLinkToken: async () => ({}) },
+        reviewHandler: async () => {},
+        syncReadiness: async actor => ({ ready: true, revision: 3, cutoffDate: '2026-10-09', connectionKeys: ['capital-one', 'chase'], actor: actor.uid })
+    });
+    await readinessHandler(request('GET', '/sync-readiness', undefined, production.PRODUCTION_ORIGIN), readinessResponse);
+    assert.equal(readinessResponse.statusCode, 200);
+    assert.deepEqual(JSON.parse(readinessResponse.body), { ready: true, revision: 3, cutoffDate: '2026-10-09', connectionKeys: ['capital-one', 'chase'] });
+
+    const syncReadinessDb = new FakeDb();
+    thisDb = syncReadinessDb;
+    const syncReadinessAuth = { uid: 'sync-user', email: 'sync@example.test', householdId: 'sync-household', tokenVerified: true };
+    const syncConnections = {
+        chase: { connectionKey: 'chase', ownerUid: syncReadinessAuth.uid, householdId: syncReadinessAuth.householdId, enabled: true, itemId: 'synthetic-chase-item', secretName: 'projects/budget-tool-sync/secrets/chase', secretVersion: 'projects/budget-tool-sync/secrets/chase/versions/1', linkReservation: { status: 'issued', sessionId: 'synthetic-session' }, exchangeLedger: { 'synthetic-exchange': { status: 'complete', result: { itemId: 'synthetic-chase-item', secretName: 'projects/budget-tool-sync/secrets/chase', secretVersion: 'projects/budget-tool-sync/secrets/chase/versions/1' } } }, accounts: [{ account_id: 'chase-checking', name: 'Checking Account', type: 'depository', subtype: 'checking', balances: { iso_currency_code: 'USD' } }, { account_id: 'chase-cff', name: 'CFF', type: 'credit', subtype: 'credit card', balances: { iso_currency_code: 'USD' } }, { account_id: 'chase-cfu', name: 'CFU', type: 'credit', subtype: 'credit card', balances: { iso_currency_code: 'USD' } }, { account_id: 'chase-csp', name: 'CSP', type: 'credit', subtype: 'credit card', balances: { iso_currency_code: 'USD' } }], accountMap: { 'chase-checking': 'Checking Account', 'chase-cff': 'CFF', 'chase-cfu': 'CFU', 'chase-csp': 'CSP' } },
+        'capital-one': { connectionKey: 'capital-one', ownerUid: syncReadinessAuth.uid, householdId: syncReadinessAuth.householdId, enabled: true, itemId: 'synthetic-capital-item', secretName: 'projects/budget-tool-sync/secrets/capital-one', secretVersion: 'projects/budget-tool-sync/secrets/capital-one/versions/1', accounts: [{ account_id: 'capital-account', name: 'Ven X', type: 'credit', subtype: 'credit card', balances: { iso_currency_code: 'USD' } }], accountMap: { 'capital-account': 'Ven X' } }
+    };
+    for (const [key, value] of Object.entries(syncConnections)) syncReadinessDb.docs.set(`protectedConnections/${key}`, value);
+    const syncProofs = Object.fromEntries(Object.entries(syncConnections).map(([key, value]) => [key, { ownerUid: syncReadinessAuth.uid, householdId: syncReadinessAuth.householdId, itemId: value.itemId, expectedInstitution: key === 'chase' ? 'ins_56' : 'ins_128026', policyRevision: 1, mappingHash: production.mappingMetadataDigest(key, value) }]));
+    syncReadinessDb.docs.set('protectedAppConfig/transactionService', { allowed: true, householdId: syncReadinessAuth.householdId, syncActivation: { enabled: true, cutoffDate: '2026-10-09', revision: 1, connections: syncProofs } });
+    const syncReadiness = production.createProtectedSyncReadiness({ db: syncReadinessDb, householdId: syncReadinessAuth.householdId, expectedInstitutions: { chase: 'ins_56', 'capital-one': 'ins_128026' }, mappingPolicies: { chase: { expectedCount: 4, aliases: { 'Checking Account': { type: 'depository', subtype: 'checking', currency: 'USD' }, CFF: { type: 'credit', subtype: 'credit card', currency: 'USD' }, CFU: { type: 'credit', subtype: 'credit card', currency: 'USD' }, CSP: { type: 'credit', subtype: 'credit card', currency: 'USD' } } }, 'capital-one': { expectedCount: 1, aliases: { 'Ven X': { type: 'credit', subtype: 'credit card', currency: 'USD' } } } }, cutoverDate: '2026-10-09' });
+    const syncReady = await syncReadiness(syncReadinessAuth, 'chase');
+    assert.equal(syncReady.ready, true);
+    assert.deepEqual(syncReady.connectionKeys, ['capital-one', 'chase']);
+    const reservationWithoutCompletion = clone(syncConnections.chase);
+    delete reservationWithoutCompletion.exchangeLedger;
+    syncReadinessDb.docs.set('protectedConnections/chase', reservationWithoutCompletion);
+    await assert.rejects(() => syncReadiness(syncReadinessAuth, 'chase'), /not ready/, 'an issued Link reservation must be backed by its completed exchange ledger');
+    syncReadinessDb.docs.set('protectedConnections/chase', syncConnections.chase);
+    const stableMappingHash = production.mappingMetadataDigest('chase', syncConnections.chase);
+    const volatileOnly = { ...syncConnections.chase, updateTime: 'later', cursor: 'changed', lease: { owner: 'temporary' }, lastSync: { at: 'later' } };
+    assert.equal(production.mappingMetadataDigest('chase', volatileOnly), stableMappingHash, 'activation proof must ignore volatile sync fields');
+    const policyChanged = { ...syncConnections.chase, mappingPolicyRevision: 2 };
+    assert.notEqual(production.mappingMetadataDigest('chase', policyChanged), stableMappingHash, 'activation proof must bind mapping policy revision');
+    syncConnections['capital-one'].ownerUid = 'capital-user';
+    syncProofs['capital-one'].ownerUid = 'capital-user';
+    syncProofs['capital-one'].mappingHash = production.mappingMetadataDigest('capital-one', syncConnections['capital-one']);
+    syncReadinessDb.docs.set('protectedConnections/capital-one', syncConnections['capital-one']);
+    syncReadinessDb.docs.set('protectedAppConfig/transactionService', { allowed: true, householdId: syncReadinessAuth.householdId, syncActivation: { enabled: true, cutoffDate: '2026-10-09', revision: 1, connections: syncProofs } });
+    assert.equal((await syncReadiness(syncReadinessAuth)).ready, true, 'household readiness must allow distinct approved connection owners');
+    await assert.rejects(() => syncReadiness(syncReadinessAuth, 'capital-one'), /not ready/);
+    syncReadinessDb.docs.get('protectedAppConfig/transactionService').syncActivation.enabled = false;
+    assert.equal((await syncReadiness(syncReadinessAuth, 'chase')).ready, false, 'disabled activation must be a benign readiness result');
+    syncReadinessDb.docs.get('protectedAppConfig/transactionService').syncActivation.enabled = true;
+    syncReadinessDb.docs.get('protectedConnections/chase').accountMap['chase-cff'] = 'CSP';
+    await assert.rejects(() => syncReadiness(syncReadinessAuth, 'chase'), /not ready/);
+
+    let productionReadinessCalls = 0;
+    let productionProviderCalls = 0;
+    const productionConnections = new production.FirestoreProviderConnectionRepository({ db: syncReadinessDb, allowedConnectionKeys: ['chase', 'capital-one'] });
+    const productionSync = production.createProductionService({
+        db: syncReadinessDb,
+        householdId: syncReadinessAuth.householdId,
+        allowedUsers: [syncReadinessAuth.uid],
+        authenticate: async () => syncReadinessAuth,
+        connections: productionConnections,
+        tokenStore: { async resolveAccessToken() { return 'synthetic-access-token'; } },
+        plaidClient: { async linkTokenCreate() { return { data: { link_token: 'disabled-test' } }; } },
+        provider: { async fetchDelta() { productionProviderCalls += 1; return { pages: [{ records: [] }], cursor: 'unexpected' }; } },
+        syncEnabled: true,
+        activeConnectionKeys: ['chase'],
+        accountAliases: ['Checking Account', 'CFF', 'CFU', 'CSP', 'Ven X'],
+        expectedInstitutions: { chase: 'ins_56', 'capital-one': 'ins_128026' },
+        syncReadiness: async () => { productionReadinessCalls += 1; return { ready: false, cutoffDate: '2026-10-09' }; }
+    });
+    const blockedSyncResponse = response();
+    await productionSync.handler(request('POST', '/sync', { connectionKey: 'chase' }, production.PRODUCTION_ORIGIN), blockedSyncResponse);
+    assert.equal(blockedSyncResponse.statusCode, 500);
+    assert.equal(productionReadinessCalls, 1);
+    assert.equal(productionProviderCalls, 0, 'production /sync must gate the provider on every request');
+    const disconnectGetResponse = response();
+    await productionSync.handler(request('GET', '/link-disconnect', undefined, production.PRODUCTION_ORIGIN), disconnectGetResponse);
+    assert.equal(disconnectGetResponse.statusCode, 404, 'disconnect aliases must reject non-POST methods before authentication or provider work');
+
     const browserRequests = [];
     const browserClient = new backend.BrowserApprovalClient({
         endpoint: 'https://functions.example',
@@ -379,7 +638,8 @@ function request(method, url, body, origin) {
     await browserClient.exchangeLink('chase', 'public-browser', { account: 'Checking Account' }, 'exchange-browser');
     await browserClient.linkStatus('chase', 'exchange-browser');
     await browserClient.updateLinkToken('chase');
-    assert.deepEqual(browserRequests.map(value => new URL(value.url).pathname), ['/link-token', '/link-exchange', '/link-status', '/link-update']);
+    await browserClient.syncReadiness();
+    assert.deepEqual(browserRequests.map(value => new URL(value.url).pathname), ['/link-token', '/link-exchange', '/link-status', '/link-update', '/sync-readiness']);
     assert.equal(JSON.parse(browserRequests[1].options.body).publicToken, 'public-browser');
 
     const browserSource = fs.readFileSync(path.join(projectRoot, 'index.html'), 'utf8');
@@ -387,12 +647,13 @@ function request(method, url, body, origin) {
     assert.deepEqual(deploymentConfig, {
         TRANSACTION_APPROVAL_ENDPOINT: 'https://stiles-budget-tool.netlify.app/.netlify/functions/budgetTransactions',
         TRANSACTION_LINK_ENABLED: true,
-        TRANSACTION_SYNC_ENABLED: false,
+        TRANSACTION_SYNC_ENABLED: true,
         TRANSACTION_LINK_CONNECTIONS: ['chase', 'capital-one'],
-        TRANSACTION_SYNC_CONNECTIONS: []
+        TRANSACTION_LINK_EXPECTED_INSTITUTIONS: { chase: 'ins_56', 'capital-one': 'ins_128026' },
+        TRANSACTION_SYNC_CONNECTIONS: ['chase', 'capital-one']
     });
     const deploymentPreview = JSON.parse(execFileSync(process.execPath, ['scripts/preview-deployment-config.cjs'], { cwd: projectRoot, encoding: 'utf8' }));
-    assert.deepEqual(deploymentPreview, { endpoint: deploymentConfig.TRANSACTION_APPROVAL_ENDPOINT, linkEnabled: true, syncEnabled: false, linkConnections: ['chase', 'capital-one'], syncConnections: [] });
+    assert.deepEqual(deploymentPreview, { endpoint: deploymentConfig.TRANSACTION_APPROVAL_ENDPOINT, linkEnabled: true, syncEnabled: true, linkConnections: ['chase', 'capital-one'], syncConnections: ['chase', 'capital-one'] });
     assert.match(browserSource, /deployment-config\.template\.js/);
     assert.match(browserSource, /receivedRedirectUri/);
     assert.match(browserSource, /sessionStorage/);

@@ -5,9 +5,11 @@ display name is `Stiles-Budget-Tool`, with proposed normalized slug
 `stiles-budget-tool` is the approved existing site with the reviewed ID and production hostname recorded below; runtime checks still reject any different binding. The guide is intentionally written without actual user IDs, emails,
 credentials, or provider secret values. The approved site is
 `stiles-budget-tool` (`a429bdf1-47c9-4bb0-9e9d-7f5cdf8d416d`) at
-`stiles-budget-tool.netlify.app`. The checked-in frontend is now a Link-only
-candidate; the approved production backend is Link-enabled, and sync stays
-disabled. The live Link API path has not yet been exercised.
+`stiles-budget-tool.netlify.app`. The checked-in frontend and approved target
+configuration expose Link plus both sync capability keys; that target is
+pending the next controlled deployment. The currently deployed environment
+remains the historical Link-only state with sync disabled and no active
+connections.
 
 ## Before setup
 
@@ -143,7 +145,8 @@ runtime selection is a platform setting rather than a `netlify.toml` build
 command; verify it on the approved site before uploading the prebuilt ZIP.
 Do not execute that setting change during local readiness work.
 
-Required nonsecret configuration is:
+Approved target nonsecret configuration for the next controlled deployment
+(not the current live values) is:
 
 ```text
 BUDGET_NETLIFY_SITE_ID=<approved site ID>
@@ -151,9 +154,9 @@ BUDGET_NETLIFY_SITE_HOST=<approved production hostname>
 BUDGET_FIREBASE_PROJECT_ID=budget-tool-sync
 BUDGET_HOUSEHOLD_ID=<approved protected household ID>
 BUDGET_CONNECTION_KEYS=chase,capital-one
-BUDGET_ACTIVE_CONNECTION_KEYS=
+BUDGET_ACTIVE_CONNECTION_KEYS=chase,capital-one
 BUDGET_LINK_ENABLED=true
-BUDGET_SYNC_ENABLED=false
+BUDGET_SYNC_ENABLED=true
 ```
 
 The approved provider settings are recorded below by name only; their secret
@@ -166,8 +169,9 @@ BUDGET_PLAID_CLIENT_ID=<operator-entered Plaid production client ID>
 PLAID_REDIRECT_URI=https://zmstiles-dev.github.io/budget-tool/
 ```
 
-The approved nonsecret production settings were entered through the site environment
-mechanism; keep their names and values out of chat and build output:
+The approved target nonsecret production settings are listed by name only;
+they are pending the next controlled deployment. Keep their names and values
+out of chat and build output:
 
 ```text
 BUDGET_FIREBASE_CLIENT_EMAIL=<runtime identity email>
@@ -194,16 +198,20 @@ those protected documents.
 1. Verify the site guard, exact origin
    `https://zmstiles-dev.github.io`, Firebase token verification, protected
    membership/config, and review/accepted server mutations.
-2. The four nonsecret Link-only settings and two provider secret destinations
-   are already configured. The exact redirect URI and `ins_56`/`ins_128026`
-   were verified by the operator.
+2. The Link and sync capability settings and two provider secret destinations
+   are approved target configuration for the next controlled deployment. The
+   exact redirect URI and `ins_56`/`ins_128026` were verified by the operator.
 3. The one reviewed production redeploy is complete. Its upload acknowledgment
    was ambiguous, so GET-only reconciliation confirmed publication; do not retry
    or issue another deploy.
 4. Publish the checked-in Pages frontend candidate after backend readiness.
-   It enables only Link for Chase and US Capital One.
-5. Keep sync disabled and the active connection list empty until its own live
-   activation approval.
+   It enables Link and exposes the two reviewed sync capability keys for Chase
+   and US Capital One.
+5. Keep the currently deployed Link-only environment unchanged until the
+   controlled target deployment is approved. After that deployment, durable
+   sync activation and the proven connection map must remain empty until their
+   own activation proof; every sync request must pass the fresh protected
+   readiness check first.
 
 ## Rollback and key rotation
 

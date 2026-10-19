@@ -24,9 +24,10 @@ assert.deepEqual(candidate.TRANSACTION_SYNC_CONNECTIONS, []);
 
 assert.equal(template.TRANSACTION_APPROVAL_ENDPOINT, candidate.endpoint);
 assert.equal(template.TRANSACTION_LINK_ENABLED, true);
-assert.equal(template.TRANSACTION_SYNC_ENABLED, false);
+assert.equal(template.TRANSACTION_SYNC_ENABLED, true);
 assert.deepEqual(template.TRANSACTION_LINK_CONNECTIONS, ['chase', 'capital-one']);
-assert.deepEqual(template.TRANSACTION_SYNC_CONNECTIONS, []);
+assert.deepEqual(template.TRANSACTION_LINK_EXPECTED_INSTITUTIONS, { chase: 'ins_56', 'capital-one': 'ins_128026' });
+assert.deepEqual(template.TRANSACTION_SYNC_CONNECTIONS, ['chase', 'capital-one']);
 assert.match(indexSource, /deployment-config\.template\.js/);
 assert.doesNotMatch(indexSource, /deployment-config\.production-candidate\.example\.js/);
 
@@ -34,12 +35,13 @@ const activeBrowser = {};
 vm.runInNewContext(fs.readFileSync(templatePath, 'utf8'), { window: activeBrowser });
 assert.equal(activeBrowser.TRANSACTION_APPROVAL_ENDPOINT, candidate.endpoint);
 assert.equal(activeBrowser.TRANSACTION_LINK_ENABLED, true);
-assert.equal(activeBrowser.TRANSACTION_SYNC_ENABLED, false);
+assert.equal(activeBrowser.TRANSACTION_SYNC_ENABLED, true);
 assert.deepEqual(Array.from(activeBrowser.TRANSACTION_LINK_CONNECTIONS), ['chase', 'capital-one']);
-assert.deepEqual(Array.from(activeBrowser.TRANSACTION_SYNC_CONNECTIONS), []);
+assert.equal(JSON.stringify(activeBrowser.TRANSACTION_LINK_EXPECTED_INSTITUTIONS), JSON.stringify({ chase: 'ins_56', 'capital-one': 'ins_128026' }));
+assert.deepEqual(Array.from(activeBrowser.TRANSACTION_SYNC_CONNECTIONS), ['chase', 'capital-one']);
 assert.equal(activeBrowser.__BUDGET_TOOL_DEPLOYMENT_CONFIG__.endpoint, candidate.endpoint);
 assert.equal(activeBrowser.__BUDGET_TOOL_DEPLOYMENT_CONFIG__.linkEnabled, true);
-assert.equal(activeBrowser.__BUDGET_TOOL_DEPLOYMENT_CONFIG__.syncEnabled, false);
+assert.equal(activeBrowser.__BUDGET_TOOL_DEPLOYMENT_CONFIG__.syncEnabled, true);
 
 const browser = { TRANSACTION_APPROVAL_ENDPOINT: '', TRANSACTION_LINK_ENABLED: false, TRANSACTION_SYNC_ENABLED: false };
 vm.runInNewContext(fs.readFileSync(candidatePath, 'utf8'), { window: browser });
@@ -48,4 +50,4 @@ assert.equal(browser.TRANSACTION_LINK_ENABLED, false);
 assert.equal(browser.TRANSACTION_SYNC_ENABLED, false);
 assert.equal(browser.__BUDGET_TOOL_PRODUCTION_CUTOVER_CANDIDATE__.endpoint, candidate.endpoint);
 
-console.log('PASS: approved template enables Link-only Chase/Capital One defaults; sync and inert candidate remain disabled.');
+console.log('PASS: approved template enables Link plus both sync capability keys behind the durable readiness gate; inert candidate remains disabled.');

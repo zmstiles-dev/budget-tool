@@ -78,9 +78,11 @@ rules, membership, and frontend cutover are coordinated. There is no
 administrator review role and no browser access to provider credentials.
 
 The exact browser origin remains
-`https://zmstiles-dev.github.io`. `deployment-config.template.js` now carries the reviewed Link-only endpoint
-default, enables only the explicit Chase and US Capital One connection keys,
-and keeps sync disabled with an empty sync connection list. The backend Link
+`https://zmstiles-dev.github.io`. `deployment-config.template.js` now carries the reviewed endpoint
+default, enables Link and both explicit Chase and US Capital One connection
+keys, and exposes both sync capability keys. The durable protected activation
+gate remains the authority and keeps provider sync inactive until verified.
+The backend Link
 gate is configured in the approved production environment; this frontend
 change does not perform provider requests or create an Item.
 
@@ -118,8 +120,8 @@ not used by the Netlify runtime and are not read by local tests.
 
 ## Link and sync lifecycle
 
-The checked-in frontend Link-only candidate enables the two explicit connection
-keys, while sync remains disabled. The backend Link gate is configured and
+The checked-in frontend enables Link and the two explicit sync connection
+keys, while the durable sync gate remains disabled until activation. The backend Link gate is configured and
 deployed, but its provider API path remains untested; when exercised it uses
 the existing durable lifecycle:
 
@@ -164,7 +166,8 @@ operator evidence; never guess or replace pinned site metadata. Never put
 secret values in chat, source, CLI arguments, build logs, Git configuration,
 previews, or pull requests.
 
-Nonsecret values recorded by the approved operator:
+Approved target nonsecret values for the next controlled deployment (not the
+current live values) are:
 
 ```text
 BUDGET_NETLIFY_SITE_ID=<approved isolated site ID>
@@ -172,11 +175,11 @@ BUDGET_NETLIFY_SITE_HOST=<approved production hostname>
 BUDGET_FIREBASE_PROJECT_ID=budget-tool-sync
 BUDGET_HOUSEHOLD_ID=<approved protected household ID>
 BUDGET_CONNECTION_KEYS=chase,capital-one
-BUDGET_ACTIVE_CONNECTION_KEYS=
+BUDGET_ACTIVE_CONNECTION_KEYS=chase,capital-one
 BUDGET_EXPECTED_INSTITUTION_CHASE=ins_56
 BUDGET_EXPECTED_INSTITUTION_CAPITAL_ONE=ins_128026
 BUDGET_LINK_ENABLED=true
-BUDGET_SYNC_ENABLED=false
+BUDGET_SYNC_ENABLED=true
 BUDGET_PLAID_CLIENT_ID=<approved client ID>
 PLAID_REDIRECT_URI=https://zmstiles-dev.github.io/budget-tool/
 ```
@@ -237,8 +240,9 @@ Current local delta inventory:
 * `scripts/prepare-netlify.cjs`, `scripts/bundle-netlify.cjs`,
   `netlify/netlify.toml`, and
   `netlify/public/.gitkeep` — isolated manual artifact assembly.
-* `deployment-config.template.js` — reviewed endpoint with Link-only Chase/Capital
-  One defaults, sync disabled, and an empty sync connection list.
+* `deployment-config.template.js` — reviewed endpoint with Link and sync
+   capability keys for Chase and Capital One; durable activation still gates
+   provider sync and the proven connection map remains empty until activation.
 * `tests/netlify-runtime.test.cjs` — focused guard, adapter, vault, payload,
   rotation, tamper, concurrency, bundle import, SDK version, inventory, and
   redacted startup-stage/healthy-auth coverage, including extracted ZIP
@@ -316,18 +320,24 @@ modified. The temporary Netlify CLI grant was revoked afterward.
 
 The earlier private published route returned the generic service-unavailable
 response. That historical revision predates the local-only redacted diagnostic
-and the later approved Link-only redeploy recorded below. The diagnostic and
-Link-only environment changes were subsequently reviewed; the live Link API
+and the later approved historical Link-only redeploy recorded below. The
+diagnostic and historical Link-only environment changes were subsequently
+reviewed; the live Link API
 path still has not been exercised. No additional publish, upload, redeploy,
 Link or sync activation, frontend endpoint change, visibility change, bank
 operation, or migration is authorized without a separate review.
 
-## Current Link-only status — 2026-10-19
+## Current Link and gated sync status — 2026-10-19
 
-The approved frontend candidate enables Link for `chase` and `capital-one`, with
-server-verified institution markers `ins_56` and `ins_128026`. The production
-backend environment is Link-enabled; sync and active connection state remain
-empty/disabled. The single redeploy (`6ad6462cbe96255113bf6364`) was confirmed
-by GET-only reconciliation after an ambiguous upload acknowledgment. The
-frontend Pages publication and live Link API/Item test remain pending; this
-checkout does not expose provider credentials or create an Item.
+The approved frontend candidate enables Link for `chase` and `capital-one` and
+exposes both reviewed sync capability keys, with server-verified institution
+markers `ins_56` and `ins_128026`. These are approved target values pending the
+next controlled deployment. The current production environment remains the
+historical Link-only state with sync disabled and no active connections. The
+single redeploy (`6ad6462cbe96255113bf6364`) was confirmed by GET-only
+reconciliation after an ambiguous upload acknowledgment.
+
+The approved target configuration keeps durable protected activation false and
+the proven connection map empty until its separate activation proof. Any
+earlier Link-only wording in this document describes the current deployed
+state, while the capability-key wording above describes the pending target.

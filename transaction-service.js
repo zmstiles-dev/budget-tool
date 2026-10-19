@@ -66,6 +66,7 @@ function createBudgetService(options) {
         connectionResolver: opts.connectionResolver,
         connectionEnabled: opts.connectionEnabled,
         connectionDisabled: opts.connectionDisabled,
+        syncReadiness: opts.syncReadiness,
         maxDurationMs: opts.maxDurationMs,
         cooldownMs: opts.cooldownMs,
         clock: opts.clock
@@ -78,6 +79,7 @@ function createBudgetService(options) {
         allowedUsers: opts.allowedUsers,
         householdId: opts.householdId,
         householdForUser: opts.householdForUser,
+        syncReadiness: opts.syncReadiness,
         allowedOrigins: opts.allowedOrigins,
         maxBodyBytes: opts.maxBodyBytes,
         errorDiagnostic: opts.errorDiagnostic

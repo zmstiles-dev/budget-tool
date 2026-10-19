@@ -273,6 +273,8 @@ function assertRedactedDiagnostic(records, expectedStage, expectedErrorCode = 'u
         firebase: { app: {}, auth: {}, db: new FakeFirestore() },
         production: {
             createFirestoreExistingAppUserResolver: () => async () => ({ allowed: true, householdId: 'stiles-budget' }),
+            createProtectedDisconnectPlan: () => async () => { throw new Error('synthetic cleanup plan is not configured'); },
+            createProtectedSyncReadiness: () => async () => ({ ready: false, revision: null, cutoffDate: '2026-10-09', connectionKeys: ['capital-one', 'chase'] }),
             createProductionService: options => ({ handler: async () => {}, options })
         },
         transactionConfig: { accountDisplayNames: ['Checking Account'] }

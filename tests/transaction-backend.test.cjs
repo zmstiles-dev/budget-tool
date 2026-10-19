@@ -372,6 +372,25 @@ const synced = await sync.runOnOpen(auth, 'chase', { runId: 'run-1', cursor: 'cu
 assert.equal(synced.staged, 2);
 await assert.rejects(() => sync.runOnOpen({ ...other, email: 'reviewer@example.test' }, 'chase', { runId: 'wrong-owner' }), /authorized for this provider connection|cooldown/);
 await assert.rejects(() => sync.runOnOpen(auth, 'chase', { runId: 'run-2', cursor: 'cursor-2' }), /cooldown/);
+let readinessCalls = 0;
+let readinessOpen = true;
+let readinessProviderCalls = 0;
+const guardedSync = new OnOpenSyncService({
+    enabled: true,
+    cutoverDate: '2026-01-01',
+    syncReadiness: async () => {
+        readinessCalls += 1;
+        return { ready: readinessOpen, cutoffDate: '2026-01-01' };
+    },
+    provider: { fetchDelta: async () => { readinessProviderCalls += 1; return { pages: [{ records: [] }], cursor: 'guarded-cursor' }; } },
+    clock: () => 1000,
+    connectionOwners: { chase: 'user-1' }
+});
+await guardedSync.runOnOpen(auth, 'chase', { runId: 'guarded-1' });
+readinessOpen = false;
+await assert.rejects(() => guardedSync.runOnOpen(auth, 'chase', { runId: 'guarded-2' }), /activation is not ready/);
+assert.equal(readinessCalls, 2);
+assert.equal(readinessProviderCalls, 1, 'a disabled fresh activation check must prevent provider access');
 clock.value = 100;
 const failedProvider = new OnOpenSyncService({ enabled: true, cutoverDate: '2026-01-01', provider: { fetchDelta: async () => { throw new Error('provider failure'); } }, clock: () => clock.value, connectionOwners: { 'cap-one': 'user-1' } });
 await assert.rejects(() => failedProvider.runOnOpen(auth, 'cap-one', { runId: 'run-fail' }), /provider failure/);
