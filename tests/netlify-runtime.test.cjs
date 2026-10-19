@@ -99,18 +99,26 @@ async function captureConsoleErrors(callback) {
     }
 }
 
-function assertRedactedDiagnostic(records, expectedStage) {
+function assertRedactedDiagnostic(records, expectedStage, expectedErrorCode = 'unknown', expectedFirebase = {}) {
     assert.equal(records.length, 1, `expected one redacted diagnostic for ${expectedStage}`);
     assert.equal(records[0].length, 1);
     const diagnostic = JSON.parse(String(records[0][0]));
     assert.equal(diagnostic.event, 'budgetTransactions.handler_failure');
     assert.equal(diagnostic.stage, expectedStage);
+    assert.equal(diagnostic.errorCode, expectedErrorCode);
     assert.equal(diagnostic.clientResponse, 'generic');
     assert.equal(diagnostic.redacted, true);
     assert.equal(diagnostic.message, '[REDACTED]');
     assert.equal(diagnostic.stack, '[REDACTED]');
     assert.equal(diagnostic.hasRequest, true);
     assert.equal(diagnostic.hasContext, true);
+    assert.deepEqual(Object.keys(diagnostic.firebase).sort(), [
+        'appInitialized', 'appLookup', 'appValidated', 'authInitialized', 'clientMatches', 'clientPresent', 'credentialParsed',
+        'firestoreInitialized', 'keyPem', 'keyPresent', 'projectIdMatches', 'projectIdPresent',
+        'sdkApp', 'sdkAuth', 'sdkFirestore'
+    ]);
+    assert.ok(Object.values(diagnostic.firebase).every(value => typeof value === 'boolean'));
+    for (const [key, value] of Object.entries(expectedFirebase)) assert.equal(diagnostic.firebase[key], value, `unexpected ${key}`);
     assert.doesNotMatch(JSON.stringify(diagnostic), /sensitive|secret|uid|email|private/i);
 }
 
@@ -244,6 +252,7 @@ function assertRedactedDiagnostic(records, expectedStage) {
 
     const base = productionEnv();
     assert.deepEqual(runtime.parseRuntimeConfig(base, runtime.assertTrustedProductionContext(trustedContext(), base)).linkEnabled, false);
+    await assertRejectsMessage(Promise.resolve().then(() => runtime.parseRuntimeConfig({ ...base, BUDGET_FIREBASE_PROJECT_ID: 'wrong-project' }, runtime.assertTrustedProductionContext(trustedContext(), base))), /Production provider configuration/);
     await assertRejectsMessage(Promise.resolve().then(() => runtime.parseRuntimeConfig({ ...base, BUDGET_FIREBASE_CLIENT_EMAIL: 'other-runtime@budget-tool-sync.iam.gserviceaccount.com' }, runtime.assertTrustedProductionContext(trustedContext(), base))), /Firebase runtime credentials/);
     const wrongAppDependencies = {
         'firebase-admin/app': () => ({ getApps: () => [{ name: 'budgetTransactions', options: { projectId: 'wrong-project', credential: { clientEmail: 'budget-transactions-runtime@budget-tool-sync.iam.gserviceaccount.com' } } }] }),
@@ -350,8 +359,10 @@ function assertRedactedDiagnostic(records, expectedStage) {
     assert.equal(wrongMethod.status, 405);
     const wrongHost = await adapterHandler(new Request('https://other.example/review', { method: 'GET' }), trustedContext());
     assert.equal(wrongHost.status, 503);
-    const warmPreview = await adapterHandler(new Request('https://synthetic.example/review', { method: 'GET' }), { deploy: { context: 'deploy-preview', published: true }, site: trustedContext().site });
-    assert.equal(warmPreview.status, 503, 'every request must revalidate the production context after warm initialization');
+    const warmPreviewResult = await captureConsoleErrors(() => adapterHandler(new Request('https://synthetic.example/review', { method: 'GET' }), { deploy: { context: 'deploy-preview', published: true }, site: trustedContext().site }));
+    assert.equal(warmPreviewResult.value.status, 503, 'every request must revalidate the production context after warm initialization');
+    assertRedactedDiagnostic(warmPreviewResult.records, 'trusted-context');
+    assert.equal(Object.values(JSON.parse(String(warmPreviewResult.records[0][0])).firebase).every(value => value === false), true);
 
     const trustedContextFailure = runtime.createNetlifyHandler({
         environment: base,
@@ -384,11 +395,166 @@ function assertRedactedDiagnostic(records, expectedStage) {
 
     const firebaseInitializationFailure = runtime.createNetlifyHandler({
         environment: base,
-        dependencies: { 'firebase-admin/app': () => { throw new Error('synthetic secret and uid must never be logged'); } }
+        dependencies: { 'firebase-admin/app': () => { const error = new Error('synthetic secret and uid must never be logged'); error.code = 'MODULE_NOT_FOUND'; throw error; } }
     });
     const firebaseInitializationFailureResult = await captureConsoleErrors(() => firebaseInitializationFailure(new Request('https://synthetic.example/review', { method: 'GET' }), trustedContext()));
     assert.equal(firebaseInitializationFailureResult.value.status, 503);
-    assertRedactedDiagnostic(firebaseInitializationFailureResult.records, 'firebase-initialization');
+    assertRedactedDiagnostic(firebaseInitializationFailureResult.records, 'firebase-sdk-imports', 'MODULE_NOT_FOUND', {
+        projectIdPresent: true,
+        projectIdMatches: true,
+        clientPresent: true,
+        clientMatches: true,
+        keyPresent: true,
+        keyPem: true
+    });
+    const warmHostFailureResult = await captureConsoleErrors(() => firebaseInitializationFailure(new Request('https://other.example/review', { method: 'GET' }), trustedContext()));
+    assert.equal(warmHostFailureResult.value.status, 503);
+    assertRedactedDiagnostic(warmHostFailureResult.records, 'request-host');
+    assert.equal(Object.values(JSON.parse(String(warmHostFailureResult.records[0][0])).firebase).every(value => value === false), true);
+
+    const syntheticError = (code, message) => Object.assign(new Error(message), { code });
+    const sdkImportFailure = (moduleName, flags) => runtime.createNetlifyHandler({
+        environment: base,
+        dependencies: {
+            'firebase-admin/app': () => ({ getApps: () => [], cert: () => ({ synthetic: true }), initializeApp: () => ({ synthetic: true }) }),
+            'firebase-admin/auth': () => ({ getAuth: () => ({ synthetic: true }) }),
+            'firebase-admin/firestore': () => ({ getFirestore: () => ({ synthetic: true }) }),
+            [moduleName]: () => { throw syntheticError('MODULE_NOT_FOUND', `synthetic ${moduleName} import failure`); }
+        }
+    });
+    const authSdkImportResult = await captureConsoleErrors(() => sdkImportFailure('firebase-admin/auth', { sdkApp: true, sdkAuth: false, sdkFirestore: false })(new Request('https://synthetic.example/review', { method: 'GET' }), trustedContext()));
+    assert.equal(authSdkImportResult.value.status, 503);
+    assertRedactedDiagnostic(authSdkImportResult.records, 'firebase-sdk-imports', 'MODULE_NOT_FOUND', { sdkApp: true, sdkAuth: false, sdkFirestore: false });
+    const firestoreSdkImportResult = await captureConsoleErrors(() => sdkImportFailure('firebase-admin/firestore', { sdkApp: true, sdkAuth: true, sdkFirestore: false })(new Request('https://synthetic.example/review', { method: 'GET' }), trustedContext()));
+    assert.equal(firestoreSdkImportResult.value.status, 503);
+    assertRedactedDiagnostic(firestoreSdkImportResult.records, 'firebase-sdk-imports', 'MODULE_NOT_FOUND', { sdkApp: true, sdkAuth: true, sdkFirestore: false });
+
+    const malformedKeyHandler = runtime.createNetlifyHandler({
+        environment: { ...base, BUDGET_FIREBASE_PRIVATE_KEY: 'synthetic-malformed-key' }
+    });
+    const malformedKeyResult = await captureConsoleErrors(() => malformedKeyHandler(new Request('https://synthetic.example/review', { method: 'GET' }), trustedContext()));
+    assert.equal(malformedKeyResult.value.status, 503);
+    assertRedactedDiagnostic(malformedKeyResult.records, 'firebase-certificate', 'app/invalid-credential', { keyPresent: true, keyPem: false, sdkApp: true, sdkAuth: true, sdkFirestore: true });
+
+    const firebaseConfig = runtime.parseRuntimeConfig(base, runtime.assertTrustedProductionContext(trustedContext(), base));
+    const firebaseStages = [];
+    const firebaseStates = [];
+    let certificateArguments;
+    const successfulFirebaseDependencies = {
+        'firebase-admin/app': () => ({
+            getApps: () => [],
+            cert: value => { certificateArguments = value; return { synthetic: true }; },
+            initializeApp: (options, name) => ({ name, options })
+        }),
+        'firebase-admin/auth': () => ({ getAuth: app => ({ app }) }),
+        'firebase-admin/firestore': () => ({ getFirestore: app => ({ app }) })
+    };
+    const initializedFirebase = runtime.initializeFirebase(firebaseConfig, successfulFirebaseDependencies, {
+        onDiagnosticStage: stage => firebaseStages.push(stage),
+        onDiagnosticState: state => firebaseStates.push(state)
+    });
+    assert.deepEqual(firebaseStages, [
+        'firebase-sdk-imports', 'firebase-app-lookup', 'firebase-app-validation', 'firebase-certificate', 'firebase-app-initialization', 'firebase-auth', 'firebase-firestore'
+    ]);
+    assert.equal(typeof initializedFirebase.auth, 'object');
+    assert.equal(typeof initializedFirebase.db, 'object');
+    assert.match(certificateArguments.privateKey, /\nsynthetic\n/);
+    assert.equal(firebaseStates.at(-1).credentialParsed, true);
+    assert.equal(firebaseStates.at(-1).appLookup, true);
+    assert.equal(firebaseStates.at(-1).appValidated, true);
+    assert.equal(firebaseStates.at(-1).appInitialized, true);
+    assert.equal(firebaseStates.at(-1).authInitialized, true);
+    assert.equal(firebaseStates.at(-1).firestoreInitialized, true);
+    let realNewlineCertificateArguments;
+    const realNewlineConfig = runtime.parseRuntimeConfig({
+        ...base,
+        BUDGET_FIREBASE_PRIVATE_KEY: '-----BEGIN PRIVATE KEY-----\nsynthetic\n-----END PRIVATE KEY-----'
+    }, runtime.assertTrustedProductionContext(trustedContext(), base));
+    runtime.initializeFirebase(realNewlineConfig, {
+        ...successfulFirebaseDependencies,
+        'firebase-admin/app': () => ({
+            getApps: () => [],
+            cert: value => { realNewlineCertificateArguments = value; return { synthetic: true }; },
+            initializeApp: (options, name) => ({ name, options })
+        })
+    });
+    assert.equal(realNewlineCertificateArguments.privateKey, realNewlineConfig.firebasePrivateKey);
+
+    const appLookupFailureDependencies = {
+        'firebase-admin/app': () => ({
+            getApps: () => { throw syntheticError('app/invalid-argument', 'synthetic app lookup failure'); },
+            cert: () => ({ synthetic: true }),
+            initializeApp: () => ({ synthetic: true })
+        }),
+        'firebase-admin/auth': () => ({ getAuth: app => ({ app }) }),
+        'firebase-admin/firestore': () => ({ getFirestore: app => ({ app }) })
+    };
+    const appLookupFailureHandler = runtime.createNetlifyHandler({ environment: base, dependencies: appLookupFailureDependencies });
+    const appLookupFailureResult = await captureConsoleErrors(() => appLookupFailureHandler(new Request('https://synthetic.example/review', { method: 'GET' }), trustedContext()));
+    assert.equal(appLookupFailureResult.value.status, 503);
+    assertRedactedDiagnostic(appLookupFailureResult.records, 'firebase-app-lookup', 'app/invalid-argument', { sdkApp: true, sdkAuth: true, sdkFirestore: true, appLookup: false, appValidated: false });
+
+    const appValidationFailureDependencies = {
+        'firebase-admin/app': () => ({
+            getApps: () => [{ name: 'budgetTransactions', options: { projectId: 'wrong-project', credential: { clientEmail: base.BUDGET_FIREBASE_CLIENT_EMAIL } } }],
+            cert: () => ({ synthetic: true }),
+            initializeApp: () => ({ synthetic: true })
+        }),
+        'firebase-admin/auth': () => ({ getAuth: app => ({ app }) }),
+        'firebase-admin/firestore': () => ({ getFirestore: app => ({ app }) })
+    };
+    const appValidationFailureHandler = runtime.createNetlifyHandler({ environment: base, dependencies: appValidationFailureDependencies });
+    const appValidationFailureResult = await captureConsoleErrors(() => appValidationFailureHandler(new Request('https://synthetic.example/review', { method: 'GET' }), trustedContext()));
+    assert.equal(appValidationFailureResult.value.status, 503);
+    assertRedactedDiagnostic(appValidationFailureResult.records, 'firebase-app-validation', 'unknown', { sdkApp: true, sdkAuth: true, sdkFirestore: true, appLookup: true, appValidated: false });
+
+    const existingFirebaseStages = [];
+    const existingFirebase = runtime.initializeFirebase(firebaseConfig, {
+        'firebase-admin/app': () => ({
+            getApps: () => [{ name: 'budgetTransactions', options: { projectId: 'budget-tool-sync', credential: { clientEmail: 'budget-transactions-runtime@budget-tool-sync.iam.gserviceaccount.com' } } }],
+            cert: () => { throw new Error('existing app must not parse a new certificate'); },
+            initializeApp: () => { throw new Error('existing app must not initialize a duplicate'); }
+        }),
+        'firebase-admin/auth': () => ({ getAuth: app => ({ app }) }),
+        'firebase-admin/firestore': () => ({ getFirestore: app => ({ app }) })
+    }, { onDiagnosticStage: stage => existingFirebaseStages.push(stage) });
+    assert.equal(typeof existingFirebase.auth, 'object');
+    assert.deepEqual(existingFirebaseStages, ['firebase-sdk-imports', 'firebase-app-lookup', 'firebase-app-validation', 'firebase-auth', 'firebase-firestore']);
+
+    const failingFirebaseDependencies = failure => ({
+        'firebase-admin/app': () => ({
+            getApps: () => [],
+            cert: () => { if (failure === 'certificate') throw syntheticError('app/invalid-credential', 'malformed synthetic key'); return { synthetic: true }; },
+            initializeApp: () => { if (failure === 'app') throw syntheticError('app/invalid-argument', 'synthetic app failure'); return { synthetic: true }; }
+        }),
+        'firebase-admin/auth': () => ({ getAuth: () => { if (failure === 'auth') throw syntheticError('auth/invalid-credential', 'synthetic auth failure'); return { synthetic: true }; } }),
+        'firebase-admin/firestore': () => ({ getFirestore: () => { if (failure === 'firestore') throw syntheticError('firestore/unavailable', 'synthetic firestore failure'); return { synthetic: true }; } })
+    });
+    const runFirebaseFailure = async (failure, stage, code, flags) => {
+        const handler = runtime.createNetlifyHandler({ environment: base, dependencies: failingFirebaseDependencies(failure) });
+        const capturedFailure = await captureConsoleErrors(() => handler(new Request('https://synthetic.example/review', { method: 'GET' }), trustedContext()));
+        assert.equal(capturedFailure.value.status, 503);
+        assertRedactedDiagnostic(capturedFailure.records, stage, code, flags);
+    };
+    await runFirebaseFailure('certificate', 'firebase-certificate', 'app/invalid-credential', { sdkApp: true, sdkAuth: true, sdkFirestore: true, credentialParsed: false });
+    await runFirebaseFailure('app', 'firebase-app-initialization', 'app/invalid-argument', { sdkApp: true, sdkAuth: true, sdkFirestore: true, credentialParsed: true, appInitialized: false });
+    await runFirebaseFailure('auth', 'firebase-auth', 'auth/invalid-credential', { sdkApp: true, sdkAuth: true, sdkFirestore: true, credentialParsed: true, appInitialized: true, authInitialized: false });
+    await runFirebaseFailure('firestore', 'firebase-firestore', 'firestore/unavailable', { sdkApp: true, sdkAuth: true, sdkFirestore: true, credentialParsed: true, appInitialized: true, authInitialized: true, firestoreInitialized: false });
+
+    const hostileCode = new Error('hostile secret uid message and stack canary');
+    Object.defineProperty(hostileCode, 'code', { get: () => { throw new Error('hostile code getter canary'); } });
+    Object.defineProperty(hostileCode, 'message', { get: () => { throw new Error('hostile message getter canary'); } });
+    const hostileFailure = runtime.createNetlifyHandler({ environment: base, createRuntime: () => { throw hostileCode; } });
+    const hostileFailureResult = await captureConsoleErrors(() => hostileFailure(new Request('https://synthetic.example/review', { method: 'GET' }), trustedContext()));
+    assert.equal(hostileFailureResult.value.status, 503);
+    assertRedactedDiagnostic(hostileFailureResult.records, 'runtime-config', 'unknown');
+    assert.doesNotMatch(JSON.stringify(hostileFailureResult.records), /canary|hostile|sensitive|secret|uid|email|private/i);
+
+    const primitiveCodeFailure = runtime.createNetlifyHandler({ environment: base, createRuntime: () => { throw { code: 17, message: 'primitive code secret canary' }; } });
+    const primitiveCodeFailureResult = await captureConsoleErrors(() => primitiveCodeFailure(new Request('https://synthetic.example/review', { method: 'GET' }), trustedContext()));
+    assert.equal(primitiveCodeFailureResult.value.status, 503);
+    assertRedactedDiagnostic(primitiveCodeFailureResult.records, 'runtime-config', 'unknown');
+    assert.doesNotMatch(JSON.stringify(primitiveCodeFailureResult.records), /canary|primitive|secret/i);
 
     const runtimeBuildFailure = runtime.createNetlifyHandler({
         environment: base,
@@ -462,6 +628,17 @@ function assertRedactedDiagnostic(records, expectedStage) {
     });
     const stalledResponse = await stalledHandler(new Request('https://synthetic.example/review', { method: 'POST', headers: { origin: 'https://zmstiles-dev.github.io' }, body: stalledBody, duplex: 'half' }), trustedContext());
     assert.equal(stalledResponse.status, 408, 'stalled readable request bodies must fail within the adapter deadline');
+    const hostileBody = new ReadableStream({
+        start(controller) {
+            const error = new Error('hostile body error canary');
+            Object.defineProperty(error, 'message', { get: () => { throw new Error('hostile body message getter canary'); } });
+            controller.error(error);
+        }
+    });
+    const hostileBodyResult = await captureConsoleErrors(() => adapterHandler(new Request('https://synthetic.example/review', { method: 'POST', headers: { origin: 'https://zmstiles-dev.github.io' }, body: hostileBody, duplex: 'half' }), trustedContext()));
+    assert.equal(hostileBodyResult.value.status, 503);
+    assertRedactedDiagnostic(hostileBodyResult.records, 'adapter');
+    assert.doesNotMatch(JSON.stringify(hostileBodyResult.records), /canary|hostile|body error/i);
 
     execFileSync(process.execPath, ['scripts/prepare-netlify.cjs'], { cwd: projectRoot, stdio: 'pipe' });
     const manifest = JSON.parse(fs.readFileSync(path.join(projectRoot, 'netlify', 'functions', '_runtime', 'manifest.json'), 'utf8'));

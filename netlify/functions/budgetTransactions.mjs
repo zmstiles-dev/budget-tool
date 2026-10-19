@@ -19,11 +19,24 @@ const DIAGNOSTIC_STAGES = Object.freeze({
     TRUSTED_CONTEXT: 'trusted-context',
     REQUEST_HOST: 'request-host',
     RUNTIME_CONFIG: 'runtime-config',
+    FIREBASE_SDK_IMPORTS: 'firebase-sdk-imports',
+    FIREBASE_APP_LOOKUP: 'firebase-app-lookup',
+    FIREBASE_APP_VALIDATION: 'firebase-app-validation',
+    FIREBASE_CERTIFICATE: 'firebase-certificate',
+    FIREBASE_APP_INITIALIZATION: 'firebase-app-initialization',
+    FIREBASE_AUTH: 'firebase-auth',
+    FIREBASE_FIRESTORE: 'firebase-firestore',
     FIREBASE_INITIALIZATION: 'firebase-initialization',
     RUNTIME_BUILD: 'runtime-build',
     ADAPTER: 'adapter'
 });
 const DIAGNOSTIC_STAGE_VALUES = new Set(Object.values(DIAGNOSTIC_STAGES));
+const DIAGNOSTIC_ERROR_CODES = new Set([
+    'MODULE_NOT_FOUND', 'ERR_MODULE_NOT_FOUND', 'ERR_REQUIRE_ESM',
+    'app/invalid-argument', 'app/invalid-credential', 'app/no-app',
+    'auth/invalid-argument', 'auth/invalid-credential',
+    'firestore/failed-precondition', 'firestore/invalid-argument', 'firestore/unavailable'
+]);
 const KNOWN_PATHS = new Set([
     '/', '/review',
     '/pending', '/stage', '/sync', '/edit', '/split', '/reject', '/defer', '/cancel', '/approve', '/restore', '/accepted-state', '/reset',
@@ -73,16 +86,71 @@ function diagnosticStage(value) {
     return DIAGNOSTIC_STAGE_VALUES.has(value) ? value : DIAGNOSTIC_STAGES.ADAPTER;
 }
 
-function emitHandlerDiagnostic(stage, request, context) {
+function diagnosticErrorCode(error) {
+    let code;
+    try {
+        code = error && error.code;
+    } catch (_) {
+        return 'unknown';
+    }
+    if (typeof code !== 'string') return 'unknown';
+    return DIAGNOSTIC_ERROR_CODES.has(code) ? code : 'unknown';
+}
+
+function diagnosticErrorMessage(error) {
+    let message;
+    try {
+        message = error && error.message;
+    } catch (_) {
+        return '';
+    }
+    return typeof message === 'string' ? message : '';
+}
+
+function emptyFirebaseDiagnosticState() {
+    return {
+        projectIdPresent: false,
+        projectIdMatches: false,
+        clientPresent: false,
+        clientMatches: false,
+        keyPresent: false,
+        keyPem: false,
+        sdkApp: false,
+        sdkAuth: false,
+        sdkFirestore: false,
+        appLookup: false,
+        appValidated: false,
+        credentialParsed: false,
+        appInitialized: false,
+        authInitialized: false,
+        firestoreInitialized: false
+    };
+}
+
+function firebaseDiagnosticState(config) {
+    const state = emptyFirebaseDiagnosticState();
+    state.projectIdPresent = Boolean(text(config && config.firebaseProjectId));
+    state.projectIdMatches = text(config && config.firebaseProjectId) === TARGET_PROJECT_ID;
+    state.clientPresent = Boolean(text(config && config.firebaseClientEmail));
+    state.clientMatches = text(config && config.firebaseClientEmail) === TARGET_RUNTIME_SERVICE_ACCOUNT;
+    const key = String(config && config.firebasePrivateKey || '');
+    state.keyPresent = Boolean(key);
+    state.keyPem = /-----BEGIN (?:RSA )?PRIVATE KEY-----/.test(key);
+    return state;
+}
+
+function emitHandlerDiagnostic(stage, request, context, error, state) {
     const record = {
         event: 'budgetTransactions.handler_failure',
         stage: diagnosticStage(stage),
+        errorCode: diagnosticErrorCode(error),
         clientResponse: 'generic',
         redacted: true,
         message: '[REDACTED]',
         stack: '[REDACTED]',
         hasRequest: Boolean(request),
-        hasContext: Boolean(context)
+        hasContext: Boolean(context),
+        firebase: { ...emptyFirebaseDiagnosticState(), ...(state || {}) }
     };
     try {
         console.error(JSON.stringify(record));
@@ -172,26 +240,66 @@ function parseRuntimeConfig(environment, trustedContext) {
     return Object.freeze({ projectId, householdId, connectionKeys, activeKeys, expectedInstitutions, secretNames, redirectUri, linkEnabled, syncEnabled, firebaseProjectId, firebaseClientEmail, firebasePrivateKey, provider: null });
 }
 
-function initializeFirebase(config, dependencies) {
-    const appModule = dependencyRequire('firebase-admin/app', dependencies);
-    const authModule = dependencyRequire('firebase-admin/auth', dependencies);
-    const firestoreModule = dependencyRequire('firebase-admin/firestore', dependencies);
+function initializeFirebase(config, dependencies, diagnostics = {}) {
+    const state = firebaseDiagnosticState(config);
+    const reportState = () => {
+        if (typeof diagnostics.onDiagnosticState === 'function') diagnostics.onDiagnosticState(Object.freeze({ ...state }));
+    };
+    const reportStage = value => {
+        if (typeof diagnostics.onDiagnosticStage === 'function') diagnostics.onDiagnosticStage(value);
+        reportState();
+    };
+    reportStage(DIAGNOSTIC_STAGES.FIREBASE_SDK_IMPORTS);
+    let appModule;
+    let authModule;
+    let firestoreModule;
+    appModule = dependencyRequire('firebase-admin/app', dependencies);
+    state.sdkApp = true;
+    reportState();
+    authModule = dependencyRequire('firebase-admin/auth', dependencies);
+    state.sdkAuth = true;
+    reportState();
+    firestoreModule = dependencyRequire('firebase-admin/firestore', dependencies);
+    state.sdkFirestore = true;
+    reportState();
     const appName = 'budgetTransactions';
+    reportStage(DIAGNOSTIC_STAGES.FIREBASE_APP_LOOKUP);
     const apps = typeof appModule.getApps === 'function' ? appModule.getApps() : [];
+    state.appLookup = true;
+    reportState();
     const existing = apps.find(candidate => candidate && candidate.name === appName);
+    reportStage(DIAGNOSTIC_STAGES.FIREBASE_APP_VALIDATION);
     let app;
     if (existing) {
         const existingProject = text(existing.options && existing.options.projectId);
         const existingEmail = text(existing.options && existing.options.credential && existing.options.credential.clientEmail);
         if (existingProject !== TARGET_PROJECT_ID || existingEmail && existingEmail !== TARGET_RUNTIME_SERVICE_ACCOUNT) fail('Firebase runtime credentials are not configured.');
+        state.appValidated = true;
+        reportState();
+        state.credentialParsed = true;
+        reportState();
         app = existing;
     } else {
-        app = appModule.initializeApp({
-            projectId: config.firebaseProjectId,
-            credential: appModule.cert({ projectId: config.firebaseProjectId, clientEmail: config.firebaseClientEmail, privateKey: config.firebasePrivateKey })
-        }, appName);
+        state.appValidated = true;
+        reportState();
+        reportStage(DIAGNOSTIC_STAGES.FIREBASE_CERTIFICATE);
+        const credential = appModule.cert({ projectId: config.firebaseProjectId, clientEmail: config.firebaseClientEmail, privateKey: config.firebasePrivateKey });
+        state.credentialParsed = true;
+        reportState();
+        reportStage(DIAGNOSTIC_STAGES.FIREBASE_APP_INITIALIZATION);
+        app = appModule.initializeApp({ projectId: config.firebaseProjectId, credential }, appName);
     }
-    return { app, auth: authModule.getAuth(app), db: firestoreModule.getFirestore(app) };
+    state.appInitialized = true;
+    reportState();
+    reportStage(DIAGNOSTIC_STAGES.FIREBASE_AUTH);
+    const auth = authModule.getAuth(app);
+    state.authInitialized = true;
+    reportState();
+    reportStage(DIAGNOSTIC_STAGES.FIREBASE_FIRESTORE);
+    const db = firestoreModule.getFirestore(app);
+    state.firestoreInitialized = true;
+    reportState();
+    return { app, auth, db };
 }
 
 function lazyPlaidClient(clientId, clientSecret, dependencies) {
@@ -259,8 +367,16 @@ export async function createRuntime(options = {}) {
     reportStage(DIAGNOSTIC_STAGES.RUNTIME_CONFIG);
     const config = parseRuntimeConfig(env, trustedContext);
     const dependencies = options.dependencies;
-    reportStage(DIAGNOSTIC_STAGES.FIREBASE_INITIALIZATION);
-    const firebase = options.firebase || initializeFirebase(config, dependencies);
+    let firebase;
+    if (options.firebase) {
+        reportStage(DIAGNOSTIC_STAGES.FIREBASE_INITIALIZATION);
+        firebase = options.firebase;
+    } else {
+        firebase = initializeFirebase(config, dependencies, {
+            onDiagnosticStage: reportStage,
+            onDiagnosticState: options.onDiagnosticState
+        });
+    }
     reportStage(DIAGNOSTIC_STAGES.RUNTIME_BUILD);
     const production = options.production || runtimeRequire('production-service.js');
     const transactionConfig = options.transactionConfig || runtimeRequire('transaction-config.js');
@@ -337,7 +453,7 @@ async function readWebBody(request, maxBytes, maxReadMs = 5000) {
             chunks.push(chunk);
         }
     } catch (error) {
-        if (error && error.message === 'Request body read timed out.') {
+        if (diagnosticErrorMessage(error) === 'Request body read timed out.') {
             try { Promise.resolve(reader.cancel()).catch(() => {}); } catch (_) { /* best effort; the bounded error is already selected */ }
         }
         throw error;
@@ -408,6 +524,8 @@ export function createNetlifyHandler(options = {}) {
     let runtimePromise = null;
     let lastRuntimeStage = DIAGNOSTIC_STAGES.RUNTIME_CONFIG;
     let runtimeFailureStage = null;
+    let runtimeDiagnosticState = emptyFirebaseDiagnosticState();
+    let runtimeFailureDiagnosticState = null;
     return async function netlifyHandler(request, context) {
         let stage = DIAGNOSTIC_STAGES.TRUSTED_CONTEXT;
         let waitingForRuntime = false;
@@ -433,9 +551,13 @@ export function createNetlifyHandler(options = {}) {
                     onDiagnosticStage: value => {
                         lastRuntimeStage = diagnosticStage(value);
                         stage = lastRuntimeStage;
+                    },
+                    onDiagnosticState: value => {
+                        runtimeDiagnosticState = { ...emptyFirebaseDiagnosticState(), ...(value || {}) };
                     }
                 })).catch(error => {
                     runtimeFailureStage = diagnosticStage(lastRuntimeStage);
+                    runtimeFailureDiagnosticState = { ...runtimeDiagnosticState };
                     throw error;
                 });
             } else {
@@ -447,9 +569,13 @@ export function createNetlifyHandler(options = {}) {
             stage = DIAGNOSTIC_STAGES.ADAPTER;
             return await invokeNodeHandler(runtime.handler, request, { maxBodyBytes, maxBodyReadMs, routePrefix: options.routePrefix || FUNCTION_ROUTE_PREFIX });
         } catch (error) {
-            if (waitingForRuntime && runtimeFailureStage) stage = runtimeFailureStage;
-            emitHandlerDiagnostic(stage, request, context);
-            const message = text(error && error.message);
+            let diagnosticState = waitingForRuntime ? runtimeDiagnosticState : emptyFirebaseDiagnosticState();
+            if (waitingForRuntime && runtimeFailureStage) {
+                stage = runtimeFailureStage;
+                diagnosticState = runtimeFailureDiagnosticState || runtimeDiagnosticState;
+            }
+            emitHandlerDiagnostic(stage, request, context, error, diagnosticState);
+            const message = diagnosticErrorMessage(error);
             const status = message === 'Request body is too large.' ? 413 : message === 'Request body length is invalid.' ? 400 : message === 'Request body read timed out.' ? 408 : 503;
             const headers = { 'Content-Type': 'application/json; charset=utf-8', 'Cache-Control': 'no-store', 'Vary': 'Origin' };
             const requestedOrigin = text(request && request.headers && request.headers.get && request.headers.get('origin'));
