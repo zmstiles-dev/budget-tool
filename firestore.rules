@@ -1,0 +1,100 @@
+rules_version = '2';
+
+// The browser may read the historical shared document for the existing app
+// UI. All writes that can create accepted transactions, pending candidates,
+// receipts or provider state go through the Firebase-adjacent service, which
+// verifies an Admin ID token and household membership before using Admin SDK.
+// Admin SDK writes bypass these rules; the service authorization is therefore
+// mandatory and is tested in transaction-backend.test.cjs.
+service cloud.firestore {
+  match /databases/{database}/documents {
+    function signedIn() {
+      return request.auth != null && request.auth.token.email_verified == true;
+    }
+
+    function validEmail(value) {
+      return value is string && value.matches('^[a-z0-9._%+-]+@[a-z0-9.-]+$');
+    }
+
+    function validHouseholdId(value) {
+      return value is string && value.matches('^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$');
+    }
+
+    function validUid(value) {
+      return value is string && value.matches('^[A-Za-z0-9_-]{1,128}$');
+    }
+
+    function allowedAppUser() {
+      return signedIn() && protectedMembership();
+    }
+
+    // UID-bound production app users are seeded by an operator through the
+    // Admin SDK. Clients cannot enroll themselves or change this boundary.
+    function protectedHouseholdConfigured() {
+      return exists(/databases/$(database)/documents/protectedAppConfig/transactionService)
+        && get(/databases/$(database)/documents/protectedAppConfig/transactionService).data.allowed == true
+        && validHouseholdId(get(/databases/$(database)/documents/protectedAppConfig/transactionService).data.householdId);
+    }
+
+    function protectedMembership() {
+      return protectedHouseholdConfigured()
+        && exists(/databases/$(database)/documents/protectedAppUsers/$(request.auth.uid))
+        && get(/databases/$(database)/documents/protectedAppUsers/$(request.auth.uid)).data.allowed == true
+        && validUid(request.auth.uid)
+        && get(/databases/$(database)/documents/protectedAppUsers/$(request.auth.uid)).data.uid == request.auth.uid
+        && validEmail(request.auth.token.email)
+        && validEmail(get(/databases/$(database)/documents/protectedAppUsers/$(request.auth.uid)).data.email)
+        && get(/databases/$(database)/documents/protectedAppUsers/$(request.auth.uid)).data.email == request.auth.token.email
+        && validHouseholdId(get(/databases/$(database)/documents/protectedAppUsers/$(request.auth.uid)).data.householdId)
+        && get(/databases/$(database)/documents/protectedAppUsers/$(request.auth.uid)).data.householdId
+          == get(/databases/$(database)/documents/protectedAppConfig/transactionService).data.householdId;
+    }
+
+    // Accepted history remains readable by existing app users. Client writes
+    // may update display/settings fields only; transaction array changes stay
+    // behind the approval service.
+    match /shared/data {
+      function existingRevision() {
+        return !('revision' in resource.data) ? 0 : resource.data.revision;
+      }
+      allow read: if allowedAppUser();
+      allow create: if allowedAppUser() && request.resource.data.transactions == [] && request.resource.data.revision is int && request.resource.data.revision == 1;
+      allow update: if allowedAppUser() && request.resource.data.transactions == resource.data.transactions && existingRevision() is int && existingRevision() >= 0 && request.resource.data.revision is int && request.resource.data.revision >= 0 && request.resource.data.revision == existingRevision() + 1;
+      allow delete: if false;
+    }
+
+    // Pending inbox, receipts, audit state and provider cursors are service
+    // owned. There is deliberately no browser fallback write path.
+    match /protectedTransactionReview/{householdId} {
+      allow read, write: if false;
+    }
+
+    match /protectedAcceptedTransactions/{householdId} {
+      allow read, write: if false;
+    }
+
+    match /connections/{connectionId} {
+      allow read, write: if false;
+    }
+
+    match /protectedConnections/{connectionId} {
+      allow read, write: if false;
+    }
+
+    match /protectedAppUsers/{uid} {
+      allow read, write: if false;
+    }
+
+    match /protectedAppConfig/{documentId} {
+      allow read, write: if false;
+    }
+
+    match /protectedSyncRuns/{runId} {
+      allow read, write: if false;
+    }
+
+    match /{document=**} {
+      allow read, write: if false;
+    }
+  }
+}

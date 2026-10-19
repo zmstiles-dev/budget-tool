@@ -1,5 +1,23 @@
 .opencode/
+.codex/
 Old CSVs/
 statements/
+Statements/
 budget-data.json
 bad-data.json
+firebase-debug.log
+firestore-debug.log
+ui-debug.log
+exports/
+*.export.csv
+.env
+.env.*
+!.env.example
+
+# Locally assembled Netlify artifacts are never committed or built by hosted CI.
+netlify/functions/_runtime/
+netlify/node_modules/
+netlify/.netlify/
+netlify/.artifact/
+netlify/public/*
+!netlify/public/.gitkeep

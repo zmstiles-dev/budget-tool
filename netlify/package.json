@@ -1,0 +1,16 @@
+{
+  "name": "budget-tool-netlify-runtime",
+  "private": true,
+  "type": "module",
+  "engines": {
+    "node": "24"
+  },
+  "dependencies": {
+    "firebase-admin": "14.5.0",
+    "plaid": "38.1.0"
+  },
+  "devDependencies": {
+    "@netlify/zip-it-and-ship-it": "^16.3.1",
+    "esbuild": "^0.25.9"
+  }
+}

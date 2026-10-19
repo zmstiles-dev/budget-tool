@@ -14,6 +14,11 @@
     <script src="https://www.gstatic.com/firebasejs/10.12.0/firebase-app-compat.js"></script>
     <script src="https://www.gstatic.com/firebasejs/10.12.0/firebase-auth-compat.js"></script>
     <script src="https://www.gstatic.com/firebasejs/10.12.0/firebase-firestore-compat.js"></script>
+    <script src="deployment-config.template.js"></script>
+    <script src="transaction-config.js"></script>
+    <script src="transaction-validation.js"></script>
+    <script src="transaction-review.js"></script>
+    <script src="transaction-backend.js"></script>
     <style>
         :root {
             --bg: #f5f5f5;
@@ -91,7 +96,7 @@
         }
         * { box-sizing: border-box; margin: 0; padding: 0; }
         body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; background: var(--bg); color: var(--text); }
-        .app-layout { display: flex; min-height: 100vh; }
+        .app-layout { display: none; min-height: 100vh; }
         .sidebar { width: 220px; background: var(--sidebar-bg); padding: 20px 0; flex-shrink: 0; display: flex; flex-direction: column; }
         .sidebar h2 { color: white; padding: 0 20px 20px; font-size: 1.2rem; border-bottom: 1px solid var(--sidebar-border); margin-bottom: 10px; }
         .nav-item { display: block; padding: 12px 20px; color: var(--sidebar-text); text-decoration: none; cursor: pointer; transition: all 0.2s; }
@@ -416,11 +421,53 @@
 
         <div id="import" class="panel">
             <div class="card">
+                <div style="display:flex;justify-content:space-between;align-items:center;gap:12px;flex-wrap:wrap;">
+                    <div>
+                        <h3 style="margin-bottom:4px;">New transactions</h3>
+                        <div id="reviewStatus" style="color:var(--muted);font-size:0.9rem;">No staged transactions.</div>
+                    </div>
+                    <div style="display:flex;gap:8px;flex-wrap:wrap;">
+                        <button class="btn btn-primary" id="addSelectedTransactions" disabled>Add selected transactions</button>
+                        <button class="btn btn-secondary" id="deferSelectedTransactions" disabled>Defer selected</button>
+                        <button class="btn btn-danger" id="rejectSelectedTransactions" disabled>Reject selected</button>
+                        <button class="btn btn-secondary" id="cancelReview" disabled>Cancel review</button>
+                    </div>
+                </div>
+                <label style="display:flex;align-items:center;gap:8px;margin-top:12px;font-size:0.85rem;color:var(--muted);"><input type="checkbox" id="allowReviewOverlaps"> Allow selected possible overlaps after reviewing them individually</label>
+                <div id="reviewList" style="margin-top:15px;"></div>
+            </div>
+            <div class="card">
                 <h3>Import Transactions</h3>
+                <label>CSV source
+                    <select id="bankCsvSource">
+                        <option value="chase">Chase (negative amounts are expenses)</option>
+                        <option value="capital-one">Capital One (Debit / Credit columns)</option>
+                    </select>
+                </label>
+                <label>Account
+                    <select id="bankCsvAccount">
+                        <option value="">Select account before importing</option>
+                        <option>Checking Account</option><option>CFF</option><option>CFU</option><option>CSP</option><option>Ven X</option>
+                    </select>
+                </label>
                 <div class="drop-zone" id="dropZone">
                     <p>Drag & drop CSV file(s) here or click to browse</p>
                     <input type="file" id="fileInput" accept=".csv" multiple hidden>
                 </div>
+            </div>
+            <div class="card" id="providerLinkCard" style="display:none;margin-top:20px;">
+                <h3>Connect a bank</h3>
+                <p style="color:var(--muted);">Connect only after reviewing each returned account mapping. New transactions remain pending for review.</p>
+                <label>Connection
+                    <select id="providerLinkConnection"></select>
+                </label>
+                <div style="display:flex;gap:8px;flex-wrap:wrap;margin-top:12px;">
+                    <button class="btn btn-primary" id="providerLinkConnect">Connect bank</button>
+                    <button class="btn btn-secondary" id="providerLinkUpdate">Update connection</button>
+                </div>
+                <div id="providerLinkBindings" style="margin-top:14px;"></div>
+                <button class="btn btn-primary" id="providerLinkConfirm" style="display:none;margin-top:12px;">Confirm account mapping</button>
+                <div id="providerLinkStatus" style="margin-top:12px;color:var(--muted);" aria-live="polite"></div>
             </div>
             <div class="card" style="margin-top: 20px;">
                 <h3>Import History</h3>
@@ -623,6 +670,11 @@
     </div>
 
     <script>
+        // For HTML text and quoted attributes only. Never use for script or CSS values.
+        function escapeHTML(value) {
+            return String(value ?? '').replace(/[&<>"']/g, character => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[character]));
+        }
+
         const STORAGE_KEY = 'budget_merchant_defaults';
         const TRANS_DATA_KEY = 'budget_transactions';
         const CAT_DATA_KEY = 'budget_categories';
@@ -633,8 +685,16 @@
 
         const THEME_KEY = 'budget_theme';
 
-        // Firebase config
-        const firebaseConfig = {
+        // Firebase config. The loopback bridge has a URL marker and an
+        // injected bootstrap object. If either is missing, fail before
+        // initializeApp instead of falling back to the deployed project.
+        const localBridgeRequested = new URL(window.location.href).searchParams.get('localBridge') === '1';
+        if (localBridgeRequested && window.__BUDGET_TOOL_LOCAL_BRIDGE__ !== true) throw new Error('Local bridge bootstrap is missing.');
+        const firebaseConfig = localBridgeRequested ? {
+            apiKey: 'demo-budget-tool-local',
+            authDomain: 'demo-budget-tool.firebaseapp.com',
+            projectId: 'demo-budget-tool'
+        } : {
             apiKey: "AIzaSyAR9Py4dYHQqpbHk_jF13ZC6EkrYGvAeQc",
             authDomain: "budget-tool-sync.firebaseapp.com",
             projectId: "budget-tool-sync",
@@ -643,20 +703,371 @@
             appId: "1:869331943580:web:c26d4a375adf3b65556d59",
             measurementId: "G-4LV55ZL48V"
         };
+        function localEmulatorConfig() {
+            const value = window.__BUDGET_TOOL_LOCAL_EMULATOR__;
+            if (value === undefined) return null;
+            if (!value || value.projectId !== 'demo-budget-tool') throw new Error('Local emulator requires the demo-budget-tool project.');
+            const endpoints = [value.auth, value.firestore];
+            if (endpoints.some(endpoint => !endpoint || endpoint.host !== '127.0.0.1' || !Number.isInteger(endpoint.port) || endpoint.port < 1 || endpoint.port > 65535)) throw new Error('Local emulator endpoints must use 127.0.0.1 and valid ports.');
+            if (window.location.protocol !== 'http:' || window.location.hostname !== '127.0.0.1') throw new Error('Local emulator mode requires a loopback HTTP page.');
+            if (window.TRANSACTION_APPROVAL_ENDPOINT) {
+                let endpoint;
+                try { endpoint = new URL(window.TRANSACTION_APPROVAL_ENDPOINT, window.location.href); } catch (_) { throw new Error('Local emulator approval endpoint is invalid.'); }
+                if (endpoint.protocol !== 'http:' || endpoint.hostname !== '127.0.0.1') throw new Error('Local emulator approval endpoint must use 127.0.0.1.');
+            }
+            return value;
+        }
+        const emulator = localEmulatorConfig();
+        if (localBridgeRequested && !emulator) throw new Error('Local bridge emulator bootstrap is missing.');
+        if (emulator) {
+            firebaseConfig.apiKey = 'demo-budget-tool-local';
+            firebaseConfig.authDomain = 'demo-budget-tool.firebaseapp.com';
+            firebaseConfig.projectId = emulator.projectId;
+        }
         firebase.initializeApp(firebaseConfig);
         const auth = firebase.auth();
         const db = firebase.firestore();
+        if (emulator) {
+            auth.useEmulator(`http://${emulator.auth.host}:${emulator.auth.port}`);
+            db.useEmulator(emulator.firestore.host, emulator.firestore.port);
+        }
+        if (emulator && window.__BUDGET_TOOL_LOCAL_BANNER__ === true) {
+            document.addEventListener('DOMContentLoaded', () => {
+                const banner = document.createElement('div');
+                banner.textContent = 'LOCAL DEMO — Auth/Firestore emulator; no production Firebase or live bank data. CSV import and charts are disabled because this bridge has no bundled parser/chart assets.';
+                banner.style.cssText = 'position:fixed;top:0;left:0;right:0;z-index:9999;padding:6px 10px;background:#8e44ad;color:#fff;text-align:center;font:600 12px sans-serif;';
+                document.body.appendChild(banner);
+            }, { once: true });
+        }
+        if (emulator && window.__BUDGET_TOOL_LOCAL_AUTO_LOGIN__ === true) {
+            const fixture = window.__BUDGET_TOOL_LOCAL_FIXTURE_USER__;
+            if (!fixture || typeof fixture.email !== 'string' || typeof fixture.password !== 'string') throw new Error('Local demo fixture auth bootstrap is missing.');
+            auth.signInWithEmailAndPassword(fixture.email, fixture.password).catch(() => {
+                console.error('Local demo fixture sign-in failed.');
+            });
+        }
         const provider = new firebase.auth.GoogleAuthProvider();
+        if (window.TRANSACTION_APPROVAL_ENDPOINT && !window.transactionApprovalService && window.TransactionBackend && typeof window.TransactionBackend.BrowserApprovalClient === 'function') {
+            window.transactionApprovalService = new window.TransactionBackend.BrowserApprovalClient({ endpoint: window.TRANSACTION_APPROVAL_ENDPOINT, auth });
+        }
 
         const ALLOWED_EMAILS = ['captainicebow@gmail.com', 'mgstiles13@gmail.com', 'zmstiles@gmail.com'];
         let currentUser = null;
+        let authGeneration = 0;
+        let cloudRevision = 0;
+        // Durable review approvals/restores can advance the accepted-state
+        // revision independently of the browser save queue. A queued render
+        // save from the prior accepted snapshot must not execute afterward.
+        let acceptedStateEpoch = 0;
+        let firestoreSaveQueue = Promise.resolve();
+        let lastPersistenceError = null;
+        let syncAttemptGeneration = null;
+        let bankSyncState = 'not configured';
+        let providerLinkPending = null;
+        let activeProviderLinkHandler = null;
 
-        async function loadFromFirestore() {
+        function providerAuthSnapshot() {
+            return { generation: authGeneration, user: currentUser, uid: currentUser && currentUser.uid };
+        }
+
+        function providerAuthCurrent(snapshot) {
+            return Boolean(snapshot && snapshot.generation === authGeneration && snapshot.user && currentUser === snapshot.user && currentUser.uid === snapshot.uid);
+        }
+
+        function authLoadCurrent(generation, user) {
+            return Number.isSafeInteger(generation) && generation === authGeneration && Boolean(user) && currentUser === user;
+        }
+
+        function requireProviderAuth(snapshot) {
+            if (!providerAuthCurrent(snapshot)) throw new Error('Authentication changed during bank connection.');
+        }
+
+        function providerLinkId() {
+            if (globalThis.crypto && typeof globalThis.crypto.randomUUID === 'function') return globalThis.crypto.randomUUID();
+            return `link-${Date.now()}-${Math.random().toString(36).slice(2, 10)}`;
+        }
+
+        function providerLinkConnections() {
+            if (!Array.isArray(window.TRANSACTION_LINK_CONNECTIONS)) return [];
+            return window.TRANSACTION_LINK_CONNECTIONS.map(value => typeof value === 'string' ? { key: value, label: value } : { key: value && value.key, label: value && (value.label || value.key) })
+                .filter(value => /^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$/.test(String(value.key || '')) && value.label);
+        }
+
+        function providerLinkStatus(message, error) {
+            const element = document.getElementById('providerLinkStatus');
+            if (!element) return;
+            element.textContent = message || '';
+            element.style.color = error ? 'var(--danger)' : 'var(--muted)';
+        }
+
+        function clearProviderLinkUiState() {
+            providerLinkPending = null;
+            const bindings = document.getElementById('providerLinkBindings');
+            const confirm = document.getElementById('providerLinkConfirm');
+            if (bindings) bindings.innerHTML = '';
+            if (confirm) confirm.style.display = 'none';
+        }
+
+        function refreshProviderLinkUi() {
+            const card = document.getElementById('providerLinkCard');
+            const select = document.getElementById('providerLinkConnection');
+            if (!card || !select) return;
+            const enabled = window.TRANSACTION_LINK_ENABLED === true && window.transactionApprovalService && typeof window.transactionApprovalService.createLinkToken === 'function';
+            const connections = providerLinkConnections();
+            if (!enabled || !connections.length || !currentUser) {
+                card.style.display = 'none';
+                return;
+            }
+            card.style.display = '';
+            select.innerHTML = connections.map(value => `<option value="${String(value.key).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/"/g, '&quot;')}">${String(value.label).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/"/g, '&quot;')}</option>`).join('');
+        }
+
+        let providerLinkSdkPromise = null;
+        function loadProviderLinkSdk() {
+            if (window.Plaid && typeof window.Plaid.create === 'function') return Promise.resolve(window.Plaid);
+            if (providerLinkSdkPromise) return providerLinkSdkPromise;
+            providerLinkSdkPromise = new Promise((resolve, reject) => {
+                const script = document.createElement('script');
+                script.src = 'https://cdn.plaid.com/link/v2/stable/link-initialize.js';
+                script.async = true;
+                script.onload = () => window.Plaid && typeof window.Plaid.create === 'function' ? resolve(window.Plaid) : reject(new Error('Plaid Link SDK did not load.'));
+                script.onerror = () => reject(new Error('Plaid Link SDK did not load.'));
+                document.head.appendChild(script);
+            });
+            return providerLinkSdkPromise;
+        }
+
+        function providerAccountId(account) { return String(account && (account.id || account.account_id || account.accountId) || '').trim(); }
+        function providerAccountMask(account) {
+            const value = String(account && (account.mask || account.last4) || '').replace(/\D/g, '').slice(-4);
+            return value.length >= 2 ? `••••${value}` : '';
+        }
+        function providerAccountLabel(account) {
+            const name = String(account && (account.name || account.official_name || account.officialName) || providerAccountId(account)).trim();
+            const type = [account && account.type, account && account.subtype].map(value => String(value || '').trim()).filter(Boolean).join('/');
+            const mask = providerAccountMask(account);
+            return [name, type, mask].filter(Boolean).join(' · ');
+        }
+
+        const PROVIDER_LINK_STORAGE_KEY = 'budget_provider_link_session_v1';
+        function providerLinkStorageRead() {
+            try {
+                const value = JSON.parse(sessionStorage.getItem(PROVIDER_LINK_STORAGE_KEY) || 'null');
+                if (!value || value.uid !== (currentUser && currentUser.uid) || !Number.isSafeInteger(value.expiresAt) || value.expiresAt <= Date.now()) {
+                    sessionStorage.removeItem(PROVIDER_LINK_STORAGE_KEY);
+                    return null;
+                }
+                return value;
+            } catch (_) { return null; }
+        }
+        function providerLinkStorageWrite(value) {
+            try { sessionStorage.setItem(PROVIDER_LINK_STORAGE_KEY, JSON.stringify(value)); } catch (_) { /* A reload can require a fresh user action. */ }
+        }
+        function providerLinkStorageClear() {
+            try { sessionStorage.removeItem(PROVIDER_LINK_STORAGE_KEY); } catch (_) { /* Ignore unavailable browser storage. */ }
+        }
+
+        function renderProviderAccountBindings(accounts) {
+            const container = document.getElementById('providerLinkBindings');
+            const confirm = document.getElementById('providerLinkConfirm');
+            const aliases = window.TransactionConfig && Array.isArray(window.TransactionConfig.accountDisplayNames) ? window.TransactionConfig.accountDisplayNames : [];
+            const normalized = (accounts || []).map(account => ({ id: providerAccountId(account), label: providerAccountLabel(account) })).filter(account => account.id);
+            if (!container || !confirm || !normalized.length || !aliases.length) throw new Error('Plaid Link did not return stable account IDs or configured display accounts.');
+            container.innerHTML = normalized.map((account, index) => `<label>${account.label.replace(/&/g, '&amp;').replace(/</g, '&lt;')}<select data-provider-account-index="${index}"><option value="">Select display account</option>${aliases.map(alias => `<option value="${String(alias).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/"/g, '&quot;')}">${String(alias).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/"/g, '&quot;')}</option>`).join('')}</select></label>`).join('');
+            confirm.style.display = '';
+            return normalized;
+        }
+
+        async function resumeProviderLinkPending() {
+            if (window.TRANSACTION_LINK_ENABLED !== true) {
+                providerLinkStorageClear();
+                clearProviderLinkUiState();
+                return;
+            }
+            const authSnapshot = providerAuthSnapshot();
+            const stored = providerLinkStorageRead();
+            const service = window.transactionApprovalService;
+            if (!providerAuthCurrent(authSnapshot) || !stored || stored.kind !== 'pending' || !service || typeof service.linkStatus !== 'function') return;
+            try {
+                const result = await service.linkStatus(stored.connectionKey, stored.requestId);
+                requireProviderAuth(authSnapshot);
+                if (result.status !== 'pending-binding') { providerLinkStorageClear(); return; }
+                const accounts = renderProviderAccountBindings(result.accounts);
+                requireProviderAuth(authSnapshot);
+                providerLinkPending = { connectionKey: stored.connectionKey, requestId: stored.requestId, accounts };
+                providerLinkStatus('A reviewed account mapping is waiting to be completed.');
+            } catch (error) {
+                if (providerAuthCurrent(authSnapshot)) providerLinkStatus(error.message, true);
+            }
+        }
+
+        async function openProviderLink(mode, resume) {
+            const authSnapshot = providerAuthSnapshot();
+            requireProviderAuth(authSnapshot);
+            const service = window.transactionApprovalService;
+            const select = document.getElementById('providerLinkConnection');
+            if (window.TRANSACTION_LINK_ENABLED !== true || !service || !select) throw new Error('Provider Link operations are disabled.');
+            const storedValue = providerLinkStorageRead();
+            const stored = storedValue && storedValue.kind === 'link' && storedValue.mode === mode ? storedValue : null;
+            if (resume && (!stored || typeof stored.linkToken !== 'string' || !stored.linkToken || !stored.sessionId)) throw new Error('The bank connection session expired; start again.');
+            if (storedValue && storedValue.kind === 'link' && storedValue.mode !== mode) throw new Error('Another bank connection session is waiting; resume or let it expire before starting a different mode.');
+            if (storedValue && storedValue.kind === 'pending' && !resume) throw new Error('A bank connection is waiting for account mapping.');
+            const connectionKey = stored ? stored.connectionKey : select.value;
+            const sessionId = stored ? stored.sessionId : providerLinkId();
+            providerLinkStatus('Preparing secure bank connection…');
+            const link = stored ? { linkToken: stored.linkToken, sessionId } : mode === 'update' ? await service.updateLinkToken(connectionKey) : await service.createLinkToken(connectionKey, sessionId);
+            requireProviderAuth(authSnapshot);
+            if (!link || typeof link.linkToken !== 'string' || !link.linkToken) throw new Error('Plaid Link returned an invalid session.');
+            const activeSessionId = link.sessionId || sessionId;
+            if (!stored) {
+                requireProviderAuth(authSnapshot);
+                providerLinkStorageWrite({ kind: 'link', uid: authSnapshot.uid, connectionKey, sessionId: activeSessionId, mode, linkToken: link.linkToken, expiresAt: Date.now() + 10 * 60 * 1000 });
+            }
+            const Plaid = await loadProviderLinkSdk();
+            requireProviderAuth(authSnapshot);
+            if (activeProviderLinkHandler && typeof activeProviderLinkHandler.exit === 'function') activeProviderLinkHandler.exit();
+            activeProviderLinkHandler = null;
+            const plaidOptions = {
+                token: link.linkToken,
+                ...(stored ? { receivedRedirectUri: window.location.href } : {}),
+                onSuccess: async (publicToken, metadata) => {
+                    if (!providerAuthCurrent(authSnapshot)) return;
+                    if (mode === 'update') {
+                        providerLinkStorageClear();
+                        providerLinkStatus('Connection update completed.');
+                        return;
+                    }
+                    try {
+                        requireProviderAuth(authSnapshot);
+                        providerLinkStorageClear();
+                        providerLinkPending = { connectionKey, requestId: activeSessionId, accounts: [] };
+                        providerLinkStorageWrite({ kind: 'pending', uid: authSnapshot.uid, connectionKey, requestId: activeSessionId, expiresAt: Date.now() + 10 * 60 * 1000 });
+                        // Exchange immediately. The public token stays in this
+                        // callback only; the server pins the Item token before
+                        // returning account metadata for user mapping.
+                        const pending = await service.exchangeLink(connectionKey, publicToken, undefined, activeSessionId);
+                        requireProviderAuth(authSnapshot);
+                        const accounts = renderProviderAccountBindings((pending && pending.accounts) || metadata && metadata.accounts);
+                        requireProviderAuth(authSnapshot);
+                        providerLinkPending.accounts = accounts;
+                        providerLinkStatus('Review each returned account, then confirm the mapping.');
+                    } catch (error) {
+                        if (!providerAuthCurrent(authSnapshot)) return;
+                        try {
+                            const pending = await service.linkStatus(connectionKey, activeSessionId);
+                            requireProviderAuth(authSnapshot);
+                            if (pending && pending.status === 'pending-binding') {
+                                providerLinkPending = { connectionKey, requestId: activeSessionId, accounts: renderProviderAccountBindings(pending.accounts) };
+                                requireProviderAuth(authSnapshot);
+                                providerLinkStatus('Review each returned account, then confirm the mapping.');
+                                return;
+                            }
+                        } catch (_) { /* Keep the original safe error. */ }
+                        providerLinkStatus(error.message, true);
+                    }
+                },
+                onExit: (_error, metadata) => {
+                    if (!providerAuthCurrent(authSnapshot)) return;
+                    if (!metadata || !metadata.status || metadata.status !== 'connected') {
+                        providerLinkStorageClear();
+                        providerLinkStatus('Bank connection was closed before completion.');
+                    }
+                }
+            };
+            const handler = Plaid.create(plaidOptions);
+            requireProviderAuth(authSnapshot);
+            activeProviderLinkHandler = handler;
+            handler.open();
+        }
+
+        async function resumeProviderLink() {
+            if (window.TRANSACTION_LINK_ENABLED !== true) {
+                providerLinkStorageClear();
+                clearProviderLinkUiState();
+                return;
+            }
+            const authSnapshot = providerAuthSnapshot();
+            if (!providerAuthCurrent(authSnapshot)) return;
+            const stored = providerLinkStorageRead();
+            if (!stored) return;
+            if (stored.kind === 'pending') return resumeProviderLinkPending();
+            const oauthReturn = new URL(window.location.href).searchParams.has('oauth_state_id') || new URL(window.location.href).searchParams.has('oauth_state');
+            if (stored.kind === 'link' && oauthReturn) {
+                try { await openProviderLink(stored.mode, true); } catch (error) {
+                    if (providerAuthCurrent(authSnapshot)) { providerLinkStorageClear(); providerLinkStatus(error.message, true); }
+                }
+            }
+        }
+
+        document.getElementById('providerLinkConnect')?.addEventListener('click', async () => {
+            try { await openProviderLink('create'); } catch (error) { providerLinkStatus(error.message, true); }
+        });
+        document.getElementById('providerLinkUpdate')?.addEventListener('click', async () => {
+            try { await openProviderLink('update'); } catch (error) { providerLinkStatus(error.message, true); }
+        });
+        document.getElementById('providerLinkConfirm')?.addEventListener('click', async () => {
+            const authSnapshot = providerAuthSnapshot();
+            try {
+                requireProviderAuth(authSnapshot);
+                if (!providerLinkPending) throw new Error('No bank connection is waiting for account mapping.');
+                const bindings = {};
+                document.querySelectorAll('#providerLinkBindings select[data-provider-account-index]').forEach((element, index) => {
+                    const account = providerLinkPending.accounts[index];
+                    if (account && element.value) bindings[account.id] = element.value;
+                });
+                if (Object.keys(bindings).length !== providerLinkPending.accounts.length) throw new Error('Select a display account for every returned account.');
+                providerLinkStatus('Saving the reviewed account mapping…');
+                await window.transactionApprovalService.exchangeLink(providerLinkPending.connectionKey, undefined, bindings, providerLinkPending.requestId);
+                requireProviderAuth(authSnapshot);
+                providerLinkPending = null;
+                providerLinkStorageClear();
+                document.getElementById('providerLinkBindings').innerHTML = '';
+                document.getElementById('providerLinkConfirm').style.display = 'none';
+                providerLinkStatus('Bank connection saved disabled pending separate sync activation.');
+            } catch (error) { if (providerAuthCurrent(authSnapshot)) providerLinkStatus(error.message, true); }
+        });
+
+        function reportPersistenceError(error) {
+            lastPersistenceError = error;
+            if (window.__BUDGET_TOOL_LOCAL_BRIDGE__ === true) {
+                const diagnostic = error && error.diagnostic;
+                if (diagnostic && typeof diagnostic === 'object' && !Array.isArray(diagnostic)) {
+                    const safe = { stage: diagnostic.stage, status: diagnostic.status, type: diagnostic.type, code: diagnostic.code, request_id: diagnostic.request_id };
+                    const shapeKeys = ['added', 'modified', 'removed', 'has_more', 'next_cursor'];
+                    const shapeTypes = new Set(['missing', 'array', 'boolean', 'string', 'null', 'number', 'object', 'undefined']);
+                    const shape = diagnostic.response_shape;
+                    if (shape && typeof shape === 'object' && !Array.isArray(shape)) {
+                        const safeShape = {};
+                        let validShape = true;
+                        for (const key of shapeKeys) {
+                            const field = shape[key];
+                            if (!field || typeof field !== 'object' || Array.isArray(field) || typeof field.present !== 'boolean' || !shapeTypes.has(field.type)) { validShape = false; break; }
+                            const safeField = { present: field.present, type: field.type };
+                            if (field.count !== undefined) {
+                                if (!Number.isSafeInteger(field.count) || field.count < 0 || field.count > 1000) { validShape = false; break; }
+                                safeField.count = field.count;
+                            }
+                            safeShape[key] = safeField;
+                        }
+                        if (validShape) safe.response_shape = safeShape;
+                    }
+                    window.__BUDGET_TOOL_LOCAL_LAST_DIAGNOSTIC__ = safe;
+                }
+            }
+            const status = document.getElementById('reviewStatus');
+            if (status) status.textContent = `Cloud save failed: ${String(error && error.message || error)}`;
+        }
+
+        async function loadFromFirestore(expectedGeneration) {
+            const userAtStart = currentUser;
+            const generation = expectedGeneration === undefined ? authGeneration : expectedGeneration;
             try {
                 const doc = await db.collection('shared').doc('data').get();
+                if (!authLoadCurrent(generation, userAtStart)) return;
 
                 if (doc.exists) {
                     const data = doc.data();
+                    cloudRevision = Number.isSafeInteger(data.revision) && data.revision >= 0 ? data.revision : 0;
                     transactions = data.transactions || [];
                     categories = data.categories || [];
                     budgets = data.budgets || {};
@@ -667,35 +1078,137 @@
                     migrateTransactions();
                     categories = migrateCategories(categories);
                 } else {
+                    cloudRevision = 0;
                     migrateFromLocalStorage();
                     await saveToFirestore();
                 }
             } catch (error) {
+                if (!authLoadCurrent(generation, userAtStart)) return;
                 console.warn("Firestore unavailable, using localStorage:", error);
                 loadData();
                 return;
             }
+            if (!authLoadCurrent(generation, userAtStart)) return;
+            try { await loadProtectedReview(generation); await runConfiguredOnOpenSync(generation); }
+            catch (error) { reportPersistenceError(error); }
+            if (!authLoadCurrent(generation, userAtStart)) return;
             populateDateFilters();
             initializeCumulativeBanks();
             renderAll();
         }
 
-        async function saveToFirestore() {
-            if (!currentUser) return;
-            const data = {
-                transactions,
-                categories,
-                budgets,
-                merchantDefaults,
-                categoryGroups,
-                categoryColors,
-                categoryOrder,
-                lastUpdated: firebase.firestore.FieldValue.serverTimestamp()
+        async function runConfiguredOnOpenSync(expectedGeneration) {
+            const service = window.transactionApprovalService;
+            if (window.TRANSACTION_SYNC_ENABLED !== true) { bankSyncState = 'not configured'; renderReviewInbox(); return; }
+            if (!service || service.serverBacked !== true || typeof service.sync !== 'function') { bankSyncState = 'disconnected'; renderReviewInbox(); return; }
+            const generation = expectedGeneration === undefined ? authGeneration : expectedGeneration;
+            const userAtStart = currentUser;
+            if (syncAttemptGeneration === generation || !authLoadCurrent(generation, userAtStart)) return;
+            if (navigator.onLine === false) { bankSyncState = 'offline'; renderReviewInbox(); return; }
+            const connections = Array.isArray(window.TRANSACTION_SYNC_CONNECTIONS) ? window.TRANSACTION_SYNC_CONNECTIONS.map(String).map(value => value.trim()).filter(Boolean) : [];
+            if (!connections.length) { bankSyncState = 'not configured'; renderReviewInbox(); return; }
+            syncAttemptGeneration = generation;
+            bankSyncState = 'syncing';
+            renderReviewInbox();
+            for (const connectionKey of connections) {
+                if (!authLoadCurrent(generation, userAtStart)) return;
+                try {
+                    await service.sync(connectionKey);
+                    bankSyncState = 'fresh';
+                } catch (error) {
+                    bankSyncState = 'sync error';
+                    const wrapped = new Error(`Bank sync failed for ${connectionKey}: ${error.message}`);
+                    if (error && error.diagnostic && typeof error.diagnostic === 'object') Object.defineProperty(wrapped, 'diagnostic', { value: error.diagnostic, enumerable: false, configurable: true });
+                    reportPersistenceError(wrapped);
+                    renderReviewInbox();
+                }
+            }
+            if (generation === authGeneration && currentUser) await loadProtectedReview(generation);
+        }
+
+        async function saveToFirestore(options) {
+            const opts = options || {};
+            const userAtStart = currentUser;
+            const generation = authGeneration;
+            const saveEpoch = acceptedStateEpoch;
+            if (!userAtStart) return false;
+            const state = JSON.parse(JSON.stringify(opts.snapshot || cloneAcceptedState()));
+            const write = async () => {
+                if (generation !== authGeneration || currentUser !== userAtStart) throw new Error('Authentication changed before the cloud save completed.');
+                if (saveEpoch !== acceptedStateEpoch) {
+                    const error = new Error('Accepted-state save was superseded by a newer durable change.');
+                    error.code = 'STALE_ACCEPTED_SAVE';
+                    throw error;
+                }
+                const service = window.transactionApprovalService;
+                if (service && service.serverBacked === true) {
+                    if (typeof service.saveAcceptedState !== 'function') throw new Error('Protected state service cannot save accepted state.');
+                    // Read the revision immediately before this queue slot
+                    // runs. Sequential settings saves in one epoch may use
+                    // the revision produced by the previous slot, while the
+                    // epoch guard rejects snapshots captured before an
+                    // independent approval, restore or reset.
+                    const expectedRevision = cloudRevision;
+                    const acknowledged = await service.saveAcceptedState(state, expectedRevision);
+                    if (!acknowledged || acknowledged.ok !== true || !acknowledged.state) throw new Error('Protected state service did not acknowledge the save.');
+                    if (generation !== authGeneration || currentUser !== userAtStart) throw new Error('Authentication changed before the protected save was acknowledged.');
+                    if (saveEpoch !== acceptedStateEpoch) {
+                        const error = new Error('Accepted-state save was superseded by a newer durable change.');
+                        error.code = 'STALE_ACCEPTED_SAVE';
+                        throw error;
+                    }
+                    // Advance the accepted-state epoch before the queue slot
+                    // releases. Older snapshots already waiting behind this
+                    // acknowledged accepted-state transition must be rejected
+                    // before they can reach persistence. Settings-only saves do
+                    // not opt into this invalidation and remain sequential.
+                    if (opts.acceptedStateChange === true) acceptedStateEpoch += 1;
+                    cloudRevision = acknowledged.revision;
+                    lastPersistenceError = null;
+                    return true;
+                }
+                const ref = db.collection('shared').doc('data');
+                const expectedRevision = cloudRevision;
+                const nextRevision = expectedRevision + 1;
+                const data = {
+                    transactions: state.transactions,
+                    categories: state.categories,
+                    budgets: state.budgets,
+                    merchantDefaults: state.merchantDefaults,
+                    categoryGroups: state.categoryGroups,
+                    categoryColors: state.categoryColors,
+                    categoryOrder: state.categoryOrder,
+                    revision: nextRevision,
+                    lastUpdated: firebase.firestore.FieldValue.serverTimestamp()
+                };
+                await db.runTransaction(async transaction => {
+                    const snapshot = await transaction.get(ref);
+                    const remote = snapshot.exists ? snapshot.data() : {};
+                    const remoteRevision = Number.isSafeInteger(remote.revision) && remote.revision >= 0 ? remote.revision : 0;
+                    if (remoteRevision !== expectedRevision) throw new Error('Cloud data changed in another session. Reload before saving.');
+                    transaction.set(ref, data);
+                });
+                if (generation !== authGeneration || currentUser !== userAtStart) throw new Error('Authentication changed before the cloud save was acknowledged.');
+                if (saveEpoch !== acceptedStateEpoch) {
+                    const error = new Error('Accepted-state save was superseded by a newer durable change.');
+                    error.code = 'STALE_ACCEPTED_SAVE';
+                    throw error;
+                }
+                if (opts.acceptedStateChange === true) acceptedStateEpoch += 1;
+                cloudRevision = nextRevision;
+                lastPersistenceError = null;
+                return true;
             };
+            const queued = firestoreSaveQueue.then(write, write);
+            firestoreSaveQueue = queued.catch(() => undefined);
             try {
-                await db.collection('shared').doc('data').set(data);
+                return await queued;
             } catch (error) {
+                if (error && error.code === 'STALE_ACCEPTED_SAVE' && opts.throwOnFailure !== true) return false;
+                reportPersistenceError(error);
+                if (opts.throwOnFailure) throw error;
                 console.warn("Firestore save failed:", error);
+                return false;
             }
         }
 
@@ -722,18 +1235,11 @@
         let merchantDefaults = {};
         let pendingImport = [];
         let pendingImportBudgets = {};
+        const reviewStore = new TransactionReview.ReviewStore();
+        const pendingReviewBudgets = new Map();
         let currentTransactionIndex = 0;
 
-        const accountMap = {
-            '4720': 'CFF',
-            '4004': 'CFU',
-            '9981': 'CSP',
-            '1963': 'CSP',
-            '0071': 'Ven X',
-            '71': 'Ven X',
-            '7418': 'Ven X',
-            '0820': 'Checking Account'
-        };
+        const accountMap = { ...TransactionConfig.legacyAccountAliases };
 
         let newImportQueue = [];
         let newImportIndex = 0;
@@ -741,6 +1247,21 @@
         let monthlyChart, yearlyChart;
 
         const categoryColorPalette = ['#3498db', '#e74c3c', '#2ecc71', '#f39c12', '#9b59b6', '#1abc9c', '#34495e', '#e67e22', '#c0392b', '#27ae60', '#2980b9', '#8e44ad', '#e91e63', '#00bcd4', '#ff5722', '#795548', '#607d8b', '#9c27b0', '#4caf50', '#ff9800', '#03a9f4', '#f44336', '#ffc107', '#cddc39', '#009688', '#673ab7', '#3f51b5', '#2196f3', '#ffeb3b', '#8bc34a', '#263238', '#9e9e9e', '#f06292', '#ba68c8', '#9575cd', '#7986cb', '#64b5f6', '#4fc3f7', '#4dd0e1', '#4db6ac', '#81c784', '#aed581', '#dce775', '#fff176', '#ffd54f', '#ffb74d', '#ff8a65', '#a1887f', '#90a4ae', '#f48fb1', '#ce93d8', '#b39ddb', '#9fa8da', '#82b1ff', '#81d4fa', '#80deea', '#80cbc4', '#a5d6a7', '#c5e1a5', '#dce775', '#e6ee9c', '#fff59d', '#ffe082', '#ffcc80', '#ffab91', '#bcaaa4', '#cfd8dc'];
+
+        function clearAcceptedAuthUi() {
+            document.getElementById('loginScreen').style.display = 'flex';
+            document.querySelector('.app-layout').style.display = 'none';
+            transactions = [];
+            categories = [];
+            budgets = {};
+            merchantDefaults = {};
+            categoryGroups = [];
+            categoryColors = {};
+            categoryOrder = [];
+            cloudRevision = 0;
+            clearProviderLinkUiState();
+            renderAll();
+        }
 
         function initTheme() {
             const saved = localStorage.getItem(THEME_KEY);
@@ -997,20 +1518,20 @@
             list.innerHTML = groups.map(group => `
                 <div class="category-group">
                     <div class="category-group-header" onclick="toggleGroup(this)">
-                        <div class="category-group-title">${group}</div>
+                        <div class="category-group-title">${escapeHTML(group)}</div>
                         <div class="category-group-actions">
-                            <button class="btn btn-primary" onclick="event.stopPropagation(); showAddCategoryModal('${group}')">Add Category</button>
-                            <button class="btn btn-secondary" onclick="event.stopPropagation(); showEditGroupModal('${group}')">Edit</button>
-                            ${group !== 'Ungrouped' ? `<button class="btn btn-danger" onclick="event.stopPropagation(); confirmDeleteGroup('${group}')">Delete</button>` : ''}
+                            <button class="btn btn-primary" data-group="${escapeHTML(group)}" data-group-action="add">Add Category</button>
+                            <button class="btn btn-secondary" data-group="${escapeHTML(group)}" data-group-action="edit">Edit</button>
+                            ${group !== 'Ungrouped' ? `<button class="btn btn-danger" data-group="${escapeHTML(group)}" data-group-action="delete">Delete</button>` : ''}
                         </div>
                     </div>
                     <div class="category-group-content">
                         ${grouped[group].map(cat => `
                             <div class="category-item">
                                 <div class="category-info">
-                                    <div class="category-color" style="background:${cat.color}"></div>
-                                    <span class="category-name">${cat.name}</span>
-                                    <span class="category-type ${cat.type}">${cat.type === 'income' ? 'Income' : 'Expense'}</span>${cat.isCumulative ? '<span class="category-type cumulative">Cumulative</span>' : ''}
+                                    <div class="category-color" style="background:${/^#[0-9a-f]{6}$/i.test(cat.color) ? cat.color : '#3498db'}"></div>
+                                    <span class="category-name">${escapeHTML(cat.name)}</span>
+                                    <span class="category-type ${cat.type === 'income' ? 'income' : 'expense'}">${cat.type === 'income' ? 'Income' : 'Expense'}</span>${cat.isCumulative ? '<span class="category-type cumulative">Cumulative</span>' : ''}
                                 </div>
                                 <div class="category-actions">
                                     <button class="btn btn-secondary" onclick="showEditCategoryModal(${categories.indexOf(cat)})">Edit</button>
@@ -1021,6 +1542,15 @@
                     </div>
                 </div>
             `).join('');
+            list.querySelectorAll('[data-group-action]').forEach(button => {
+                button.addEventListener('click', event => {
+                    event.stopPropagation();
+                    const group = button.dataset.group;
+                    if (button.dataset.groupAction === 'add') showAddCategoryModal(group);
+                    if (button.dataset.groupAction === 'edit') showEditGroupModal(group);
+                    if (button.dataset.groupAction === 'delete') confirmDeleteGroup(group);
+                });
+            });
         }
 
         function toggleGroup(header) {
@@ -1265,7 +1795,7 @@
         function populateCategoryGroupDropdown() {
             const select = document.getElementById('categoryFormGroup');
             select.innerHTML = '<option value="">Ungrouped</option>' + 
-                categoryGroups.map(g => `<option value="${g}">${g}</option>`).join('');
+                categoryGroups.map(g => `<option value="${escapeHTML(g)}">${escapeHTML(g)}</option>`).join('');
         }
 
         document.getElementById('categoryFormGroup').addEventListener('change', function() {
@@ -1350,10 +1880,28 @@
         });
 
         function saveData() {
-            localStorage.setItem(TRANS_DATA_KEY, JSON.stringify(transactions));
-            localStorage.setItem(CAT_DATA_KEY, JSON.stringify(categories));
-            localStorage.setItem(BUDGET_DATA_KEY, JSON.stringify(budgets));
-            if (currentUser) saveToFirestore();
+            writeLocalState();
+            return currentUser ? saveToFirestore() : Promise.resolve(false);
+        }
+
+        async function commitAcceptedState(nextState, previousState) {
+            const before = previousState || cloneAcceptedState();
+            const generation = authGeneration;
+            const user = currentUser;
+            const snapshot = JSON.parse(JSON.stringify(nextState));
+            try {
+                if (user) {
+                    const saved = await saveToFirestore({ throwOnFailure: true, snapshot, acceptedStateChange: true });
+                    if (saved !== true) throw new Error('Cloud persistence was not acknowledged.');
+                    if (generation !== authGeneration || user !== currentUser || !currentUser) throw new Error('Authentication changed before the accepted edit was acknowledged.');
+                    if (acceptedStateSignature() !== JSON.stringify(before)) throw new Error('Accepted data changed during the edit; reload before saving.');
+                }
+                restoreAcceptedState(snapshot);
+                return true;
+            } catch (error) {
+                if (acceptedStateSignature() === JSON.stringify(before)) restoreAcceptedState(before);
+                throw error;
+            }
         }
 
         function saveMerchantDefault(merchant, category, type) {
@@ -1450,11 +1998,11 @@
             }
             
             const options = '<option value="">Select Category</option>' +
-                filteredCategories.map(c => `<option value="${c.name}">${c.name}</option>`).join('');
+                filteredCategories.map(c => `<option value="${escapeHTML(c.name)}">${escapeHTML(c.name)}</option>`).join('');
             transFilter.innerHTML = '<option value="all">All Categories</option>' + options;
             if (transFilter) transFilter.value = currentSelection;
             modalSelect.innerHTML = '<option value="">Select Category</option>' +
-                categories.map(c => `<option value="${c.name}">${c.name}</option>`).join('');
+                categories.map(c => `<option value="${escapeHTML(c.name)}">${escapeHTML(c.name)}</option>`).join('');
         }
 
         function getFilteredTransactions() {
@@ -1527,16 +2075,16 @@
                 return `
                 <div class="transaction" style="cursor:pointer;" onclick="openEditModal(${idx})">
                     <div class="transaction-left">
-                        <div class="date">${t.date}</div>
-                        <div>${t.description}</div>
-                        ${t.merchant ? `<div style="color:var(--muted);font-size:0.85rem">${t.merchant}</div>` : ''}
+                        <div class="date">${escapeHTML(t.date)}</div>
+                        <div>${escapeHTML(t.description)}</div>
+                        ${t.merchant ? `<div style="color:var(--muted);font-size:0.85rem">${escapeHTML(t.merchant)}</div>` : ''}
                     </div>
                     <div class="transaction-right">
                         <div class="amount ${amountClass}">
                             ${amountPrefix}$${Math.abs(amountVal).toFixed(2)}
                         </div>
-                        <span class="category">${t.category || 'Uncategorized'}</span>
-                        ${t.account ? `<div style="color:var(--muted-light);font-size:0.75rem;margin-top:2px;">${t.account}</div>` : ''}
+                        <span class="category">${escapeHTML(t.category || 'Uncategorized')}</span>
+                        ${t.account ? `<div style="color:var(--muted-light);font-size:0.75rem;margin-top:2px;">${escapeHTML(t.account)}</div>` : ''}
                     </div>
                 </div>
             `}).join('');
@@ -1559,7 +2107,7 @@
             typeSelect.value = t.type || 'expense';
 
             const categorySelect = document.getElementById('editTransCategory');
-            categorySelect.innerHTML = categories.map(c => `<option value="${c.name}">${c.name}</option>`).join('');
+            categorySelect.innerHTML = categories.map(c => `<option value="${escapeHTML(c.name)}">${escapeHTML(c.name)}</option>`).join('');
             if (t.category && categories.find(c => c.name === t.category)) {
                 categorySelect.value = t.category;
             }
@@ -1571,19 +2119,25 @@
             document.getElementById('editTransactionModal').classList.remove('active');
         });
 
-        document.getElementById('editTransDelete').addEventListener('click', () => {
+        document.getElementById('editTransDelete').addEventListener('click', async () => {
             if (editingTransactionIndex < 0) return;
             if (!confirm('Delete this transaction?')) return;
-            transactions.splice(editingTransactionIndex, 1);
-            saveTransactionsToStorage();
-            document.getElementById('editTransactionModal').classList.remove('active');
-            renderAll();
+            const previous = cloneAcceptedState();
+            const next = JSON.parse(JSON.stringify(previous));
+            next.transactions.splice(editingTransactionIndex, 1);
+            try {
+                await commitAcceptedState(next, previous);
+                document.getElementById('editTransactionModal').classList.remove('active');
+                renderAll();
+            } catch (error) { alert('Delete failed: ' + error.message); }
         });
 
-        document.getElementById('editTransSave').addEventListener('click', () => {
+        document.getElementById('editTransSave').addEventListener('click', async () => {
             if (editingTransactionIndex < 0) return;
-            const t = transactions[editingTransactionIndex];
-
+            const previous = cloneAcceptedState();
+            const next = JSON.parse(JSON.stringify(previous));
+            const t = next.transactions[editingTransactionIndex];
+            if (!t) return;
             t.date = document.getElementById('editTransDate').value || t.date;
             t.description = document.getElementById('editTransDescription').value.trim() || t.description;
             t.merchant = document.getElementById('editTransMerchant').value.trim();
@@ -1592,13 +2146,21 @@
             t.account = document.getElementById('editTransAccount').value.trim();
             t.payment_method = t.account;
             t.type = document.getElementById('editTransType').value || t.type;
-
-            saveTransactionsToStorage();
-            document.getElementById('editTransactionModal').classList.add('active');
-            renderAll();
+            try {
+                await commitAcceptedState(next, previous);
+                document.getElementById('editTransactionModal').classList.remove('active');
+                renderAll();
+            } catch (error) { alert('Save failed: ' + error.message); }
         });
 
         function renderCharts() {
+            if (window.__BUDGET_TOOL_LOCAL_LIMITED_UI__ === true) {
+                const monthly = document.getElementById('monthlyChart');
+                const yearly = document.getElementById('yearlyChart');
+                if (monthly) monthly.replaceWith(Object.assign(document.createElement('div'), { id: 'monthlyChart', textContent: 'Charts disabled in local demo.' }));
+                if (yearly) yearly.replaceWith(Object.assign(document.createElement('div'), { id: 'yearlyChart', textContent: 'Charts disabled in local demo.' }));
+                return;
+            }
             const month = document.getElementById('monthFilter').value;
             const year = document.getElementById('yearFilter').value;
             const monthData = getMonthData(month);
@@ -1675,7 +2237,10 @@
 
         function getSortedBudgetCats() {
             const allCats = Object.keys(budgets);
-            if (categoryOrder.length === 0) {
+            // Rendering an empty budget list must stay read-only. Persisting
+            // an empty order from every render queues accepted-state writes
+            // that can race a concurrent durable review approval.
+            if (categoryOrder.length === 0 && allCats.length > 0) {
                 categoryOrder = allCats;
                 saveCategoryOrder(categoryOrder);
             }
@@ -1826,14 +2391,14 @@
                     budget = budgets[cat][month] !== undefined ? budgets[cat][month] : 0;
                     remaining = budget - actual;
                     pct = budget > 0 && actual > 0 ? (actual / budget) * 100 : 0;
-                    budgetInput = `Budget: <input type="number" class="budget-input" data-cat="${cat}" data-month="${month}" value="${budget}" style="width:80px;padding:4px;border:1px solid var(--border-strong);border-radius:4px;">`;
+                    budgetInput = `Budget: <input type="number" class="budget-input" data-cat="${escapeHTML(cat)}" data-month="${month}" value="${budget}" style="width:80px;padding:4px;border:1px solid var(--border-strong);border-radius:4px;">`;
                 }
 
                 return `
-                    <div class="budget-item" data-cat="${cat}" style="flex-direction:column;gap:5px;">
+                    <div class="budget-item" data-cat="${escapeHTML(cat)}" style="flex-direction:column;gap:5px;">
                         <div style="display:flex;justify-content:space-between;align-items:center;">
                             <div>
-                                ${cat}
+                                ${escapeHTML(cat)}
                                 ${isCumulative ? '<span class="category-type cumulative" style="margin-left:8px;font-size:0.7rem;">Cumulative</span>' : ''}
                             </div>
                             <div class="remaining ${remaining >= 0 ? 'under' : 'over'}">
@@ -1959,12 +2524,12 @@
                 const remaining = budget - actual;
                 const pct = budget > 0 && actual > 0 ? (actual / budget) * 100 : 0;
                 const catTransactions = isCumulative ? yearData.filter(t => t.category === cat) : [];
-                const transactionDebug = isCumulative ? catTransactions.map(t => `<div style="font-size:0.7rem;color:var(--muted-light);padding-left:10px;">${t.date} ${t.description}: $${Math.abs(t.amount).toFixed(2)}</div>`).join('') : '';
+                const transactionDebug = isCumulative ? catTransactions.map(t => `<div style="font-size:0.7rem;color:var(--muted-light);padding-left:10px;">${escapeHTML(t.date)} ${escapeHTML(t.description)}: $${Math.abs(t.amount).toFixed(2)}</div>`).join('') : '';
                 return `
-                    <div class="budget-item" data-cat="${cat}" style="flex-direction:column;gap:5px;">
+                    <div class="budget-item" data-cat="${escapeHTML(cat)}" style="flex-direction:column;gap:5px;">
                         <div style="display:flex;justify-content:space-between;align-items:center;">
                             <div>
-                                ${cat}
+                                ${escapeHTML(cat)}
                                 ${isCumulative ? '<span class="category-type cumulative" style="margin-left:8px;font-size:0.7rem;">Cumulative</span>' : ''}
                             </div>
                             <div class="remaining ${remaining >= -0.01 ? 'under' : 'over'}">
@@ -2034,8 +2599,8 @@
                         return `
                         <div style="display:flex;justify-content:space-between;padding:8px;border-bottom:1px solid var(--border);cursor:pointer;" onclick="openEditModal(${idx})">
                             <div>
-                                <div style="font-size:0.85rem;color:var(--muted);">${t.date}</div>
-                                <div>${t.description}</div>
+                                <div style="font-size:0.85rem;color:var(--muted);">${escapeHTML(t.date)}</div>
+                                <div>${escapeHTML(t.description)}</div>
                             </div>
                             <div style="font-weight:600;color:var(--success);">$${t.amount.toFixed(2)}</div>
                         </div>
@@ -2066,14 +2631,14 @@
                 <div style="font-size:1.5rem;font-weight:600;color:var(--success);margin-bottom:15px;">$${total.toFixed(2)}</div>
                 ${sortedTypes.map(type => `
                     <div style="display:flex;justify-content:space-between;padding:8px;border-bottom:1px solid var(--border);">
-                        <div>${type}</div>
+                        <div>${escapeHTML(type)}</div>
                         <div style="font-weight:600;color:var(--success);">$${incomeByType[type].toFixed(2)}</div>
                     </div>
                 `).join('')}
             `;
         }
 
-        function copyBudgetsFromMonth() {
+        async function copyBudgetsFromMonth() {
             const sourceMonth = document.getElementById('copyBudgetFrom').value;
             const targetMonth = document.getElementById('monthFilter').value;
             if (!sourceMonth || !targetMonth) return;
@@ -2081,20 +2646,26 @@
                 alert('Please select a different month to copy from');
                 return;
             }
-            const budgetCats = Object.keys(budgets);
+            const previous = cloneAcceptedState();
+            const proposed = JSON.parse(JSON.stringify(previous));
+            const budgetCats = Object.keys(proposed.budgets);
             let copied = 0;
             budgetCats.forEach(cat => {
-                const catInfo = categories.find(c => c.name === cat);
+                const catInfo = proposed.categories.find(c => c.name === cat);
                 if (catInfo && catInfo.isCumulative) return;
-                if (budgets[cat][sourceMonth] !== undefined) {
-                    budgets[cat][targetMonth] = budgets[cat][sourceMonth];
+                if (proposed.budgets[cat][sourceMonth] !== undefined) {
+                    proposed.budgets[cat][targetMonth] = proposed.budgets[cat][sourceMonth];
                     copied++;
                 }
             });
-            saveData();
-            renderBudget();
-            renderYearlyBudget();
-            alert(`Copied ${copied} budget values from ${sourceMonth} to ${targetMonth}`);
+            try {
+                await commitAcceptedState(proposed, previous);
+                renderBudget();
+                renderYearlyBudget();
+                alert(`Copied ${copied} budget values from ${sourceMonth} to ${targetMonth}`);
+            } catch (error) {
+                alert(`Budget copy failed: ${error.message}`);
+            }
         }
 
         function populateBudgetCopyDropdown() {
@@ -2112,6 +2683,396 @@
             }).join('');
         }
 
+        function reviewSelectionIds() {
+            return Array.from(document.querySelectorAll('#reviewList input.review-select:checked')).map(input => input.dataset.reviewId);
+        }
+
+        function reviewSourceLabel(source) {
+            if (source === 'historical-csv') return 'Historical CSV';
+            if (source === 'bank-csv') return 'Bank CSV';
+            return source || 'Imported';
+        }
+
+        function reviewCandidateLabel(candidate) {
+            if (candidate && candidate.providerPending === true) return 'Provider pending';
+            if (candidate && candidate.amendment === 'removed') return 'Provider removal';
+            if (candidate && candidate.amendment === 'modified') return 'Provider update';
+            return reviewSourceLabel(candidate && candidate.source);
+        }
+
+        function renderReviewInbox() {
+            const list = document.getElementById('reviewList');
+            if (!list) return;
+            const status = document.getElementById('reviewStatus');
+            const syncLabel = typeof bankSyncState === 'undefined' ? 'not configured' : bankSyncState;
+            const candidates = reviewStore.list();
+            const selected = reviewSelectionIds();
+            const selectedSet = new Set(selected);
+            if (!candidates.length) {
+                list.innerHTML = '<div style="padding:16px;background:var(--surface-alt);border-radius:8px;color:var(--muted);">No new transactions are waiting for review. Importing or opening the app never adds a transaction automatically.</div>';
+                status.textContent = `No staged transactions. Bank sync: ${syncLabel}.`;
+            } else {
+                const total = candidates.filter(c => selected.includes(c.id)).reduce((sum, c) => sum + Number(c.amount || 0), 0);
+                status.textContent = `${candidates.length} staged · ${selected.length} selected · selected total ${total < 0 ? '-' : ''}$${Math.abs(total).toFixed(2)}. Review edits and possible overlaps before adding. Bank sync: ${syncLabel}.`;
+                list.innerHTML = candidates.map(candidate => {
+                    const overlap = candidate.overlap && candidate.overlap.length ? `<div style="color:#a65d00;font-size:0.8rem;">Possible overlap: ${candidate.overlap.length} existing observation(s); legitimate identical purchases remain separate.</div>` : '';
+                    return `<div class="review-row" data-review-row="${escapeHTML(candidate.id)}" style="display:grid;grid-template-columns:auto 1fr auto;gap:10px;align-items:start;padding:12px 0;border-bottom:1px solid var(--border);">
+                        <input class="review-select" type="checkbox" data-review-id="${escapeHTML(candidate.id)}" aria-label="Select ${escapeHTML(candidate.description)}"${selectedSet.has(candidate.id) ? ' checked' : ''}>
+                        <div style="min-width:0;"><div style="font-weight:600;">${escapeHTML(candidate.description)}</div><div style="font-size:0.82rem;color:var(--muted);">${escapeHTML(candidate.date)} · ${escapeHTML(candidate.account)} · ${escapeHTML(reviewCandidateLabel(candidate))}</div>${overlap}</div>
+                        <div style="text-align:right;white-space:nowrap;"><div style="font-weight:600;">${candidate.amount < 0 ? '-' : ''}$${Math.abs(Number(candidate.amount)).toFixed(2)}</div><div style="font-size:0.82rem;color:var(--muted);">${escapeHTML(candidate.category)}</div></div>
+                        <div style="grid-column:2 / -1;display:flex;gap:8px;flex-wrap:wrap;"><button class="btn btn-secondary review-edit" data-review-id="${escapeHTML(candidate.id)}" style="padding:4px 9px;">Edit</button><button class="btn btn-secondary review-split" data-review-id="${escapeHTML(candidate.id)}" style="padding:4px 9px;">Split</button><button class="btn btn-secondary review-defer" data-review-id="${escapeHTML(candidate.id)}" style="padding:4px 9px;">Defer</button><button class="btn btn-danger review-reject" data-review-id="${escapeHTML(candidate.id)}" style="padding:4px 9px;">Reject</button></div>
+                    </div>`;
+                }).join('');
+            }
+            const hasSelection = selected.length > 0;
+            ['addSelectedTransactions', 'deferSelectedTransactions', 'rejectSelectedTransactions'].forEach(id => { const button = document.getElementById(id); if (button) button.disabled = !hasSelection; });
+            const cancel = document.getElementById('cancelReview');
+            if (cancel) cancel.disabled = candidates.length === 0;
+        }
+
+        async function loadProtectedReview(expectedGeneration) {
+            const service = window.transactionApprovalService;
+            if (!service || service.serverBacked !== true || typeof service.listPending !== 'function') return;
+            const generation = expectedGeneration === undefined ? authGeneration : expectedGeneration;
+            const userAtStart = currentUser;
+            const remoteReview = typeof service.loadReview === 'function' ? await service.loadReview() : null;
+            if (!authLoadCurrent(generation, userAtStart)) return;
+            if (remoteReview) {
+                if (!window.TransactionReview || typeof window.TransactionReview.validateReviewSnapshot !== 'function') throw new Error('Protected review snapshot validation is unavailable.');
+                window.TransactionReview.validateReviewSnapshot(remoteReview);
+                reviewStore.restoreReview(remoteReview);
+            } else {
+                const pending = await service.listPending();
+                if (!authLoadCurrent(generation, userAtStart)) return;
+                const snapshot = reviewStore.exportReview();
+                snapshot.pending = pending;
+                reviewStore.restoreReview(snapshot);
+            }
+            restorePendingReviewBudgets();
+            renderReviewInbox();
+        }
+
+        function stageReviewTransactions(records, source, batchMeta) {
+            if (!records || !records.length) return [];
+            const batchId = `${source}-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+            const staged = reviewStore.stage(records.map(record => ({ ...record, account: record.account || record.payment_method || 'Unassigned', payment_method: record.payment_method || record.account || 'Unassigned' })), { source, batchId, batchMeta });
+            if (batchMeta && batchMeta.budgets && Object.keys(batchMeta.budgets).length) pendingReviewBudgets.set(batchId, { budgets: batchMeta.budgets, ids: staged.map(item => item.id) });
+            const service = window.transactionApprovalService;
+            if (service && service.serverBacked === true && typeof service.stage === 'function' && currentUser) {
+                const serviceGeneration = authGeneration;
+                const serviceUser = currentUser;
+                service.stage(records.map(record => ({ ...record, account: record.account || record.payment_method || 'Unassigned', payment_method: record.payment_method || record.account || 'Unassigned' })), { source, batchId, batchMeta }).then(() => {
+                    if (serviceGeneration !== authGeneration || serviceUser !== currentUser) throw new Error('Authentication changed before review staging was acknowledged.');
+                }).catch(reportPersistenceError);
+            }
+            renderReviewInbox();
+            document.getElementById('import')?.scrollIntoView({ behavior: 'smooth', block: 'start' });
+            return staged;
+        }
+
+        function addReviewCategoriesToState(state, records) {
+            [...new Set(records.map(item => item.category).filter(category => category && category !== 'Uncategorized'))].forEach(catName => {
+                if (!state.categories.find(c => c.name === catName)) {
+                    const usedColors = state.categories.map(c => c.color);
+                    const availableColor = categoryColorPalette.find(c => !usedColors.includes(c)) || categoryColorPalette[state.categories.length % categoryColorPalette.length];
+                    state.categories.push({ name: catName, type: 'expense', group: null, color: availableColor, isCumulative: false, cumulativeAmount: 0, bankBalances: {} });
+                }
+            });
+        }
+
+        function addReviewCategories(records) {
+            addReviewCategoriesToState({ categories }, records);
+        }
+
+        function toAcceptedTransaction(item) {
+            const accepted = { ...item };
+            delete accepted.status;
+            delete accepted.fingerprint;
+            delete accepted.overlap;
+            delete accepted.revision;
+            delete accepted.reviewedRevision;
+            delete accepted.batchId;
+            return accepted;
+        }
+
+        function writeLocalState(state) {
+            const source = state || { transactions, categories, budgets, merchantDefaults, categoryGroups, categoryColors, categoryOrder };
+            localStorage.setItem(TRANS_DATA_KEY, JSON.stringify(source.transactions));
+            localStorage.setItem(CAT_DATA_KEY, JSON.stringify(source.categories));
+            localStorage.setItem(BUDGET_DATA_KEY, JSON.stringify(source.budgets));
+            localStorage.setItem(STORAGE_KEY, JSON.stringify(source.merchantDefaults));
+            localStorage.setItem(CAT_GROUPS_KEY, JSON.stringify(source.categoryGroups));
+            localStorage.setItem(CAT_COLORS_KEY, JSON.stringify(source.categoryColors));
+            localStorage.setItem(CAT_ORDER_KEY, JSON.stringify(source.categoryOrder));
+        }
+
+        function cloneAcceptedState() {
+            return JSON.parse(JSON.stringify({ transactions, categories, budgets, merchantDefaults, categoryGroups, categoryColors, categoryOrder }));
+        }
+
+        function acceptedStateSignature() {
+            return JSON.stringify({ transactions, categories, budgets, merchantDefaults, categoryGroups, categoryColors, categoryOrder });
+        }
+
+        function restoreAcceptedState(snapshot) {
+            transactions = snapshot.transactions;
+            categories = snapshot.categories;
+            budgets = snapshot.budgets;
+            merchantDefaults = snapshot.merchantDefaults;
+            categoryGroups = snapshot.categoryGroups;
+            categoryColors = snapshot.categoryColors;
+            categoryOrder = snapshot.categoryOrder;
+            writeLocalState();
+        }
+
+        function mergeImportedBudgetsIntoState(state, importedBudgets) {
+            const unsafeMapKey = value => {
+                const key = String(value ?? '').trim();
+                return key === '__proto__' || key === 'constructor' || key === 'prototype';
+            };
+            Object.keys(importedBudgets || {}).forEach(month => {
+                if (unsafeMapKey(month)) throw new Error('Approval budget batch contains an unsafe map key.');
+                const monthBudgets = importedBudgets[month];
+                Object.keys(monthBudgets || {}).forEach(cat => {
+                    if (unsafeMapKey(cat)) throw new Error('Approval budget batch contains an unsafe map key.');
+                    if (!Object.prototype.hasOwnProperty.call(state.budgets, cat) || !state.budgets[cat] || typeof state.budgets[cat] !== 'object' || Array.isArray(state.budgets[cat])) state.budgets[cat] = {};
+                    state.budgets[cat][month] = monthBudgets[cat];
+                });
+            });
+            const monthsWithData = new Set();
+            state.transactions.forEach(t => {
+                if (t.date && t.date.length >= 7) monthsWithData.add(t.date.substring(0, 7));
+            });
+            Object.keys(state.budgets).forEach(cat => {
+                monthsWithData.forEach(month => {
+                    if (state.budgets[cat][month] === undefined) state.budgets[cat][month] = 0;
+                });
+            });
+        }
+
+        async function persistApprovedReview(payload, budgetBatches, options) {
+            const opts = options || {};
+            const userAtStart = opts.expectedUser || currentUser;
+            const generationAtStart = opts.expectedGeneration === undefined ? authGeneration : opts.expectedGeneration;
+            const previous = opts.expectedState ? JSON.parse(JSON.stringify(opts.expectedState)) : cloneAcceptedState();
+            const proposed = opts.canonicalState ? JSON.parse(JSON.stringify(opts.canonicalState)) : JSON.parse(JSON.stringify(previous));
+            if (!Array.isArray(proposed.transactions) || !Array.isArray(proposed.categories) || !proposed.budgets || typeof proposed.budgets !== 'object' || !proposed.merchantDefaults || typeof proposed.merchantDefaults !== 'object' || !Array.isArray(proposed.categoryGroups) || !proposed.categoryColors || typeof proposed.categoryColors !== 'object' || !Array.isArray(proposed.categoryOrder)) throw new Error('Approval service returned an invalid canonical state.');
+            const existingIds = new Set(proposed.transactions.map(item => item && item.sourceIdentity && item.sourceRevision ? `${item.sourceIdentity}@${item.sourceRevision}` : ''));
+            if (!opts.canonicalState) {
+                payload.map(toAcceptedTransaction).forEach(item => {
+                    const key = item.sourceIdentity && item.sourceRevision ? `${item.sourceIdentity}@${item.sourceRevision}` : '';
+                    if (!key || !existingIds.has(key)) {
+                        proposed.transactions.push(item);
+                        if (key) existingIds.add(key);
+                    }
+                });
+                addReviewCategoriesToState(proposed, payload);
+                (budgetBatches || []).forEach(batch => mergeImportedBudgetsIntoState(proposed, batch.budgets));
+            }
+            try {
+                if (!opts.skipCloud) {
+                    const saved = await saveToFirestore({ throwOnFailure: true, snapshot: proposed, acceptedStateChange: true });
+                    if (saved !== true) throw new Error('Cloud persistence was not acknowledged.');
+                }
+                if (generationAtStart !== authGeneration || currentUser !== userAtStart || !currentUser) throw new Error('Authentication changed before accepted data could be installed.');
+                if (acceptedStateSignature() !== JSON.stringify(previous)) throw new Error('Approval persistence conflicted with another local change; reload before retrying.');
+                writeLocalState(proposed);
+                transactions = proposed.transactions;
+                categories = proposed.categories;
+                budgets = proposed.budgets;
+                merchantDefaults = proposed.merchantDefaults;
+                categoryGroups = proposed.categoryGroups;
+                categoryColors = proposed.categoryColors;
+                categoryOrder = proposed.categoryOrder;
+                return true;
+            } catch (error) {
+                if (acceptedStateSignature() === JSON.stringify(previous)) {
+                    try { writeLocalState(previous); } catch (_) { /* Preserve the original persistence error. */ }
+                }
+                throw error;
+            }
+        }
+
+        function selectedReviewBudgetBatches(selectedIds) {
+            const ids = new Set(selectedIds);
+            return [...pendingReviewBudgets.entries()]
+                .filter(([, batch]) => {
+                    if (!Array.isArray(batch.ids) || !batch.ids.length) return false;
+                    const remaining = batch.ids.filter(id => {
+                        const item = reviewStore.get(id);
+                        return item && (item.status === 'pending' || item.status === 'deferred');
+                    });
+                    return remaining.length > 0 && remaining.every(id => ids.has(id));
+                })
+                .map(([batchId, batch]) => ({ batchId, ids: batch.ids.filter(id => ids.has(id)), budgets: batch.budgets }));
+        }
+
+        function restorePendingReviewBudgets() {
+            pendingReviewBudgets.clear();
+            reviewStore.listBatchMeta().forEach(([batchId, metadata]) => {
+                if (metadata && metadata.budgets && Array.isArray(metadata.ids) && metadata.ids.length) pendingReviewBudgets.set(batchId, { budgets: metadata.budgets, ids: metadata.ids.slice() });
+            });
+        }
+
+        async function approveSelectedReviewTransactions() {
+            const ids = reviewSelectionIds();
+            if (!ids.length) return;
+            const selected = ids.map(id => reviewStore.get(id)).filter(Boolean);
+            if (selected.some(item => !['bank-csv', 'historical-csv', 'bank-provider'].includes(item.source))) {
+                alert('This source is not configured for approval.');
+                return;
+            }
+            if (!currentUser) {
+                alert('Sign in again before adding transactions. No accepted data was changed.');
+                return;
+            }
+            const service = window.transactionApprovalService;
+            if (!service || service.serverBacked !== true) {
+                alert('Approval service is unavailable. No accepted data was changed.');
+                return;
+            }
+            const budgetBatches = selectedReviewBudgetBatches(ids);
+            const approvalBaseline = cloneAcceptedState();
+            const approvalUser = currentUser;
+            const approvalGeneration = authGeneration;
+            let durableApprovalAcknowledged = false;
+            try {
+                const result = await reviewStore.approveSelected(ids, {
+                    online: navigator.onLine !== false,
+                    authenticated: true,
+                    actor: currentUser.email || currentUser.uid,
+                    authorize: async ({ actor }) => {
+                        if (approvalGeneration !== authGeneration || approvalUser !== currentUser || !currentUser || (currentUser.email || currentUser.uid) !== actor) throw new Error('Approval actor is no longer signed in.');
+                        if (typeof currentUser.getIdTokenResult !== 'function') throw new Error('Fresh authenticated server authorization is unavailable.');
+                        const token = await currentUser.getIdTokenResult(true);
+                        if (!token || !token.token) throw new Error('Fresh authenticated server authorization is unavailable.');
+                        return { actor, uid: currentUser.uid, authTime: token.claims && token.claims.auth_time };
+                    },
+                    allowOverlap: document.getElementById('allowReviewOverlaps').checked,
+                    idempotencyKey: `csv-${ids.slice().sort().join(',')}`,
+                    acknowledge: async (payload, receipt, context) => {
+                        if (service && (service.serverBacked === true || typeof service.approve === 'function' && selected.some(item => item.source === 'bank-provider'))) {
+                            const acknowledged = await service.approve(payload, receipt, { ...context, budgetBatches });
+                            durableApprovalAcknowledged = !!(acknowledged && acknowledged.ok === true);
+                            if (approvalGeneration !== authGeneration || approvalUser !== currentUser || !currentUser) throw new Error('Authentication changed before approval was acknowledged.');
+                            if (!acknowledged || acknowledged.ok !== true || !acknowledged.state) throw new Error('Approval service did not return a canonical acknowledged state.');
+                            acceptedStateEpoch += 1;
+                            const installed = await persistApprovedReview(payload, budgetBatches, { skipCloud: true, canonicalState: acknowledged.state, expectedState: approvalBaseline, expectedGeneration: approvalGeneration, expectedUser: approvalUser });
+                            if (Number.isSafeInteger(acknowledged.revision) && acknowledged.revision >= 0) cloudRevision = acknowledged.revision;
+                            return installed;
+                        }
+                        return persistApprovedReview(payload, budgetBatches, { expectedState: approvalBaseline, expectedGeneration: approvalGeneration, expectedUser: approvalUser });
+                    }
+                });
+                budgetBatches.forEach(batch => {
+                    const remaining = (batch.ids || []).some(id => {
+                        const item = reviewStore.get(id);
+                        return item && (item.status === 'pending' || item.status === 'deferred');
+                    });
+                    if (!remaining) pendingReviewBudgets.delete(batch.batchId);
+                });
+                pendingImport = [];
+                pendingImportBudgets = {};
+                populateDateFilters();
+                populateCategoryFilters();
+                initializeCumulativeBanks();
+                renderAll();
+                renderReviewInbox();
+                alert(`Added ${result.accepted.length} selected transaction${result.accepted.length === 1 ? '' : 's'}.`);
+            } catch (error) {
+                alert(`${durableApprovalAcknowledged ? 'Approval was saved on the server, but this screen could not confirm the local install. Reload before retrying' : 'Nothing was added'}: ${error.message}`);
+                renderReviewInbox();
+                if (lastPersistenceError) reportPersistenceError(lastPersistenceError);
+            }
+        }
+
+        async function mutateSelectedReviews(action) {
+            const ids = reviewSelectionIds();
+            if (!ids.length) return;
+            for (const id of ids) {
+                try {
+                    const generation = authGeneration;
+                    const user = currentUser;
+                    await action(id);
+                    if (generation !== authGeneration || user !== currentUser) throw new Error('Authentication changed before review mutation was acknowledged.');
+                } catch (error) { alert(error.message); }
+            }
+            renderReviewInbox();
+        }
+
+        document.getElementById('reviewList').addEventListener('change', renderReviewInbox);
+        document.getElementById('reviewList').addEventListener('click', async event => {
+            const button = event.target.closest('button[data-review-id]');
+            if (!button) return;
+            const id = button.dataset.reviewId;
+            const service = window.transactionApprovalService;
+            const item = reviewStore.get(id);
+            try {
+                const mutationGeneration = authGeneration;
+                const mutationUser = currentUser;
+                if (button.classList.contains('review-reject')) {
+                    if (service && service.serverBacked === true) await service.reject(id, item.revision);
+                    if (mutationGeneration !== authGeneration || mutationUser !== currentUser) throw new Error('Authentication changed before review mutation was acknowledged.');
+                    reviewStore.reject(id, currentUser?.email);
+                }
+                if (button.classList.contains('review-defer')) {
+                    if (service && service.serverBacked === true) await service.defer(id, item.revision);
+                    if (mutationGeneration !== authGeneration || mutationUser !== currentUser) throw new Error('Authentication changed before review mutation was acknowledged.');
+                    reviewStore.defer(id, currentUser?.email);
+                }
+                if (button.classList.contains('review-edit')) {
+                    const description = prompt('Description', item.description);
+                    if (description === null) return;
+                    const amount = prompt('Signed amount', item.amount);
+                    if (amount === null) return;
+                    const date = prompt('Date (YYYY-MM-DD)', item.date);
+                    if (date === null) return;
+                    const category = prompt('Category', item.category);
+                    if (category === null) return;
+                    const account = prompt('Account', item.account);
+                    if (account === null) return;
+                    const patch = { description, amount, date, category, account, payment_method: account };
+                    if (service && service.serverBacked === true) await service.edit(id, patch, item.revision);
+                    if (mutationGeneration !== authGeneration || mutationUser !== currentUser) throw new Error('Authentication changed before review mutation was acknowledged.');
+                    reviewStore.edit(id, patch);
+                }
+                if (button.classList.contains('review-split')) {
+                    const specification = prompt('Split parts as Category:amount, Category:amount (positive amounts; signed direction is preserved)', '');
+                    if (specification === null) return;
+                    const parts = specification.split(',').map(value => value.trim()).filter(Boolean).map(value => {
+                        const separator = value.lastIndexOf(':');
+                        if (separator < 1) throw new Error('Each split part must use Category:amount.');
+                        return { category: value.slice(0, separator).trim(), amount: value.slice(separator + 1).trim() };
+                    });
+                    if (service && service.serverBacked === true) await service.split(id, parts, item.revision);
+                    if (mutationGeneration !== authGeneration || mutationUser !== currentUser) throw new Error('Authentication changed before review split was acknowledged.');
+                    reviewStore.split(id, parts);
+                }
+                renderReviewInbox();
+            } catch (error) { alert(error.message); }
+        });
+        document.getElementById('addSelectedTransactions').addEventListener('click', approveSelectedReviewTransactions);
+        document.getElementById('deferSelectedTransactions').addEventListener('click', () => mutateSelectedReviews(async id => {
+            const item = reviewStore.get(id);
+            const service = window.transactionApprovalService;
+            if (service && service.serverBacked === true) await service.defer(id, item.revision);
+            reviewStore.defer(id, currentUser?.email);
+        }));
+        document.getElementById('rejectSelectedTransactions').addEventListener('click', () => mutateSelectedReviews(async id => {
+            const item = reviewStore.get(id);
+            const service = window.transactionApprovalService;
+            if (service && service.serverBacked === true) await service.reject(id, item.revision);
+            reviewStore.reject(id, currentUser?.email);
+        }));
+        document.getElementById('cancelReview').addEventListener('click', async () => {
+            if (!confirm('Cancel this review? Staged transactions will be discarded and accepted data will remain unchanged.')) return;
+            try {
+                const service = window.transactionApprovalService;
+                if (service && service.serverBacked === true && typeof service.cancel === 'function') await service.cancel();
+                reviewStore.cancel(); pendingReviewBudgets.clear(); renderReviewInbox();
+            }
+            catch (error) { alert(error.message); }
+        });
         document.querySelectorAll('.nav-item').forEach(tab => {
             tab.addEventListener('click', () => {
                 document.querySelectorAll('.nav-item').forEach(t => t.classList.remove('active'));
@@ -2155,69 +3116,54 @@
         historyFileInput.addEventListener('change', (e) => handleFiles(e.target.files));
 
         function handleFiles(files) {
+            if (window.__BUDGET_TOOL_LOCAL_LIMITED_UI__ === true) { alert('CSV import is disabled in this local demo.'); return; }
             if (!files || files.length === 0) return;
-            
-            const fileArray = Array.from(files).sort();
+            const fileArray = Array.from(files).sort((a, b) => a.name.localeCompare(b.name));
             let totalTransactions = 0;
             let processedFiles = 0;
-            
+
             const processNextFile = (index) => {
                 if (index >= fileArray.length) {
-                    saveTransactionsToStorage();
-                    saveData();
-                    populateDateFilters();
-                    populateCategoryFilters();
-                    initializeCumulativeBanks();
-                    renderAll();
-                    alert(`Import complete! Processed ${processedFiles} files with ${totalTransactions} total transactions.`);
-                    document.getElementById('importPreview').classList.add('hidden');
+                    renderReviewInbox();
+                    alert(`Staged ${totalTransactions} historical transaction${totalTransactions === 1 ? '' : 's'} from ${processedFiles} file${processedFiles === 1 ? '' : 's'}. Review and explicitly add selected rows to change accepted data.`);
                     return;
                 }
-                
+
                 const file = fileArray[index];
                 const fileName = file.name;
-                
+
                 Papa.parse(file, {
                     complete: (results) => {
-                        const parsed = parseImportData(results.data, fileName);
-                        const fileTransactions = parsed.transactions;
-                        const fileBudgets = parsed.budgets;
-                        
-                        const importedCategories = [...new Set(fileTransactions.map(t => t.category).filter(c => c && c !== 'Uncategorized'))];
-                        importedCategories.forEach(catName => {
-                            if (!categories.find(c => c.name === catName)) {
-                                const usedColors = categories.map(c => c.color);
-                                const availableColor = categoryColorPalette.find(c => !usedColors.includes(c)) || categoryColorPalette[categories.length % categoryColorPalette.length];
-                                categories.push({ name: catName, type: 'expense', group: null, color: availableColor, isCumulative: false, cumulativeAmount: 0, bankBalances: {} });
-                            }
-                        });
-                        
-                        transactions = [...transactions, ...fileTransactions];
-                        applyImportedBudgets(fileBudgets);
-                        
-                        totalTransactions += fileTransactions.length;
-                        processedFiles++;
-                        
-                        document.getElementById('importStats').innerHTML = `Processing ${index + 1} of ${fileArray.length} files...`;
-                        
-                        processNextFile(index + 1);
+                        try {
+                            if (results.errors && results.errors.length) throw new Error('CSV parsing failed. Check delimiter and quoting.');
+                            const parsed = parseImportData(results.data, fileName);
+                            const fileTransactions = parsed.transactions;
+                            stageReviewTransactions(fileTransactions, 'historical-csv', { budgets: parsed.budgets, fileName });
+                            totalTransactions += fileTransactions.length;
+                            processedFiles++;
+                            document.getElementById('importStats').textContent = `Staged ${index + 1} of ${fileArray.length} files. Accepted data is unchanged.`;
+                            processNextFile(index + 1);
+                        } catch (error) {
+                            alert('Historical import stopped: ' + error.message + ' No rows from this file were added.');
+                        }
                     }
                 });
             };
-            
-            document.getElementById('importStats').innerHTML = `Processing ${fileArray.length} files...`;
+
+            document.getElementById('importStats').textContent = `Reading ${fileArray.length} historical file${fileArray.length === 1 ? '' : 's'} for review...`;
             document.getElementById('importPreview').classList.remove('hidden');
             document.getElementById('confirmImport').classList.add('hidden');
-            
             processNextFile(0);
         }
 
-        function parseBankStatement(rows, fileName) {
-            if (!rows || rows.length < 2) return { transactions: [], account: '' };
+        function parseBankStatement(rows, fileName, source, selectedAccount) {
+            if (!['chase', 'capital-one'].includes(source) || !['Checking Account', 'CFF', 'CFU', 'CSP', 'Ven X'].includes(selectedAccount)) {
+                throw new Error('Select a CSV source and account before importing.');
+            }
+            if (!rows || rows.length < 2) throw new Error('CSV must include a header and transaction rows.');
 
             const header = rows[0].map(h => (h || '').toString().replace(/\r/g, '').toLowerCase().trim());
-            let account = '';
-            let cardCol = -1;
+            let account = selectedAccount;
             let dateCol = -1;
             let descCol = -1;
             let amountCol = -1;
@@ -2226,7 +3172,6 @@
 
             for (let i = 0; i < header.length; i++) {
                 const h = header[i];
-                if (h.includes('card no') || h.includes('card #')) cardCol = i;
                 if (h === 'transaction date' || h === 'posting date' || h === 'post date') dateCol = i;
                 if (h === 'description' || h === 'payee' || h === 'name') descCol = i;
                 if (h === 'amount') amountCol = i;
@@ -2240,47 +3185,31 @@
                 }
             }
 
-            if (cardCol >= 0) {
-                for (let i = 1; i < rows.length; i++) {
-                    const cardNum = (rows[i][cardCol] || '').toString().trim().replace(/^0+/, '');
-                    if (cardNum && accountMap[cardNum]) {
-                        account = accountMap[cardNum];
-                        break;
-                    }
-                }
-            }
-
-            if (!account) {
-                const fn = fileName.toLowerCase();
-                if (fn.includes('4720') || fn.includes('cff')) account = 'CFF';
-                else if (fn.includes('4004') || fn.includes('cfu')) account = 'CFU';
-                else if (fn.includes('9981') || fn.includes('1963') || fn.includes('csp')) account = 'CSP';
-                else if (fn.includes('0071') || fn.includes('7418') || fn.includes('ven')) account = 'Ven X';
-                else if (fn.includes('0820') || fn.includes('checking')) account = 'Checking Account';
-            }
-
             const data = [];
-            const isChase = fileName.toLowerCase().includes('chase');
+            if (dateCol < 0 || descCol < 0 || (source === 'chase' ? amountCol < 0 : debitCol < 0 || creditCol < 0)) {
+                throw new Error('CSV columns do not match the selected source.');
+            }
+            const isChase = source === 'chase';
             for (let i = 1; i < rows.length; i++) {
-                const row = rows[i].map(c => (c || '').toString().replace(/\r/g, '').trim());
+                const row = rows[i].map(c => (c ?? '').toString().replace(/\r/g, '').trim());
                 if (row.every(c => c === '')) continue;
 
                 const dateRaw = dateCol >= 0 ? row[dateCol] : '';
                 const desc = descCol >= 0 ? row[descCol] : '';
                 let amount = 0;
 
-                if (amountCol >= 0) {
-                    amount = isChase ? -parseAmount(row[amountCol]) : parseAmount(row[amountCol]);
+                if (isChase) {
+                    amount = -parseAmount(row[amountCol]);
                 } else if (debitCol >= 0 || creditCol >= 0) {
-                    const debit = debitCol >= 0 ? parseAmount(row[debitCol]) : 0;
-                    const credit = creditCol >= 0 ? parseAmount(row[creditCol]) : 0;
+                    const debit = row[debitCol] ? parseAmount(row[debitCol]) : 0;
+                    const credit = row[creditCol] ? parseAmount(row[creditCol]) : 0;
+                    if (!Number.isFinite(debit) || !Number.isFinite(credit) || debit < 0 || credit < 0 || (debit !== 0 && credit !== 0)) throw new Error(`Invalid debit/credit at row ${i + 1}.`);
                     amount = credit > 0 ? -Math.abs(credit) : Math.abs(debit);
                 }
 
-                if (!dateRaw || !desc || amount === 0) continue;
-
                 const parsedDate = parseDate(dateRaw);
-                if (!parsedDate) continue;
+                if (!parsedDate || !desc || !Number.isFinite(amount)) throw new Error(`Invalid date, description or amount at row ${i + 1}.`);
+                if (amount === 0) continue;
 
                 const defaultInfo = getDefaultCategory(desc);
 
@@ -2351,11 +3280,14 @@
                     if (!nextRowsHaveData) break;
                 }
 
-                if (inIncome && row[6] && row[7] && !isNaN(parseAmount(row[7]))) {
+                if (inIncome && row[6] && row[7]) {
+                    const incomeAmount = parseAmount(row[7]);
+                    const incomeDate = parseDate(row[10] || '');
+                    if (!incomeDate || !Number.isFinite(incomeAmount)) throw new Error(`Invalid historical income row ${i + 1}.`);
                     data.push({
-                        date: parseDate(row[10] || ''),
+                        date: incomeDate,
                         description: row[6],
-                        amount: parseAmount(row[7]),
+                        amount: incomeAmount,
                         category: 'Income',
                         merchant: row[6],
                         payment_method: '',
@@ -2368,20 +3300,23 @@
                     const category = row[0].trim().toLowerCase();
                     if (category === 'total' || category.includes('surplus')) {
                         expensesBudgetDone = true;
-                    } else if (!isNaN(parseAmount(row[1]))) {
+                    } else if (row[1] !== undefined && row[1] !== '') {
                         const budgetAmount = parseAmount(row[1]);
-                        if (category && !isNaN(budgetAmount)) {
+                        if (!Number.isFinite(budgetAmount)) throw new Error(`Invalid budget amount at row ${i + 1}.`);
+                        if (category) {
                             if (!budgetsByMonth[currentMonth]) budgetsByMonth[currentMonth] = {};
                             budgetsByMonth[currentMonth][row[0].trim()] = budgetAmount;
                         }
                     }
                 }
 
-                if (inExpenses && row[6] && row[9] && !isNaN(parseAmount(row[9]))) {
+                if (inExpenses && row[6] && row[9]) {
                     const amount = parseAmount(row[9]);
                     const category = row[8] || 'Uncategorized';
+                    const transactionDate = parseDate(row[10]);
+                    if (!transactionDate || !Number.isFinite(amount)) throw new Error(`Invalid historical expense row ${i + 1}.`);
                     data.push({
-                        date: parseDate(row[10]),
+                        date: transactionDate,
                         description: row[6],
                         amount: amount,
                         category: category,
@@ -2393,38 +3328,22 @@
                 }
             }
             return { 
-                transactions: data.filter(d => d.date && !isNaN(d.amount)),
+                transactions: data,
                 budgets: budgetsByMonth
             };
         }
 
         function parseDate(val) {
-            if (!val) return '';
-            const parts = val.split('/');
-            if (parts.length === 3) {
-                const m = parts[0].padStart(2, '0');
-                const d = parts[1].padStart(2, '0');
-                let y = parts[2];
-                if (y.length === 2) y = '20' + y;
-                return `${y}-${m}-${d}`;
-            }
-            return val;
+            return TransactionValidation.date(val);
         }
 
         function parseAmount(val) {
-            if (!val) return 0;
-            const str = val.toString().trim();
-            const isNegative = str.includes('(') && str.includes(')');
-            let cleaned = str.replace(/[^0-9.-]/g, '');
-            const result = parseFloat(cleaned);
-            if (isNaN(result)) return 0;
-            return isNegative ? -result : result;
+            return TransactionValidation.minorUnits(val) / 100;
         }
 
         function showCategoryModal(index) {
             if (index >= pendingImport.length) {
                 document.getElementById('categoryModal').classList.remove('active');
-                confirmImportTransactions();
                 return;
             }
 
@@ -2442,7 +3361,7 @@
             typeSelect.value = t.type || 'expense';
 
             const categorySelect = document.getElementById('modalCategory');
-            categorySelect.innerHTML = categories.map(c => `<option value="${c.name}">${c.name}</option>`).join('') + '<option value="__new__">+ New Category</option>';
+            categorySelect.innerHTML = categories.map(c => `<option value="${escapeHTML(c.name)}">${escapeHTML(c.name)}</option>`).join('') + '<option value="__new__">+ New Category</option>';
 
             if (t.merchant) {
                 const defaultInfo = getDefaultCategory(t.merchant);
@@ -2548,7 +3467,7 @@
             const row = document.createElement('div');
             row.className = 'split-row';
             row.innerHTML = `
-                <select class="split-cat">${categories.map(c => `<option value="${c.name}">${c.name}</option>`).join('')}</select>
+                <select class="split-cat">${categories.map(c => `<option value="${escapeHTML(c.name)}">${escapeHTML(c.name)}</option>`).join('')}</select>
                 <input type="number" step="0.01" class="split-amt" placeholder="0.00" value="${amount || ''}">
                 <button class="btn btn-danger" onclick="this.parentElement.remove();updateSplitRemaining();">&times;</button>
             `;
@@ -2572,23 +3491,26 @@
             const t = pendingImport[currentTransactionIndex];
             const rows = document.querySelectorAll('#splitRows .split-row');
             const splits = [];
+            let invalid = false;
             rows.forEach(row => {
                 const cat = row.querySelector('.split-cat').value;
-                const amt = parseFloat(row.querySelector('.split-amt').value) || 0;
-                if (cat && amt > 0) splits.push({ category: cat, amount: amt });
+                const raw = row.querySelector('.split-amt').value.trim();
+                if (!raw) return; // An unused extra row is harmless.
+                const cents = TransactionValidation.minorUnits(raw);
+                if (!cat || !Number.isSafeInteger(cents) || cents <= 0) { invalid = true; return; }
+                splits.push({ category: cat, amount: cents / 100 });
             });
 
+            if (invalid) { alert('Every filled split row needs a category and positive amount with at most two decimal places.'); return; }
             if (splits.length === 0) return;
 
-            const totalAssigned = splits.reduce((s, sp) => s + sp.amount, 0);
-            if (Math.abs(totalAssigned - Math.abs(t.amount)) > 0.01) {
-                alert('Split amounts must equal the transaction amount.');
-                return;
-            }
+            let signedAmounts;
+            try { signedAmounts = TransactionValidation.split(t.amount, splits.map(sp => sp.amount)); }
+            catch (error) { alert(error.message); return; }
 
             splits.forEach((sp, i) => {
                 const newT = { ...t };
-                newT.amount = sp.amount;
+                newT.amount = signedAmounts[i];
                 newT.category = sp.category;
                 if (i > 0) newT.description = t.description + ` (split ${i + 1})`;
                 pendingImport.push(newT);
@@ -2597,7 +3519,7 @@
             pendingImport.splice(currentTransactionIndex, 1);
             if (pendingImport.length === 0) {
                 document.getElementById('categoryModal').classList.remove('active');
-                confirmImportTransactions();
+                stageReviewTransactions([], 'bank-csv');
             } else {
                 if (currentTransactionIndex >= pendingImport.length) currentTransactionIndex = pendingImport.length - 1;
                 showCategoryModal(currentTransactionIndex);
@@ -2605,32 +3527,19 @@
         }
 
         function confirmImportTransactions() {
-            pendingImport.forEach(t => {
-                if (!t.account) t.account = t.payment_method || '';
-            });
-            const importedCategories = [...new Set(pendingImport.map(t => t.category).filter(c => c && c !== 'Uncategorized'))];
-            importedCategories.forEach(catName => {
-                if (!categories.find(c => c.name === catName)) {
-                    const usedColors = categories.map(c => c.color);
-                    const availableColor = categoryColorPalette.find(c => !usedColors.includes(c)) || categoryColorPalette[categories.length % categoryColorPalette.length];
-                    categories.push({ name: catName, type: 'expense', group: null, color: availableColor, isCumulative: false, cumulativeAmount: 0, bankBalances: {} });
-                }
-            });
-            transactions = [...transactions, ...pendingImport];
-            saveTransactionsToStorage();
-            applyImportedBudgets(pendingImportBudgets);
+            pendingImport.forEach(t => { if (!t.account) t.account = t.payment_method || ''; });
+            stageReviewTransactions(pendingImport, 'bank-csv', { budgets: pendingImportBudgets });
             pendingImport = [];
             pendingImportBudgets = {};
             document.getElementById('importPreview').classList.add('hidden');
-            populateDateFilters();
-            populateCategoryFilters();
-            initializeCumulativeBanks();
-            renderAll();
-            alert('Import complete! ' + (importedCategories.length > 0 ? importedCategories.length + ' new categories added.' : ''));
         }
 
         function handleNewImport(files) {
+            if (window.__BUDGET_TOOL_LOCAL_LIMITED_UI__ === true) { alert('CSV import is disabled in this local demo.'); return; }
             if (!files || files.length === 0) return;
+            const source = document.getElementById('bankCsvSource').value;
+            const account = document.getElementById('bankCsvAccount').value;
+            if (!account) { alert('Select the CSV account first.'); return; }
             newImportQueue = [];
             newImportIndex = 0;
             newImportAccount = '';
@@ -2643,21 +3552,30 @@
                         alert('No transactions found in the selected file(s).');
                         return;
                     }
-                    pendingImport = newImportQueue;
-                    showCategoryModal(0);
+                    const staged = stageReviewTransactions(newImportQueue, 'bank-csv', { source, account, fileNames: fileArray.map(file => file.name) });
+                    pendingImport = [];
+                    newImportQueue = [];
+                    alert(`Staged ${staged.length} bank transaction${staged.length === 1 ? '' : 's'}. Review and explicitly add selected rows; accepted data is unchanged.`);
                     return;
                 }
 
                 const file = fileArray[idx];
                 const reader = new FileReader();
                 reader.onload = (e) => {
-                    const text = e.target.result;
-                    const results = Papa.parse(text, { skipEmptyLines: true });
-                    const parsed = parseBankStatement(results.data, file.name);
-                    if (parsed.account && !newImportAccount) newImportAccount = parsed.account;
-                    newImportQueue = newImportQueue.concat(parsed.transactions);
-                    processNext(idx + 1);
+                    try {
+                        const text = e.target.result;
+                        const results = Papa.parse(text, { skipEmptyLines: true });
+                        if (results.errors.length) throw new Error('CSV parsing failed. Check delimiter, quoting and columns.');
+                        const parsed = parseBankStatement(results.data, file.name, source, account);
+                        if (parsed.account && !newImportAccount) newImportAccount = parsed.account;
+                        newImportQueue = newImportQueue.concat(parsed.transactions);
+                        processNext(idx + 1);
+                    } catch (error) {
+                        newImportQueue = [];
+                        alert('Import stopped: ' + error.message);
+                    }
                 };
+                reader.onerror = () => { newImportQueue = []; alert('Could not read CSV file. Nothing from this batch was imported.'); };
                 reader.readAsText(file);
             };
 
@@ -2669,7 +3587,7 @@
             if (currentUser) saveToFirestore();
         }
 
-        function applyImportedBudgets(importedBudgets) {
+        function mergeImportedBudgets(importedBudgets) {
             const defaultMonthlyBudgets = {
                 'Groceries': 400,
                 'Restaurants': 250,
@@ -2688,34 +3606,32 @@
                 'Medical Bills': 0
             };
 
-            Object.keys(importedBudgets).forEach(month => {
-                const monthBudgets = importedBudgets[month];
-                Object.keys(monthBudgets).forEach(cat => {
-                    if (!budgets[cat]) budgets[cat] = {};
-                    budgets[cat][month] = monthBudgets[cat];
-                });
-            });
+            mergeImportedBudgetsIntoState({ budgets, transactions }, importedBudgets);
+        }
 
-            const monthsWithData = new Set();
-            transactions.forEach(t => {
-                if (t.date && t.date.length >= 7) {
-                    monthsWithData.add(t.date.substring(0, 7));
-                }
-            });
-
-            Object.keys(budgets).forEach(cat => {
-                monthsWithData.forEach(month => {
-                    if (budgets[cat][month] === undefined) {
-                        budgets[cat][month] = 0;
-                    }
-                });
-            });
-
+        function applyImportedBudgets(importedBudgets) {
+            mergeImportedBudgets(importedBudgets);
             saveData();
         }
 
-        function clearAllData() {
+        async function clearAllData() {
             if (confirm('Are you sure you want to clear all transactions and budgets? Your categories, groups, and colors will be preserved.')) {
+                if (currentUser) {
+                    const resetUser = currentUser;
+                    const resetGeneration = authGeneration;
+                    const service = window.transactionApprovalService;
+                    if (!service || service.serverBacked !== true || typeof service.reset !== 'function') {
+                        alert('Reset service is unavailable. Cloud data was not cleared.');
+                        return;
+                    }
+                    try {
+                        const acknowledged = await service.reset(cloudRevision);
+                        if (!acknowledged || acknowledged.ok !== true) throw new Error('Reset service did not acknowledge the change.');
+                        if (resetGeneration !== authGeneration || resetUser !== currentUser || !currentUser) throw new Error('Authentication changed before reset was acknowledged.');
+                        acceptedStateEpoch += 1;
+                        cloudRevision = acknowledged.revision;
+                    } catch (error) { alert('Reset failed: ' + error.message); return; }
+                }
                 localStorage.removeItem(TRANS_DATA_KEY);
                 localStorage.removeItem(BUDGET_DATA_KEY);
                 localStorage.removeItem(STORAGE_KEY);
@@ -2724,12 +3640,11 @@
         }
 
         function exportData() {
-            const data = {
-                transactions: transactions,
-                categories: categories,
-                budgets: budgets,
-                merchantDefaults: merchantDefaults
-            };
+            const data = TransactionReview.createBackup({
+                transactions, categories, budgets, merchantDefaults,
+                categoryGroups, categoryColors, categoryOrder,
+                review: reviewStore.exportReview()
+            }, { app: 'budget-tool' }, { acceptedHistory: true });
             const blob = new Blob([JSON.stringify(data, null, 2)], { type: 'application/json' });
             const url = URL.createObjectURL(blob);
             const a = document.createElement('a');
@@ -2742,27 +3657,76 @@
         function importData(input) {
             const file = input.files[0];
             if (!file) return;
+            // Capture the identity before the asynchronous file read starts.
+            // A user switch or sign-out while FileReader is pending must not
+            // let the later callback authorize or install the prior user's
+            // backup in the new auth epoch.
+            const importGeneration = authGeneration;
+            const importUser = currentUser;
             const reader = new FileReader();
-            reader.onload = function(e) {
+            reader.onload = async function(e) {
+                if (authGeneration !== importGeneration || currentUser !== importUser) {
+                    alert('Authentication changed before the backup could be read.');
+                    return;
+                }
+                const previous = cloneAcceptedState();
+                const previousReview = reviewStore.exportReview();
+                const previousBudgetBatches = [...pendingReviewBudgets.entries()].map(([batchId, value]) => [batchId, JSON.parse(JSON.stringify(value))]);
+                const previousUser = importUser;
+                const previousGeneration = importGeneration;
                 try {
                     const data = JSON.parse(e.target.result);
-                    if (data.transactions) transactions = data.transactions;
-                    if (data.categories) categories = data.categories;
-                    if (data.budgets) budgets = data.budgets;
-                    if (data.merchantDefaults) merchantDefaults = data.merchantDefaults;
-                    
-                    localStorage.setItem(TRANS_DATA_KEY, JSON.stringify(transactions));
-                    localStorage.setItem(CAT_DATA_KEY, JSON.stringify(categories));
-                    localStorage.setItem(BUDGET_DATA_KEY, JSON.stringify(budgets));
-                    localStorage.setItem(STORAGE_KEY, JSON.stringify(merchantDefaults));
-                    
-                    if (currentUser) saveToFirestore();
+                    const restored = TransactionReview.restoreBackup(data, { requireApproval: true, approved: confirm('Restore this validated backup? Existing accepted data will be replaced.') });
+                    const nextAccepted = {
+                        transactions: restored.transactions, categories: restored.categories, budgets: restored.budgets,
+                        merchantDefaults: restored.merchantDefaults, categoryGroups: restored.categoryGroups,
+                        categoryColors: restored.categoryColors, categoryOrder: restored.categoryOrder,
+                        ...(restored.acceptedHistoryDateCompatibility === true ? { acceptedHistoryDateCompatibility: true } : {})
+                    };
+                    let nextReview = restored.review || { schemaVersion: TransactionReview.VERSION, pending: [], rejected: [], accepted: [], audit: [], receipts: [], batchMeta: [] };
+                    const generation = importGeneration;
+                    const user = importUser;
+                    if (currentUser) {
+                        const service = window.transactionApprovalService;
+                        if (service && service.serverBacked === true && typeof service.restore === 'function') {
+                            const acknowledged = await service.restore(nextAccepted, cloudRevision);
+                            if (!acknowledged || acknowledged.ok !== true || !acknowledged.state) throw new Error('Restore service did not acknowledge canonical state.');
+                            if (generation !== authGeneration || user !== currentUser || !currentUser) throw new Error('Authentication changed before restore was acknowledged.');
+                            acceptedStateEpoch += 1;
+                            cloudRevision = acknowledged.revision;
+                            // Restore/reset intentionally invalidate server
+                            // receipts. Rehydrate the review surface from
+                            // that authoritative post-restore snapshot rather
+                            // than reinstalling stale backup receipts locally.
+                            if (typeof service.loadReview === 'function') nextReview = await service.loadReview();
+                        } else {
+                            const saved = await saveToFirestore({ throwOnFailure: true, snapshot: nextAccepted, acceptedStateChange: true });
+                            if (saved !== true) throw new Error('Cloud persistence was not acknowledged.');
+                        }
+                    }
+                    if (generation !== authGeneration || user !== currentUser) throw new Error('Authentication changed before restore could be installed.');
+                    transactions = nextAccepted.transactions;
+                    categories = nextAccepted.categories;
+                    budgets = nextAccepted.budgets;
+                    merchantDefaults = nextAccepted.merchantDefaults;
+                    categoryGroups = nextAccepted.categoryGroups;
+                    categoryColors = nextAccepted.categoryColors;
+                    categoryOrder = nextAccepted.categoryOrder;
+                    reviewStore.restoreReview(nextReview);
+                    restorePendingReviewBudgets();
+                    writeLocalState();
                     
                     populateDateFilters();
                     populateCategoryFilters();
                     renderAll();
                     alert('Data imported successfully!');
                 } catch (err) {
+                    if (authGeneration === previousGeneration && currentUser === previousUser) {
+                        restoreAcceptedState(previous);
+                        try { reviewStore.restoreReview(previousReview); } catch (_) { /* The prior in-memory state was created locally and is trusted. */ }
+                        pendingReviewBudgets.clear();
+                        previousBudgetBatches.forEach(([batchId, value]) => pendingReviewBudgets.set(batchId, value));
+                    }
                     alert('Error importing data: ' + err.message);
                 }
             };
@@ -2770,7 +3734,7 @@
             input.value = '';
         }
 
-        function addCategory() {
+        async function addCategory() {
             const name = document.getElementById('newCategoryName').value.trim();
             const type = document.getElementById('newCategoryType').value;
             if (!name) {
@@ -2781,31 +3745,78 @@
                 alert('Category already exists');
                 return;
             }
-            const usedColors = categories.map(c => c.color);
+            const previous = cloneAcceptedState();
+            const proposed = JSON.parse(JSON.stringify(previous));
+            const usedColors = proposed.categories.map(c => c.color);
             const availableColor = categoryColorPalette.find(c => !usedColors.includes(c)) || categoryColorPalette[0];
-            categories.push({ name: name, type: type, group: null, color: availableColor, isCumulative: false, cumulativeAmount: 0, bankBalances: {} });
-            saveCategories();
-            populateCategoryFilters();
-            renderCategories();
-            document.getElementById('newCategoryName').value = '';
-            alert('Category "' + name + '" added!');
+            proposed.categories.push({ name: name, type: type, group: null, color: availableColor, isCumulative: false, cumulativeAmount: 0, bankBalances: {} });
+            proposed.categoryColors[name] = availableColor;
+            try {
+                await commitAcceptedState(proposed, previous);
+                populateCategoryFilters();
+                renderCategories();
+                document.getElementById('newCategoryName').value = '';
+                alert('Category "' + name + '" added!');
+            } catch (error) {
+                alert(`Category save failed: ${error.message}`);
+            }
+        }
+
+        async function authorizeAndLoadUser(user, generation) {
+            const snapshot = { generation, user, uid: user && user.uid };
+            const service = window.transactionApprovalService;
+            if (service && service.serverBacked === true) {
+                // The configured server is the production app-user authority.
+                // A successful authenticated request is required before any
+                // shared data is rendered; the legacy email check is only a
+                // standalone fallback when no server is configured.
+                if (typeof service.listPending !== 'function') throw new Error('Configured app-user authorization is unavailable.');
+                await service.listPending();
+            } else if (!ALLOWED_EMAILS.includes((user.email || '').toLowerCase())) {
+                throw new Error('This account is not authorized.');
+            }
+            if (!providerAuthCurrent(snapshot)) return;
+            document.getElementById('loginScreen').style.display = 'none';
+            document.querySelector('.app-layout').style.display = 'flex';
+            refreshProviderLinkUi();
+            resumeProviderLink().catch(error => providerLinkStatus(error.message, true));
+            loadFromFirestore(generation);
         }
 
         // Auth flow
         auth.onAuthStateChanged((user) => {
+            const previousUser = currentUser;
+            authGeneration += 1;
+            const generation = authGeneration;
+            const identityChanged = Boolean(previousUser && (!user || previousUser.uid !== user.uid));
+            if (activeProviderLinkHandler) {
+                try {
+                    if (typeof activeProviderLinkHandler.exit === 'function') activeProviderLinkHandler.exit();
+                    else if (typeof activeProviderLinkHandler.destroy === 'function') activeProviderLinkHandler.destroy();
+                } catch (_) { /* The generation guard rejects callbacks from the old user. */ }
+                activeProviderLinkHandler = null;
+            }
+            if (!user || identityChanged) {
+                providerLinkStorageClear();
+                clearProviderLinkUiState();
+            }
+            syncAttemptGeneration = null;
+            if (!user || identityChanged || !previousUser) clearAcceptedAuthUi();
+            currentUser = null;
+            pendingReviewBudgets.clear();
+            reviewStore.clear();
             if (user) {
-                if (!ALLOWED_EMAILS.includes(user.email)) {
-                    alert('Access denied. This account is not authorized.');
-                    auth.signOut();
-                    return;
-                }
-                document.getElementById('loginScreen').style.display = 'none';
-                document.querySelector('.app-layout').style.display = 'flex';
                 currentUser = user;
-                loadFromFirestore();
+                authorizeAndLoadUser(user, generation).catch(error => {
+                    if (!providerAuthCurrent({ generation, user, uid: user.uid })) return;
+                    alert(`Access denied. ${error.message}`);
+                    currentUser = null;
+                    providerLinkStorageClear();
+                    clearProviderLinkUiState();
+                    auth.signOut();
+                });
             } else {
-                document.getElementById('loginScreen').style.display = 'flex';
-                document.querySelector('.app-layout').style.display = 'none';
+                refreshProviderLinkUi();
             }
         });
 
