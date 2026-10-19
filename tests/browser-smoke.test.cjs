@@ -26,7 +26,8 @@ const firebaseStub = [
   '  const auth = { currentUser: user, onAuthStateChanged(callback) { window.__authRegistered = true; listener = callback; setTimeout(() => { window.__authFired = true; window.__authEmail = user.email; callback(auth.currentUser); }, 0); }, signOut: async () => { window.__signedOut = true; auth.currentUser = null; if (listener) listener(null); }, signInWithPopup: async () => { auth.currentUser = user; if (listener) listener(user); }, __switchUser: () => { auth.currentUser = otherUser; if (listener) listener(otherUser); }, __switchUnauthorizedUser: () => { auth.currentUser = unauthorizedUser; if (listener) listener(unauthorizedUser); }, __refreshUser: () => { if (listener) listener(auth.currentUser); } };',
   '  function authFactory() { return auth; }',
   '  authFactory.GoogleAuthProvider = function GoogleAuthProvider() {};',
-  '  const db = { collection(name) { return { doc(id) { return { async get() { if (name === "shared" && id === "data" && window.__delaySharedRead === true) { window.__sharedReadStarted = true; await new Promise(resolve => { window.__resolveSharedRead = resolve; }); } return { exists: name === "shared" && id === "data", data: () => JSON.parse(JSON.stringify(data)) }; } }; } }; }, async runTransaction(callback) { window.__txReads = window.__txReads || []; window.__txWrites = window.__txWrites || []; const tx = { get: async ref => { const result = await ref.get(); window.__txReads.push(result.data().revision); return result; }, set: (ref, value) => { window.__txWrites.push(value.revision); Object.assign(data, JSON.parse(JSON.stringify(value))); } }; return callback(tx); } };',
+  '  window.__setSharedData = next => Object.assign(data, JSON.parse(JSON.stringify(next)));',
+  '  const db = { collection(name) { return { doc(id) { return { async get() { if (name === "shared" && id === "data" && window.__failSharedRead === true) throw new Error("synthetic shared read failure"); if (name === "shared" && id === "data" && window.__delaySharedRead === true) { window.__sharedReadStarted = true; await new Promise(resolve => { window.__resolveSharedRead = resolve; }); } return { exists: name === "shared" && id === "data", data: () => JSON.parse(JSON.stringify(data)) }; } }; } }; }, async runTransaction(callback) { window.__txReads = window.__txReads || []; window.__txWrites = window.__txWrites || []; const tx = { get: async ref => { const result = await ref.get(); window.__txReads.push(result.data().revision); return result; }, set: (ref, value) => { window.__txWrites.push(value.revision); Object.assign(data, JSON.parse(JSON.stringify(value))); } }; return callback(tx); } };',
   '  function firestoreFactory() { return db; }',
   '  firestoreFactory.FieldValue = { serverTimestamp: () => ({ synthetic: true }) };',
   '  window.firebase = { initializeApp() {}, auth: authFactory, firestore: firestoreFactory };',
@@ -80,6 +81,56 @@ function createServer() {
     await page.goto('http://127.0.0.1:' + port + '/index.html');
     await page.waitForFunction(() => document.querySelector('.app-layout').style.display === 'flex');
     await page.waitForFunction(() => document.body.innerText.includes('Old user transaction'));
+    const authenticatedLoadPersistence = await page.evaluate(async () => {
+        const originalService = window.transactionApprovalService;
+        let serverSaveCalls = 0;
+        window.transactionApprovalService = {
+            serverBacked: true,
+            async loadReview() { return null; },
+            async listPending() { return []; },
+            async saveAcceptedState() { serverSaveCalls += 1; return { ok: true, revision: 1 }; }
+        };
+        window.__txWrites = [];
+        window.__txReads = [];
+        window.__setSharedData({
+            transactions: [
+                { sourceId: 'opaque-history-load', date: 'Unknown', description: 'Opaque historical row', amount: -7.25, category: 'Restaurants', account: 'Checking', payment_method: 'Checking', type: 'expense' },
+                { sourceId: 'month-navigation-load', date: '2026-10-01', description: 'Month navigation row', amount: -1.5, category: 'Restaurants', account: 'Checking', payment_method: 'Checking', type: 'expense' }
+            ],
+            categories: [{ name: 'Restaurants', type: 'expense', isCumulative: true, cumulativeAmount: 0, bankBalances: { '2026-10': 0 } }],
+            budgets: { Restaurants: { '2026-10': 100 } }, merchantDefaults: {}, categoryGroups: [], categoryColors: {}, categoryOrder: [], revision: 4
+        });
+        await window.loadFromFirestore();
+        window.selectMonth('2026-10');
+        document.querySelector('.nav-item[data-tab="import"]').click();
+        await new Promise(resolve => setTimeout(resolve, 0));
+        const configuredServiceResult = { serverSaveCalls, transactionWrites: window.__txWrites.slice(), loaded: transactions.some(transaction => transaction.description === 'Opaque historical row') };
+        window.transactionApprovalService = undefined;
+        window.__failSharedRead = true;
+        window.localStorage.setItem('budget_transactions', JSON.stringify([{ sourceId: 'opaque-history-fallback', date: 'Unknown', description: 'Opaque fallback row', amount: -8.25, category: 'Restaurants', account: 'Checking', payment_method: 'Checking', type: 'expense' }]));
+        window.localStorage.setItem('budget_categories', JSON.stringify([{ name: 'Restaurants', type: 'expense', isCumulative: true, cumulativeAmount: 0, bankBalances: { '2026-10': 0 } }]));
+        window.localStorage.setItem('budget_budgets', JSON.stringify({ Restaurants: { '2026-10': 100 } }));
+        window.localStorage.setItem('budget_category_order', JSON.stringify([]));
+        window.__txWrites = [];
+        await window.loadFromFirestore();
+        await new Promise(resolve => setTimeout(resolve, 0));
+        const fallbackResult = { transactionWrites: window.__txWrites.slice(), loaded: transactions.some(transaction => transaction.description === 'Opaque fallback row') };
+        window.__failSharedRead = false;
+        window.__setSharedData({
+            transactions: [{ sourceId: 'old-user-visible', date: '2026-10-01', description: 'Old user transaction', amount: -1.25, category: 'Restaurants', account: 'Checking', payment_method: 'Checking', type: 'expense' }],
+            categories: [{ name: 'Restaurants', type: 'expense' }],
+            budgets: {}, merchantDefaults: {}, categoryGroups: [], categoryColors: {}, categoryOrder: [], revision: 0
+        });
+        window.transactionApprovalService = originalService;
+        await window.loadFromFirestore();
+        document.querySelector('.nav-item[data-tab="monthly"]').click();
+        return { configuredServiceResult, fallbackResult };
+    });
+    assert.equal(authenticatedLoadPersistence.configuredServiceResult.serverSaveCalls, 0, 'Authenticated snapshot loading must not call the approval save service while deriving cumulative display state');
+    assert.deepEqual(authenticatedLoadPersistence.configuredServiceResult.transactionWrites, [], 'Authenticated snapshot loading must not write shared/data while deriving cumulative display state');
+    assert.equal(authenticatedLoadPersistence.configuredServiceResult.loaded, true, 'Authenticated snapshot loading must still retain opaque historical rows');
+    assert.deepEqual(authenticatedLoadPersistence.fallbackResult.transactionWrites, [], 'Authenticated local fallback must not write shared/data while rendering an offline snapshot');
+    assert.equal(authenticatedLoadPersistence.fallbackResult.loaded, true, 'Authenticated local fallback must still retain opaque historical rows');
     const disabledProviderResume = await page.evaluate(async () => {
         const originalEnabled = window.TRANSACTION_LINK_ENABLED;
         const originalService = window.transactionApprovalService;
