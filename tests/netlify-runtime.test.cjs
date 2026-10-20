@@ -622,6 +622,14 @@ function assertRedactedDiagnostic(records, expectedStage, expectedErrorCode = 'u
     assert.equal((await coldRouteHandler(new Request('https://synthetic.example/review', { method: 'PUT' }), trustedContext())).status, 405);
     assert.equal((await coldRouteHandler(new Request('https://synthetic.example/.netlify/functions/budgetTransactions/review', { method: 'OPTIONS', headers: { origin: 'https://zmstiles-dev.github.io' } }), trustedContext())).status, 204);
     assert.equal(coldFactoryCalls, 0, 'invalid routes and cold OPTIONS must not initialize Firebase/runtime state');
+    let settingsRouteFactoryCalls = 0;
+    const settingsRouteHandler = runtime.createNetlifyHandler({
+        environment: base,
+        createRuntime: async () => { settingsRouteFactoryCalls += 1; return { handler: async (_request, response) => { response.statusCode = 418; response.setHeader('Content-Type', 'application/json'); response.end('{"ok":true}'); } }; }
+    });
+    assert.equal((await settingsRouteHandler(new Request('https://synthetic.example/.netlify/functions/budgetTransactions/sync-settings', { method: 'OPTIONS', headers: { origin: 'https://zmstiles-dev.github.io' } }), trustedContext())).status, 204, 'sync settings must be exposed to browser preflight');
+    assert.equal((await settingsRouteHandler(new Request('https://synthetic.example/.netlify/functions/budgetTransactions/sync-settings', { method: 'GET', headers: { origin: 'https://zmstiles-dev.github.io' } }), trustedContext())).status, 418, 'sync settings must reach the production runtime after edge routing');
+    assert.equal(settingsRouteFactoryCalls, 1, 'sync settings OPTIONS must not initialize the runtime');
     const stalledBody = new ReadableStream({ start() {} });
     const stalledHandler = runtime.createNetlifyHandler({
         maxBodyReadMs: 20,

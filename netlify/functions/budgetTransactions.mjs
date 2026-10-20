@@ -39,7 +39,7 @@ const DIAGNOSTIC_ERROR_CODES = new Set([
 ]);
 const KNOWN_PATHS = new Set([
     '/', '/review',
-    '/pending', '/stage', '/sync', '/sync-readiness', '/edit', '/split', '/reject', '/defer', '/cancel', '/approve', '/restore', '/accepted-state', '/reset',
+    '/pending', '/stage', '/sync', '/sync-readiness', '/sync-settings', '/edit', '/split', '/reject', '/defer', '/cancel', '/approve', '/restore', '/accepted-state', '/reset',
     '/link-token', '/link/create', '/plaid/link-token', '/plaid/link/create',
     '/link-exchange', '/link/exchange', '/plaid/exchange', '/plaid/link/exchange',
     '/link-update', '/link/update', '/plaid/update', '/plaid/link/update', '/link-disconnect', '/link/disconnect', '/plaid/disconnect', '/plaid/link/disconnect',
@@ -47,7 +47,7 @@ const KNOWN_PATHS = new Set([
 ]);
 const ROUTE_METHODS = new Map([
     ['/', new Set(['GET', 'POST'])], ['/review', new Set(['GET', 'POST'])], ['/pending', new Set(['GET'])],
-    ['/stage', new Set(['POST'])], ['/sync', new Set(['POST'])], ['/sync-readiness', new Set(['GET'])], ['/edit', new Set(['POST'])], ['/split', new Set(['POST'])],
+    ['/stage', new Set(['POST'])], ['/sync', new Set(['POST'])], ['/sync-readiness', new Set(['GET'])], ['/sync-settings', new Set(['GET', 'POST'])], ['/edit', new Set(['POST'])], ['/split', new Set(['POST'])],
     ['/reject', new Set(['POST'])], ['/defer', new Set(['POST'])], ['/cancel', new Set(['POST'])], ['/approve', new Set(['POST'])],
     ['/restore', new Set(['POST'])], ['/accepted-state', new Set(['POST'])], ['/reset', new Set(['POST'])],
     ['/link-token', new Set(['POST'])], ['/link/create', new Set(['POST'])], ['/plaid/link-token', new Set(['POST'])], ['/plaid/link/create', new Set(['POST'])],

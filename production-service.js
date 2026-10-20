@@ -64,6 +64,13 @@ const SAFE_LINK_ERROR_MESSAGES = new Set([
     'Cleanup requires reconciliation before retrying.',
     'Provider cleanup failed.',
     'Provider item does not match cleanup target.',
+    'Sync activation is not ready.',
+    'Sync settings are not configured.',
+    'Sync settings revision is required.',
+    'Sync settings changed since they were loaded.',
+    'Cutoff date must be a real YYYY-MM-DD date.',
+    'Cutoff date cannot be in the future.',
+    'Cutoff date can only move forward; earlier dates require an explicit backfill operation.',
     'Plaid Link returned an invalid response.',
     'Plaid Link request failed.',
     'Secret storage failed.',
@@ -90,6 +97,13 @@ function validUid(value) {
 function validEmail(value) {
     const normalized = text(value);
     return EMAIL_PATTERN.test(normalized);
+}
+
+function validDate(value) {
+    const match = /^(\d{4})-(\d{2})-(\d{2})$/.exec(text(value));
+    if (!match) return false;
+    const check = new Date(Date.UTC(Number(match[1]), Number(match[2]) - 1, Number(match[3])));
+    return check.getUTCFullYear() === Number(match[1]) && check.getUTCMonth() + 1 === Number(match[2]) && check.getUTCDate() === Number(match[3]);
 }
 
 function validVaultReferenceName(value) {
@@ -241,15 +255,19 @@ function createProtectedSyncReadiness(options) {
     const configDocument = text(opts.configDocument || 'transactionService');
     const connectionCollection = text(opts.connectionsCollection || 'protectedConnections');
     const mappingPolicies = opts.mappingPolicies && typeof opts.mappingPolicies === 'object' ? opts.mappingPolicies : {};
-    if (!validHouseholdId(householdId) || !requiredKeys.length || !requiredKeys.every(safeKey) || !/^\d{4}-\d{2}-\d{2}$/.test(cutoffDate)) throw new Error('Sync activation configuration is incomplete.');
+    if (!validHouseholdId(householdId) || !requiredKeys.length || !requiredKeys.every(safeKey) || !validDate(cutoffDate)) throw new Error('Sync activation configuration is incomplete.');
     return async function readSyncReadiness(auth, connectionKey) {
         const actor = auth || {};
         if (!validUid(actor.uid) || !validEmail(actor.email) || text(actor.householdId) !== householdId) throw new Error('Sync activation is not ready.');
         const configSnapshot = await opts.db.collection(configCollection).doc(configDocument).get();
         const config = configSnapshot && configSnapshot.exists ? configSnapshot.data() || {} : {};
         const activation = config.syncActivation;
-        if (config.allowed !== true || text(config.householdId) !== householdId || !activation || typeof activation !== 'object' || Array.isArray(activation) || activation.enabled !== true) return Object.freeze({ ready: false, revision: null, cutoffDate, connectionKeys: requiredKeys });
+        if (config.allowed !== true || text(config.householdId) !== householdId || !activation || typeof activation !== 'object' || Array.isArray(activation) || activation.enabled !== true) return Object.freeze({ ready: false, revision: null, cutoffDate, cutoffRevision: null, connectionKeys: requiredKeys });
         if (text(activation.cutoffDate) !== cutoffDate || !Number.isSafeInteger(activation.revision) || activation.revision < 1 || !exactConnectionKeys(activation.connections, requiredKeys)) throw new Error('Sync activation is not ready.');
+        const runtime = config.syncSettings;
+        const runtimeCutoff = runtime === undefined || runtime === null ? cutoffDate : text(runtime.cutoffDate);
+        const runtimeRevision = runtime === undefined || runtime === null ? activation.revision : runtime.revision;
+        if (runtime !== undefined && runtime !== null && (!runtime || typeof runtime !== 'object' || Array.isArray(runtime) || !validDate(runtimeCutoff) || runtimeCutoff < cutoffDate || !Number.isSafeInteger(runtimeRevision) || runtimeRevision < 1)) throw new Error('Sync activation is not ready.');
         if (connectionKey && !requiredKeys.includes(text(connectionKey))) throw new Error('Sync connection is not activated.');
         const proofs = activation.connections;
         const records = {};
@@ -264,7 +282,7 @@ function createProtectedSyncReadiness(options) {
             if (!validUid(record.ownerUid) || text(record.ownerUid) !== text(proof.ownerUid) || connectionKey && text(record.ownerUid) !== text(actor.uid) || text(record.householdId) !== householdId || record.enabled !== true || text(record.itemId) !== text(proof.itemId) || !validVaultReferenceName(record.secretName) || !validVaultReferenceVersion(record.secretVersion) || !stableMappingIsValid(key, record, mappingPolicies[key]) || record.pendingExchange !== undefined || !reservationValid || Object.values(record.exchangeLedger || {}).some(entry => entry && ['started', 'pending-binding', 'needs-reconciliation'].includes(entry.status)) || (Number.isSafeInteger(record.mappingPolicyRevision) && record.mappingPolicyRevision > 0 ? record.mappingPolicyRevision : 1) !== proof.policyRevision || mappingMetadataDigest(key, record) !== text(proof.mappingHash)) throw new Error('Sync activation is not ready.');
             records[key] = { itemId: text(record.itemId), mappingHash: text(proof.mappingHash), expectedInstitution };
         }
-        return Object.freeze({ ready: true, revision: activation.revision, cutoffDate, connectionKeys: requiredKeys, connections: records });
+        return Object.freeze({ ready: true, revision: activation.revision, cutoffDate: runtimeCutoff, cutoffRevision: runtimeRevision, connectionKeys: requiredKeys, connections: records });
     };
 }
 
@@ -1600,7 +1618,14 @@ function createProductionHttpHandler(options) {
                 const auth = await opts.authenticate(request);
                 if (typeof opts.syncReadiness !== 'function') throw new Error('Sync activation is not ready.');
                 const readiness = await opts.syncReadiness(auth);
-                return responseJson(response, 200, { ready: readiness && readiness.ready === true, revision: readiness && readiness.revision, cutoffDate: readiness && readiness.cutoffDate, connectionKeys: readiness && readiness.connectionKeys });
+                return responseJson(response, 200, { ready: readiness && readiness.ready === true, revision: readiness && readiness.revision, cutoffDate: readiness && readiness.cutoffDate, cutoffRevision: readiness && readiness.cutoffRevision, connectionKeys: readiness && readiness.connectionKeys });
+            }
+            if (path === '/sync-settings' && request && ['GET', 'POST'].includes(text(request.method).toUpperCase())) {
+                const auth = await opts.authenticate(request);
+                if (!opts.syncSettings) throw new Error('Sync settings are not configured.');
+                const body = request.method === 'GET' ? {} : await readRequestBody(request, { maxBodyBytes: limit });
+                const result = request.method === 'GET' ? await opts.syncSettings.read(auth) : await opts.syncSettings.update(auth, body.cutoffDate, body.expectedRevision);
+                return responseJson(response, 200, result);
             }
             if (type && (!request || request.method !== 'POST')) return responseJson(response, 404, { error: 'Route not found.' });
             if (!type) return opts.reviewHandler(adaptParsedRequest(request, limit), response);
@@ -1611,7 +1636,7 @@ function createProductionHttpHandler(options) {
             return responseJson(response, 200, result);
         } catch (error) {
             const message = safeLinkError(error);
-            const status = message === 'CORS origin is not allowed.' ? 403 : /authorization|user|household|Bearer|membership|existing app user/i.test(message) ? 401 : /required|configured|invalid|reconciliation|existing Item|bindings|mapping|cleanup/i.test(message) ? 409 : 500;
+            const status = message === 'CORS origin is not allowed.' ? 403 : /authorization|user|household|Bearer|membership|existing app user/i.test(message) ? 401 : /required|configured|invalid|reconciliation|existing Item|bindings|mapping|cleanup|sync|cutoff|settings|future/i.test(message) ? 409 : 500;
             return responseJson(response, status, { error: message });
         }
     };
@@ -1785,10 +1810,15 @@ function createProductionService(options) {
         connectionOwner: async key => connections.getOwner(key, householdId),
         connectionResolver: async (key, auth) => { const connection = await connections.getAuthorized(key, auth); return { accessToken: await tokenStore.resolveAccessToken(key, connection.secretVersion), accountMap: connection.accountMap }; },
         provider: dynamicProvider,
+        syncConnectionKeys: Array.isArray(opts.allowedConnectionKeys) && opts.allowedConnectionKeys.length ? opts.allowedConnectionKeys : ['chase', 'capital-one'],
+        syncConfigCollection: opts.configCollection || 'protectedAppConfig',
+        syncConfigDocument: opts.configDocument || 'transactionService',
+        syncConnectionsCollection: 'protectedConnections',
         maxDurationMs: opts.syncDeadlineMs,
+        clock: opts.clock,
         errorDiagnostic: opts.errorDiagnostic
     });
-    const handler = createProductionHttpHandler({ reviewHandler: composed.handler, authenticate, lifecycle, linkEnabled: opts.linkEnabled === true, syncReadiness: opts.syncReadiness, allowedOrigin: PRODUCTION_ORIGIN, maxBodyBytes: opts.maxBodyBytes });
+    const handler = createProductionHttpHandler({ reviewHandler: composed.handler, authenticate, lifecycle, linkEnabled: opts.linkEnabled === true, syncReadiness: opts.syncReadiness, syncSettings: composed.syncSettings, allowedOrigin: PRODUCTION_ORIGIN, maxBodyBytes: opts.maxBodyBytes });
     return Object.freeze({ ...composed, authenticate, connections, tokenStore, lifecycle, handler, allowedOrigin: PRODUCTION_ORIGIN });
 }
 

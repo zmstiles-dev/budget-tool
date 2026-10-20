@@ -29,6 +29,12 @@ artifact path.
 
 - The first-sync cutover is the inclusive app date `2026-10-09`; this
   supersedes the earlier October 16 value.
+- The October 9 activation proof remains the immutable baseline. Authenticated
+  `/sync-settings` GET/POST can persist a forward-only valid runtime cutoff
+  through today with an expected revision and strict connection-owner UID
+  checks. Each sync pins the cutoff/revision for its run; changing it affects
+  the next incremental run and does not reset cursors, backfill, clear the
+  pending inbox, or purge history.
 - Provider sync remains disabled by default. Enabling it requires an explicit
   server provider, connection ownership resolver, stable provider-account map,
   protected service endpoint, and `syncEnabled: true`.
@@ -38,6 +44,12 @@ artifact path.
 - Bank CSV imports require an explicit source and existing account. Historical
   and bank candidates enter one review surface; rejected and deferred markers,
   overlap flags, edits, splits, and explicit selected approval are preserved.
+- Possible overlaps use same signed amount and normalized account, a date
+  window of plus or minus three days, and conservative normalized merchant or
+  description evidence. Existing pending candidates are recomputed and show
+  matched record evidence for review; no warning auto-approves, rejects, or
+  deletes a row. The familiar CSV category popup handles pending review edits
+  and Save & Next only saves the revision-bound pending row.
 - Pending provider rows stay outside accepted totals until approval. Provider
   modifications and removals require the source revision they target and are
   applied atomically. Their staged target digest covers the accepted row or
@@ -66,6 +78,14 @@ artifact path.
 - The provider adapter requires an explicit USD account map, preserves provider
   signs, links pending and posted observations, paginates before publishing a
   cursor, and uses bounded retry, mutation restart, and deadline controls.
+- Checking income is a narrow sign compatibility rule: only the exact mapped
+  `Checking Account` alias with explicit provider `income` or `INCOME`/`PAYROLL`
+  classification becomes a positive income amount. Reimbursements remain
+  negative expenses, ordinary checking expenses and other account aliases keep
+  their existing signs. Untouched legacy pending payroll rows are derived on
+  hydration with a revision bump and signed `sourceOriginal`; accepted history
+  is unchanged, and an explicit type toggle back to expense restores the raw
+  negative sign.
 - Sandbox client ID, secret, public token, access token, and account mapping
   remain process-memory-only in the server scaffold. The browser never receives
   provider credentials or raw provider payloads.

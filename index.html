@@ -432,6 +432,7 @@
                         <div id="reviewStatus" style="color:var(--muted);font-size:0.9rem;">No staged transactions.</div>
                     </div>
                     <div style="display:flex;gap:8px;flex-wrap:wrap;">
+                        <button class="btn btn-secondary" id="reviewOpenEditor" disabled>Review transactions</button>
                         <button class="btn btn-primary" id="addSelectedTransactions" disabled>Add selected transactions</button>
                         <button class="btn btn-secondary" id="deferSelectedTransactions" disabled>Defer selected</button>
                         <button class="btn btn-danger" id="rejectSelectedTransactions" disabled>Reject selected</button>
@@ -459,6 +460,17 @@
                     <p>Drag & drop CSV file(s) here or click to browse</p>
                     <input type="file" id="fileInput" accept=".csv" multiple hidden>
                 </div>
+            </div>
+            <div class="card" id="syncSettingsCard" style="display:none;margin-top:20px;">
+                <h3>Bank sync cutoff</h3>
+                <p style="color:var(--muted);font-size:0.9rem;margin:6px 0 12px;">Newly observed transactions before this date stay outside normal sync. Changing this date applies to the next sync only; it does not backfill earlier records or clear existing review rows.</p>
+                <div style="display:flex;gap:10px;align-items:end;flex-wrap:wrap;">
+                    <label>Effective date
+                        <input type="date" id="syncCutoffDate" style="display:block;width:180px;padding:8px;border:1px solid var(--border-strong);border-radius:4px;">
+                    </label>
+                    <button class="btn btn-secondary" id="saveSyncCutoff">Save cutoff</button>
+                </div>
+                <div id="syncCutoffStatus" style="color:var(--muted);font-size:0.82rem;margin-top:8px;"></div>
             </div>
             <div class="card" id="providerLinkCard" style="display:none;margin-top:20px;">
                 <h3>Connect a bank</h3>
@@ -516,8 +528,9 @@
             <h2>Review Transaction <span id="reviewProgress" style="font-size:0.9rem;font-weight:400;color:var(--muted);"></span></h2>
             <div class="form-group">
                 <label>Account</label>
-                <div id="modalAccount" style="padding: 10px; background: #f8f9fa; border-radius: 4px; font-weight: 500;"></div>
+                <input type="text" id="modalAccount" style="width:100%;padding:8px;border:1px solid var(--border-strong);border-radius:4px;">
             </div>
+            <div id="modalOverlapEvidence" style="display:none;padding:10px;background:#fff7e6;border:1px solid #f0c36d;border-radius:4px;color:#7a4b00;font-size:0.85rem;margin-bottom:12px;"></div>
             <div class="form-group">
                 <label>Date</label>
                 <input type="date" id="modalDate" style="width:100%;padding:8px;border:1px solid var(--border-strong);border-radius:4px;">
@@ -563,6 +576,8 @@
             <div style="display: flex; gap: 10px; justify-content: flex-end; margin-top: 20px;">
                 <button class="btn btn-danger" id="deleteTransaction">Delete</button>
                 <button class="btn btn-secondary" id="splitTransaction">Split</button>
+                <button class="btn btn-secondary" id="reviewSkip" style="display:none;">Skip</button>
+                <button class="btn btn-secondary" id="reviewClose" style="display:none;">Close</button>
                 <button class="btn btn-success" id="saveTransaction">Approve</button>
             </div>
         </div>
@@ -784,6 +799,8 @@
         let lastPersistenceError = null;
         let syncAttemptGeneration = null;
         let bankSyncState = 'not configured';
+        let syncCutoffRevision = null;
+        let syncCutoffDate = '';
         let providerLinkPending = null;
         let providerLinkRecoveryConnectionKey = null;
         let activeProviderLinkHandler = null;
@@ -1317,9 +1334,13 @@
                 try {
                     const readiness = await service.syncReadiness();
                     if (!authLoadCurrent(generation, userAtStart)) return;
-                    if (!readiness || readiness.ready !== true) { bankSyncState = 'not configured'; renderReviewInbox(); return; }
+                    if (!readiness || readiness.ready !== true) { syncCutoffDate = ''; syncCutoffRevision = null; renderSyncSettings(); bankSyncState = 'not configured'; renderReviewInbox(); return; }
+                    syncCutoffDate = String(readiness.cutoffDate || '');
+                    syncCutoffRevision = Number.isSafeInteger(readiness.cutoffRevision) ? readiness.cutoffRevision : readiness.revision;
+                    renderSyncSettings();
                 } catch (_) {
                     if (!authLoadCurrent(generation, userAtStart)) return;
+                    syncCutoffDate = ''; syncCutoffRevision = null; renderSyncSettings();
                     bankSyncState = 'not configured'; renderReviewInbox(); return;
                 }
             }
@@ -1343,6 +1364,64 @@
             }
             if (generation === authGeneration && currentUser) await loadProtectedReview(generation);
         }
+
+        function validSyncDate(value) {
+            const match = /^(\d{4})-(\d{2})-(\d{2})$/.exec(String(value || '').trim());
+            if (!match) return false;
+            const date = new Date(Date.UTC(Number(match[1]), Number(match[2]) - 1, Number(match[3])));
+            return date.getUTCFullYear() === Number(match[1]) && date.getUTCMonth() + 1 === Number(match[2]) && date.getUTCDate() === Number(match[3]);
+        }
+
+        function renderSyncSettings() {
+            const card = document.getElementById('syncSettingsCard');
+            const input = document.getElementById('syncCutoffDate');
+            const status = document.getElementById('syncCutoffStatus');
+            const service = window.transactionApprovalService;
+            const visible = !!(card && service && service.serverBacked === true && syncCutoffDate && Number.isSafeInteger(syncCutoffRevision));
+            if (card) card.style.display = visible ? '' : 'none';
+            if (input && visible) { input.value = syncCutoffDate; input.max = new Date().toISOString().slice(0, 10); }
+            if (status && visible) status.textContent = `Revision ${syncCutoffRevision}. Applies to the next sync; existing review rows stay unchanged.`;
+        }
+
+        document.getElementById('saveSyncCutoff').addEventListener('click', async () => {
+            const service = window.transactionApprovalService;
+            const input = document.getElementById('syncCutoffDate');
+            const status = document.getElementById('syncCutoffStatus');
+            const button = document.getElementById('saveSyncCutoff');
+            if (!service || service.serverBacked !== true || typeof service.updateSyncSettings !== 'function' || !Number.isSafeInteger(syncCutoffRevision)) return;
+            const generation = authGeneration;
+            const user = currentUser;
+            const requested = String(input && input.value || '').trim();
+            if (!validSyncDate(requested) || requested > new Date().toISOString().slice(0, 10)) { if (status) status.textContent = 'Choose a real date through today.'; return; }
+            button.disabled = true;
+            try {
+                const result = await service.updateSyncSettings(requested, syncCutoffRevision);
+                if (!authLoadCurrent(generation, user)) return;
+                syncCutoffDate = String(result.cutoffDate || requested);
+                syncCutoffRevision = result.revision;
+                renderSyncSettings();
+            } catch (error) {
+                const conflict = /changed since|revision|stale/i.test(String(error && error.message || ''));
+                if (conflict && typeof service.syncSettings === 'function' && authLoadCurrent(generation, user)) {
+                    try {
+                        const current = await service.syncSettings();
+                        if (authLoadCurrent(generation, user) && current && current.ready === true && validSyncDate(current.cutoffDate) && Number.isSafeInteger(current.revision)) {
+                            syncCutoffDate = String(current.cutoffDate);
+                            syncCutoffRevision = current.revision;
+                            renderSyncSettings();
+                            // Keep the user's requested date in the form while
+                            // showing the server's current revision and date.
+                            if (input) input.value = requested;
+                            if (status) status.textContent = `Cutoff changed elsewhere; current setting is ${syncCutoffDate} (revision ${syncCutoffRevision}). Review the requested date and save again.`;
+                        } else if (status) status.textContent = `Cutoff save failed: ${error.message}`;
+                    } catch (_) {
+                        if (status) status.textContent = `Cutoff save failed: ${error.message}`;
+                    }
+                } else if (status) status.textContent = `Cutoff save failed: ${error.message}`;
+            } finally {
+                if (authLoadCurrent(generation, user)) button.disabled = false;
+            }
+        });
 
         async function saveToFirestore(options) {
             const opts = options || {};
@@ -1456,6 +1535,13 @@
         const reviewStore = new TransactionReview.ReviewStore();
         const pendingReviewBudgets = new Map();
         let currentTransactionIndex = 0;
+        let categoryModalMode = 'csv';
+        let categoryModalReviewIds = [];
+        let categoryModalGeneration = 0;
+        let categoryModalUser = null;
+        let categoryModalCandidateRevision = null;
+        let categoryModalSession = 0;
+        let categoryModalBusy = false;
 
         const accountMap = { ...TransactionConfig.legacyAccountAliases };
 
@@ -1478,6 +1564,14 @@
             newImportAccount = '';
             pendingImport = [];
             pendingImportBudgets = {};
+            categoryModalMode = 'csv';
+            categoryModalReviewIds = [];
+            categoryModalGeneration = authGeneration;
+            categoryModalUser = null;
+            categoryModalCandidateRevision = null;
+            categoryModalSession += 1;
+            categoryModalBusy = false;
+            document.getElementById('categoryModal')?.classList.remove('active');
             document.getElementById('importPreview')?.classList.add('hidden');
             document.getElementById('loginScreen').style.display = 'flex';
             document.querySelector('.app-layout').style.display = 'none';
@@ -1489,6 +1583,9 @@
             categoryColors = {};
             categoryOrder = [];
             cloudRevision = 0;
+            syncCutoffDate = '';
+            syncCutoffRevision = null;
+            renderSyncSettings();
             clearProviderLinkUiState();
             renderAll();
         }
@@ -2942,17 +3039,21 @@
                 const total = candidates.filter(c => selected.includes(c.id)).reduce((sum, c) => sum + Number(c.amount || 0), 0);
                 status.textContent = `${candidates.length} staged · ${selected.length} selected · selected total ${total < 0 ? '-' : ''}$${Math.abs(total).toFixed(2)}. Review edits and possible overlaps before adding. Bank sync: ${syncLabel}.`;
                 list.innerHTML = candidates.map(candidate => {
-                    const overlap = candidate.overlap && candidate.overlap.length ? `<div style="color:#a65d00;font-size:0.8rem;">Possible overlap: ${candidate.overlap.length} existing observation(s); legitimate identical purchases remain separate.</div>` : '';
+                    const details = Array.isArray(candidate.overlapDetails) ? candidate.overlapDetails : [];
+                    const fallbackOverlap = candidate.overlap && candidate.overlap.length ? `<div style="color:#a65d00;font-size:0.8rem;">Possible overlap: ${candidate.overlap.length} existing observation(s). Review before adding.</div>` : '';
+                    const overlap = details.length ? `<div style="color:#a65d00;font-size:0.8rem;">Possible overlap: ${details.map(detail => `${escapeHTML(detail.matched.date)} · ${escapeHTML(detail.matched.description || detail.matched.merchant || 'Existing observation')} · ${detail.amount < 0 ? '-' : ''}$${Math.abs(Number(detail.amount)).toFixed(2)} · ${escapeHTML(detail.account)} (${escapeHTML(detail.reason)})`).join(' | ')}. Review before adding.</div>` : fallbackOverlap;
                     return `<div class="review-row" data-review-row="${escapeHTML(candidate.id)}" style="display:grid;grid-template-columns:auto 1fr auto;gap:10px;align-items:start;padding:12px 0;border-bottom:1px solid var(--border);">
                         <input class="review-select" type="checkbox" data-review-id="${escapeHTML(candidate.id)}" aria-label="Select ${escapeHTML(candidate.description)}"${selectedSet.has(candidate.id) ? ' checked' : ''}>
                         <div style="min-width:0;"><div style="font-weight:600;">${escapeHTML(candidate.description)}</div><div style="font-size:0.82rem;color:var(--muted);">${escapeHTML(candidate.date)} · ${escapeHTML(candidate.account)} · ${escapeHTML(reviewCandidateLabel(candidate))}</div>${overlap}</div>
                         <div style="text-align:right;white-space:nowrap;"><div style="font-weight:600;">${candidate.amount < 0 ? '-' : ''}$${Math.abs(Number(candidate.amount)).toFixed(2)}</div><div style="font-size:0.82rem;color:var(--muted);">${escapeHTML(candidate.category)}</div></div>
-                        <div style="grid-column:2 / -1;display:flex;gap:8px;flex-wrap:wrap;"><button class="btn btn-secondary review-edit" data-review-id="${escapeHTML(candidate.id)}" style="padding:4px 9px;">Edit</button><button class="btn btn-secondary review-split" data-review-id="${escapeHTML(candidate.id)}" style="padding:4px 9px;">Split</button><button class="btn btn-secondary review-defer" data-review-id="${escapeHTML(candidate.id)}" style="padding:4px 9px;">Defer</button><button class="btn btn-danger review-reject" data-review-id="${escapeHTML(candidate.id)}" style="padding:4px 9px;">Reject</button></div>
+                        <div style="grid-column:2 / -1;display:flex;gap:8px;flex-wrap:wrap;"><button class="btn btn-secondary review-edit" data-review-id="${escapeHTML(candidate.id)}" style="padding:4px 9px;">Review</button><button class="btn btn-secondary review-split" data-review-id="${escapeHTML(candidate.id)}" style="padding:4px 9px;">Split</button><button class="btn btn-secondary review-defer" data-review-id="${escapeHTML(candidate.id)}" style="padding:4px 9px;">Defer</button><button class="btn btn-danger review-reject" data-review-id="${escapeHTML(candidate.id)}" style="padding:4px 9px;">Reject</button></div>
                     </div>`;
                 }).join('');
             }
             const hasSelection = selected.length > 0;
             ['addSelectedTransactions', 'deferSelectedTransactions', 'rejectSelectedTransactions'].forEach(id => { const button = document.getElementById(id); if (button) button.disabled = !hasSelection; });
+            const reviewEditor = document.getElementById('reviewOpenEditor');
+            if (reviewEditor) reviewEditor.disabled = candidates.length === 0;
             const cancel = document.getElementById('cancelReview');
             if (cancel) cancel.disabled = candidates.length === 0;
         }
@@ -3016,6 +3117,7 @@
             delete accepted.status;
             delete accepted.fingerprint;
             delete accepted.overlap;
+            delete accepted.overlapDetails;
             delete accepted.revision;
             delete accepted.reviewedRevision;
             delete accepted.batchId;
@@ -3228,6 +3330,10 @@
         }
 
         document.getElementById('reviewList').addEventListener('change', renderReviewInbox);
+        document.getElementById('reviewOpenEditor').addEventListener('click', () => {
+            const selected = reviewSelectionIds();
+            openReviewCategoryModal(selected[0]);
+        });
         document.getElementById('reviewList').addEventListener('click', async event => {
             const button = event.target.closest('button[data-review-id]');
             if (!button) return;
@@ -3248,20 +3354,8 @@
                     reviewStore.defer(id, currentUser?.email);
                 }
                 if (button.classList.contains('review-edit')) {
-                    const description = prompt('Description', item.description);
-                    if (description === null) return;
-                    const amount = prompt('Signed amount', item.amount);
-                    if (amount === null) return;
-                    const date = prompt('Date (YYYY-MM-DD)', item.date);
-                    if (date === null) return;
-                    const category = prompt('Category', item.category);
-                    if (category === null) return;
-                    const account = prompt('Account', item.account);
-                    if (account === null) return;
-                    const patch = { description, amount, date, category, account, payment_method: account };
-                    if (service && service.serverBacked === true) await service.edit(id, patch, item.revision);
-                    if (mutationGeneration !== authGeneration || mutationUser !== currentUser) throw new Error('Authentication changed before review mutation was acknowledged.');
-                    reviewStore.edit(id, patch);
+                    openReviewCategoryModal(id);
+                    return;
                 }
                 if (button.classList.contains('review-split')) {
                     const specification = prompt('Split parts as Category:amount, Category:amount (positive amounts; signed direction is preserved)', '');
@@ -3578,17 +3672,60 @@
             return TransactionValidation.minorUnits(val) / 100;
         }
 
+        function openReviewCategoryModal(id, candidateIds) {
+            const allowedIds = Array.isArray(candidateIds) && candidateIds.length ? new Set(candidateIds.map(String)) : null;
+            const candidates = reviewStore.list().filter(item => (item.status === 'pending' || item.status === 'deferred') && (!allowedIds || allowedIds.has(item.id)));
+            if (!candidates.length) return;
+            categoryModalMode = 'review';
+            categoryModalReviewIds = candidates.map(item => item.id);
+            categoryModalGeneration = authGeneration;
+            categoryModalUser = currentUser;
+            const requestedIndex = id ? categoryModalReviewIds.indexOf(id) : -1;
+            showCategoryModal(requestedIndex >= 0 ? requestedIndex : 0);
+        }
+
+        function closeCategoryReviewModal() {
+            document.getElementById('categoryModal').classList.remove('active');
+            categoryModalMode = 'csv';
+            categoryModalReviewIds = [];
+            categoryModalUser = null;
+            categoryModalCandidateRevision = null;
+            categoryModalSession += 1;
+            categoryModalBusy = false;
+            document.getElementById('saveTransaction').disabled = false;
+            document.getElementById('reviewSkip').style.display = 'none';
+            document.getElementById('reviewClose').style.display = 'none';
+        }
+
         function showCategoryModal(index) {
-            if (index >= pendingImport.length) {
-                document.getElementById('categoryModal').classList.remove('active');
+            const reviewMode = categoryModalMode === 'review';
+            const reviewCandidates = reviewMode ? categoryModalReviewIds.map(id => reviewStore.get(id)).filter(Boolean) : [];
+            const items = reviewMode ? reviewCandidates : pendingImport;
+            if (index >= items.length) {
+                if (reviewMode) closeCategoryReviewModal();
+                else document.getElementById('categoryModal').classList.remove('active');
                 return;
             }
 
-            const t = pendingImport[index];
+            const t = items[index];
             currentTransactionIndex = index;
+            if (reviewMode) {
+                categoryModalCandidateRevision = t.revision;
+                categoryModalSession += 1;
+                categoryModalBusy = false;
+                categoryModalUser = currentUser;
+            }
 
-            document.getElementById('reviewProgress').textContent = `(${index + 1} of ${pendingImport.length})`;
-            document.getElementById('modalAccount').textContent = t.account || t.payment_method || 'Unknown';
+            document.getElementById('reviewProgress').textContent = `(${index + 1} of ${items.length})`;
+            document.getElementById('modalAccount').value = t.account || t.payment_method || '';
+            const overlapEvidence = document.getElementById('modalOverlapEvidence');
+            const overlapDetails = Array.isArray(t.overlapDetails) ? t.overlapDetails : [];
+            if (overlapEvidence) {
+                overlapEvidence.style.display = overlapDetails.length || t.overlap && t.overlap.length ? '' : 'none';
+                overlapEvidence.innerHTML = overlapDetails.length
+                    ? `<strong>Possible overlap — review before adding:</strong> ${overlapDetails.map(detail => `${escapeHTML(detail.matched.date)} · ${escapeHTML(detail.matched.description || detail.matched.merchant || 'Existing observation')} · ${detail.amount < 0 ? '-' : ''}$${Math.abs(Number(detail.amount)).toFixed(2)} · ${escapeHTML(detail.account)} (${escapeHTML(detail.reason)})`).join(' | ')}`
+                    : t.overlap && t.overlap.length ? `<strong>Possible overlap — review before adding:</strong> ${t.overlap.length} existing observation(s).` : '';
+            }
             document.getElementById('modalDate').value = t.date || '';
             document.getElementById('modalDescription').value = t.description || '';
             document.getElementById('modalMerchant').value = t.merchant || '';
@@ -3598,9 +3735,11 @@
             typeSelect.value = t.type || 'expense';
 
             const categorySelect = document.getElementById('modalCategory');
-            categorySelect.innerHTML = categories.map(c => `<option value="${escapeHTML(c.name)}">${escapeHTML(c.name)}</option>`).join('') + '<option value="__new__">+ New Category</option>';
+            const categoryOptions = categories.map(c => `<option value="${escapeHTML(c.name)}">${escapeHTML(c.name)}</option>`);
+            if (t.category && !categories.find(c => c.name === t.category)) categoryOptions.unshift(`<option value="${escapeHTML(t.category)}">${escapeHTML(t.category)}</option>`);
+            categorySelect.innerHTML = categoryOptions.join('') + '<option value="__new__">+ New Category</option>';
 
-            if (t.merchant) {
+            if (!reviewMode && t.merchant) {
                 const defaultInfo = getDefaultCategory(t.merchant);
                 if (defaultInfo) {
                     if (defaultInfo.category && categories.find(c => c.name === defaultInfo.category)) {
@@ -3620,6 +3759,12 @@
 
             document.getElementById('splitSection').style.display = 'none';
             document.getElementById('splitRows').innerHTML = '';
+            document.getElementById('deleteTransaction').style.display = reviewMode ? 'none' : '';
+            document.getElementById('splitTransaction').style.display = reviewMode ? 'none' : '';
+            document.getElementById('reviewSkip').style.display = reviewMode ? '' : 'none';
+            document.getElementById('reviewClose').style.display = reviewMode ? '' : 'none';
+            document.getElementById('saveTransaction').textContent = reviewMode ? 'Save & Next' : 'Approve';
+            document.getElementById('saveTransaction').disabled = false;
 
             document.getElementById('categoryModal').classList.add('active');
         }
@@ -3636,6 +3781,49 @@
             const amount = parseFloat(document.getElementById('modalAmount').value);
             const date = document.getElementById('modalDate').value;
             const type = document.getElementById('modalType').value;
+            const account = document.getElementById('modalAccount').value.trim();
+
+            if (categoryModalMode === 'review') {
+                const candidateId = categoryModalReviewIds[currentTransactionIndex];
+                const current = candidateId && reviewStore.get(candidateId);
+                if (!current) { closeCategoryReviewModal(); renderReviewInbox(); return; }
+                if (category === '__new__') {
+                    const newName = document.getElementById('newCategoryName').value.trim();
+                    if (!newName) { alert('Please enter a category name.'); return; }
+                    category = newName;
+                }
+                if (!date || !description || !account || !Number.isFinite(amount) || !category) { alert('Date, description, account, amount and category are required.'); return; }
+                const patch = { description, merchant: merchant || description, amount, date, category, account, payment_method: account, type };
+                const generation = categoryModalGeneration;
+                const user = categoryModalUser;
+                const session = categoryModalSession;
+                const expectedRevision = categoryModalCandidateRevision;
+                const service = window.transactionApprovalService;
+                const save = async () => {
+                    if (categoryModalBusy) return;
+                    categoryModalBusy = true;
+                    document.getElementById('saveTransaction').disabled = true;
+                    try {
+                        const before = reviewStore.get(candidateId);
+                        if (!before || before.revision !== expectedRevision || categoryModalSession !== session || categoryModalMode !== 'review') throw new Error('This review row changed. Close and reopen it before saving.');
+                        if (service && service.serverBacked === true) await service.edit(candidateId, patch, expectedRevision);
+                        if (generation !== authGeneration || user !== currentUser) throw new Error('Authentication changed before review edit was acknowledged.');
+                        if (categoryModalSession !== session || categoryModalMode !== 'review') throw new Error('This review editor was closed before the save completed. Reload the review inbox.');
+                        reviewStore.edit(candidateId, patch, expectedRevision);
+                        renderReviewInbox();
+                        showCategoryModal(currentTransactionIndex + 1);
+                    } catch (error) {
+                        alert(`Review edit failed: ${error.message}`);
+                    } finally {
+                        if (categoryModalSession === session) {
+                            categoryModalBusy = false;
+                            document.getElementById('saveTransaction').disabled = false;
+                        }
+                    }
+                };
+                save();
+                return;
+            }
 
             if (category === '__new__') {
                 const newName = document.getElementById('newCategoryName').value.trim();
@@ -3650,6 +3838,10 @@
 
             if (category) pendingImport[currentTransactionIndex].category = category;
             if (date) pendingImport[currentTransactionIndex].date = date;
+            if (account) {
+                pendingImport[currentTransactionIndex].account = account;
+                pendingImport[currentTransactionIndex].payment_method = account;
+            }
             if (merchant) {
                 pendingImport[currentTransactionIndex].merchant = merchant;
                 saveMerchantDefault(merchant, category, type);
@@ -3664,6 +3856,7 @@
         });
 
         document.getElementById('deleteTransaction').addEventListener('click', () => {
+            if (categoryModalMode === 'review') return;
             pendingImport.splice(currentTransactionIndex, 1);
             if (pendingImport.length === 0) {
                 document.getElementById('categoryModal').classList.remove('active');
@@ -3675,6 +3868,7 @@
         });
 
         document.getElementById('splitTransaction').addEventListener('click', () => {
+            if (categoryModalMode === 'review') return;
             const section = document.getElementById('splitSection');
             const isHidden = section.style.display === 'none';
             section.style.display = isHidden ? 'block' : 'none';
@@ -3687,7 +3881,29 @@
         });
 
         document.getElementById('confirmSplit').addEventListener('click', () => {
+            if (categoryModalMode === 'review') return;
             approveSplit();
+        });
+        document.getElementById('reviewSkip').addEventListener('click', () => {
+            if (categoryModalMode !== 'review' || categoryModalBusy) return;
+            showCategoryModal(currentTransactionIndex + 1);
+        });
+        document.getElementById('reviewClose').addEventListener('click', () => {
+            if (categoryModalBusy) return;
+            closeCategoryReviewModal();
+        });
+
+        document.getElementById('categoryModal').addEventListener('click', event => {
+            if (event.target !== event.currentTarget) return;
+            if (categoryModalMode === 'review') closeCategoryReviewModal();
+            else event.currentTarget.classList.remove('active');
+        });
+        document.addEventListener('keydown', event => {
+            if (event.key !== 'Escape') return;
+            const modal = document.getElementById('categoryModal');
+            if (!modal || !modal.classList.contains('active')) return;
+            if (categoryModalMode === 'review') closeCategoryReviewModal();
+            else modal.classList.remove('active');
         });
 
         function initSplitRows() {
@@ -3725,6 +3941,7 @@
         }
 
         function approveSplit() {
+            if (categoryModalMode === 'review') return;
             const t = pendingImport[currentTransactionIndex];
             const rows = document.querySelectorAll('#splitRows .split-row');
             const splits = [];
@@ -3814,6 +4031,10 @@
                     pendingImport = [];
                     cancelBatch();
                     alert(`Staged ${staged.length} bank transaction${staged.length === 1 ? '' : 's'}. Review and explicitly add selected rows; accepted data is unchanged.`);
+                    // Reuse the familiar CSV category editor after the whole
+                    // multi-file batch is staged. This only opens the pending
+                    // review form; no accepted write occurs here.
+                    openReviewCategoryModal(staged[0] && staged[0].id, staged.map(item => item.id));
                     return;
                 }
 

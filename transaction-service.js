@@ -71,6 +71,18 @@ function createBudgetService(options) {
         cooldownMs: opts.cooldownMs,
         clock: opts.clock
     });
+    const syncSettings = opts.syncSettings || (opts.db && typeof backendApi.createProtectedSyncSettings === 'function' ? backendApi.createProtectedSyncSettings({
+        db: opts.db,
+        householdId: opts.householdId,
+        requiredConnectionKeys: opts.syncConnectionKeys,
+        configCollection: opts.syncConfigCollection,
+        configDocument: opts.syncConfigDocument,
+        connectionsCollection: opts.syncConnectionsCollection,
+        fallbackCutoverDate: appConfig.FIRST_SYNC_CUTOVER_DATE,
+        syncReadiness: opts.syncReadiness,
+        clock: opts.clock,
+        authorize: opts.authorize || (auth => backend.authorize(auth))
+    }) : null);
     const handler = opts.handler || backendApi.createHttpHandler({
         backend,
         syncService,
@@ -80,11 +92,12 @@ function createBudgetService(options) {
         householdId: opts.householdId,
         householdForUser: opts.householdForUser,
         syncReadiness: opts.syncReadiness,
+        syncSettings,
         allowedOrigins: opts.allowedOrigins,
         maxBodyBytes: opts.maxBodyBytes,
         errorDiagnostic: opts.errorDiagnostic
     });
-    return { backend, syncRepository, syncService, handler, accountAliases, cutoverDate };
+    return { backend, syncRepository, syncService, syncSettings, handler, accountAliases, cutoverDate };
 }
 
 module.exports = { createBudgetService };

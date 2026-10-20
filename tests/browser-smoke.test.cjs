@@ -89,6 +89,137 @@ function createServer() {
     assert.equal(identityPanel.visible, true, 'Authenticated UI must show the current account identity.');
     assert.equal(identityPanel.email, 'captainicebow@gmail.com', 'Authenticated UI must show the verified account email.');
     assert.equal(identityPanel.switchVisible, true, 'Authenticated UI must expose explicit account switching.');
+    const reviewEditorSmoke = await page.evaluate(async () => {
+        const originalService = window.transactionApprovalService;
+        let editCalls = 0;
+        let successfulEdits = 0;
+        let rejectEdit = false;
+        window.transactionApprovalService = { serverBacked: true, async edit(id, patch, revision) { editCalls += 1; if (rejectEdit) throw new Error('Synthetic stale review edit.'); successfulEdits += 1; return { id, ...patch, revision: revision + 1 }; } };
+        reviewStore.clear();
+        const staged = reviewStore.stage([{
+            sourceId: 'ui-review-editor', date: '2026-10-10', description: 'Review me', merchant: 'Review merchant', amount: -12.34,
+            category: 'Restaurants', account: 'Checking', payment_method: 'Checking', type: 'expense'
+        }], { source: 'bank-csv', batchId: 'ui-review-editor' })[0];
+        renderReviewInbox();
+        document.querySelector('button.review-edit').click();
+        await new Promise(resolve => setTimeout(resolve, 0));
+        const opened = document.getElementById('categoryModal').classList.contains('active') && document.getElementById('saveTransaction').textContent === 'Save & Next';
+        document.getElementById('modalDescription').value = 'Edited review row';
+        document.getElementById('modalMerchant').value = 'Edited merchant';
+        document.getElementById('modalAmount').value = '-13.34';
+        document.getElementById('saveTransaction').click();
+        await new Promise(resolve => setTimeout(resolve, 0));
+        const saved = reviewStore.get(staged.id);
+        const acceptedCountBeforeRejectedEdit = transactions.length;
+        const rejectedStage = reviewStore.stage([{
+            sourceId: 'ui-review-editor-rejected', date: '2026-10-11', description: 'Reject me', merchant: 'Reject merchant', amount: -8.12,
+            category: 'Restaurants', account: 'Checking', payment_method: 'Checking', type: 'expense'
+        }], { source: 'bank-csv', batchId: 'ui-review-editor-rejected' })[0];
+        renderReviewInbox();
+        document.querySelector(`button.review-edit[data-review-id="${rejectedStage.id}"]`).click();
+        await new Promise(resolve => setTimeout(resolve, 0));
+        document.getElementById('modalDescription').value = 'Rejected edit stays visible';
+        rejectEdit = true;
+        document.getElementById('saveTransaction').click();
+        await new Promise(resolve => setTimeout(resolve, 0));
+        const rejected = {
+            modalOpen: document.getElementById('categoryModal').classList.contains('active'),
+            description: document.getElementById('modalDescription').value,
+            acceptedCount: transactions.length,
+            pendingRevision: reviewStore.get(rejectedStage.id).revision
+        };
+        document.getElementById('reviewClose').click();
+        const result = { opened, editCalls, successfulEdits, description: saved && saved.description, amount: saved && saved.amount, modalClosed: !document.getElementById('categoryModal').classList.contains('active'), rejected };
+        reviewStore.clear();
+        renderReviewInbox();
+        if (originalService === undefined) delete window.transactionApprovalService;
+        else window.transactionApprovalService = originalService;
+        return result;
+    });
+    assert.equal(reviewEditorSmoke.opened, true, 'Pending review rows must open the familiar sequential editor.');
+    assert.equal(reviewEditorSmoke.editCalls, 2, 'Pending review edits must use the authenticated revision-bound service, including rejected retries.');
+    assert.equal(reviewEditorSmoke.successfulEdits, 1, 'Exactly one pending review edit should be acknowledged in the synthetic flow.');
+    assert.equal(reviewEditorSmoke.description, 'Edited review row', 'Pending review description edits must persist in the review inbox.');
+    assert.equal(reviewEditorSmoke.amount, -13.34, 'Pending review amount edits must persist in the review inbox.');
+    assert.equal(reviewEditorSmoke.modalClosed, true, 'Save & Next must close after the final pending row.');
+    assert.equal(reviewEditorSmoke.rejected.modalOpen, true, 'A failed revision-bound edit must keep the review form open.');
+    assert.equal(reviewEditorSmoke.rejected.description, 'Rejected edit stays visible', 'A failed review edit must preserve form values.');
+    assert.equal(reviewEditorSmoke.rejected.acceptedCount, 1, 'Review-only edits must not write accepted history.');
+    const checkingIncomeTypeToggleSmoke = await page.evaluate(async () => {
+        const originalService = window.transactionApprovalService;
+        let editPatch;
+        window.transactionApprovalService = { serverBacked: true, async edit(id, patch, revision) { editPatch = { ...patch }; return { id, ...patch, revision: revision + 1 }; } };
+        reviewStore.clear();
+        const staged = reviewStore.stage([{
+            sourceId: 'ui-checking-payroll', date: '2026-10-08', description: 'Employer Payroll', merchant: 'Employer Payroll', amount: -1250,
+            category: 'Transfer,Payroll', account: 'Checking Account', payment_method: 'Checking Account', type: 'income'
+        }], { source: 'bank-provider', batchId: 'ui-checking-payroll' })[0];
+        reviewStore.pending.get(staged.id).sourceOriginal = { ...staged, amount: -1250, type: 'expense' };
+        renderReviewInbox();
+        document.querySelector(`button.review-edit[data-review-id="${staged.id}"]`).click();
+        await new Promise(resolve => setTimeout(resolve, 0));
+        const incomeBeforeToggle = reviewStore.get(staged.id).amount;
+        document.getElementById('modalType').value = 'expense';
+        document.getElementById('modalAmount').value = '1250';
+        document.getElementById('saveTransaction').click();
+        await new Promise(resolve => setTimeout(resolve, 0));
+        const saved = reviewStore.get(staged.id);
+        const result = { incomeBeforeToggle, type: saved && saved.type, amount: saved && saved.amount, editAmount: editPatch && editPatch.amount, acceptedCount: transactions.length };
+        reviewStore.clear();
+        renderReviewInbox();
+        window.transactionApprovalService = originalService;
+        return result;
+    });
+    assert.equal(checkingIncomeTypeToggleSmoke.incomeBeforeToggle, 1250, 'Checking income should open in the familiar editor with a positive amount.');
+    assert.deepEqual({ type: checkingIncomeTypeToggleSmoke.type, amount: checkingIncomeTypeToggleSmoke.amount }, { type: 'expense', amount: -1250 }, 'Changing the checking income type to expense restores the provider negative sign.');
+    assert.equal(checkingIncomeTypeToggleSmoke.editAmount, 1250, 'The authenticated edit receives the visible amount and server-side normalization owns the final sign.');
+    assert.equal(checkingIncomeTypeToggleSmoke.acceptedCount, 1, 'Type edits remain pending and do not write accepted history.');
+    const cutoffConflictSmoke = await page.evaluate(async () => {
+        const originalService = window.transactionApprovalService;
+        window.transactionApprovalService = {
+            serverBacked: true,
+            async updateSyncSettings() { throw new Error('Sync settings changed since they were loaded.'); },
+            async syncSettings() { return { ready: true, cutoffDate: '2026-10-10', revision: 3 }; }
+        };
+        syncCutoffDate = '2026-10-09';
+        syncCutoffRevision = 2;
+        renderSyncSettings();
+        const input = document.getElementById('syncCutoffDate');
+        input.value = '2026-10-11';
+        document.getElementById('saveSyncCutoff').click();
+        await new Promise(resolve => setTimeout(resolve, 0));
+        const result = { requested: input.value, status: document.getElementById('syncCutoffStatus').textContent, revision: syncCutoffRevision, current: syncCutoffDate };
+        window.transactionApprovalService = originalService;
+        renderSyncSettings();
+        return result;
+    });
+    assert.equal(cutoffConflictSmoke.requested, '2026-10-11', 'Cutoff conflicts must preserve the requested date for an explicit retry.');
+    assert.equal(cutoffConflictSmoke.current, '2026-10-10', 'Cutoff conflict handling must refresh the server setting without syncing.');
+    assert.equal(cutoffConflictSmoke.revision, 3, 'Cutoff conflict handling must refresh the revision fence.');
+    assert.match(cutoffConflictSmoke.status, /changed elsewhere|save again/i);
+    const screenshotDirectory = 'D:\\Documents\\Codex\\.assistant-storage\\budget-tool-verification\\review-improvements-20261020-r1';
+    const screenshotPath = path.join(screenshotDirectory, 'synthetic-review-editor.png');
+    await fs.promises.mkdir(screenshotDirectory, { recursive: true });
+    await page.evaluate(() => {
+        reviewStore.clear();
+        const staged = reviewStore.stage([{
+            sourceId: 'ui-review-screenshot-csv', date: '2026-10-12', description: 'Synthetic review purchase', merchant: 'Synthetic Merchant', amount: -21.75,
+            category: 'Restaurants', account: 'Checking', payment_method: 'Checking', type: 'expense'
+        }, {
+            sourceId: 'ui-review-screenshot-provider', date: '2026-10-13', description: 'Synthetic review purchase #2', merchant: 'Synthetic Merchant VenX', amount: -21.75,
+            category: 'Restaurants', account: 'Checking', payment_method: 'Checking', type: 'expense'
+        }], { source: 'bank-csv', batchId: 'ui-review-screenshot' });
+        renderReviewInbox();
+        openReviewCategoryModal(staged[1].id, staged.map(item => item.id));
+    });
+    await page.waitForFunction(() => document.getElementById('categoryModal').classList.contains('active') && document.getElementById('saveTransaction').textContent === 'Save & Next');
+    await page.screenshot({ path: screenshotPath });
+    assert.equal(fs.existsSync(screenshotPath), true, 'Synthetic review editor screenshot must be written to the D: evidence directory.');
+    const screenshotBottomPath = path.join(screenshotDirectory, 'synthetic-review-editor-bottom.png');
+    await page.evaluate(() => { const content = document.querySelector('#categoryModal .modal-content'); if (content) content.scrollTop = content.scrollHeight; });
+    await page.screenshot({ path: screenshotBottomPath });
+    assert.equal(fs.existsSync(screenshotBottomPath), true, 'Synthetic review editor control screenshot must be written to the D: evidence directory.');
+    await page.evaluate(() => { closeCategoryReviewModal(); reviewStore.clear(); renderReviewInbox(); });
     const authenticatedLoadPersistence = await page.evaluate(async () => {
         const originalService = window.transactionApprovalService;
         let serverSaveCalls = 0;

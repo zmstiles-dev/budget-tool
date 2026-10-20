@@ -40,6 +40,15 @@ provider integration must bind stable provider account IDs explicitly and
 reject unmapped IDs. Enabling `/sync` requires a provider, owner mapping,
 connection resolver, protected endpoint, and `syncEnabled: true`.
 
+The October 9 date is the immutable activation baseline. Once activation is
+ready, authenticated `/sync-settings` GET/POST can persist a valid runtime
+cutoff through today with a strict connection-owner UID check and expected
+settings revision. The setting affects the next sync only: that run pins its
+cutoff and revision, keeps its incremental cursor, and never backfills,
+deletes, or purges earlier inbox/history rows. Invalid, stale, backward, or
+future updates fail closed. This runtime setting is local and unpublished with
+the current release candidate.
+
 The production Link metadata guard requires Chase `ins_56` and US Capital One
 `ins_128026` before exchanging a public token. This is defense in depth; the
 server's Item verification remains authoritative. On-open sync has a separate
@@ -83,6 +92,15 @@ protected collections are denied by `firestore.rules`; settings updates in
 array. Provider amendments carry a bounded server-created digest of their
 accepted target row or split children; changing that target while review is
 pending rejects the stale approval and requires a fresh staging/review pass.
+Possible overlaps compare signed amount, normalized account, and a real date
+within three days, then require matching merchant/description evidence. The
+inbox recomputes warnings for existing pending rows and shows matched date,
+description, merchant, amount, account, and reason. A warning remains a
+reviewable candidate; accepted or jointly selected matches require an explicit
+overlap override. The familiar CSV category popup is reused for pending rows
+with date, description, merchant, amount, type, account, and category edits;
+Save & Next only updates the revision-bound pending row, while Add selected is
+the only approval path. These changes are local and unpublished.
 Legacy accepted rows that fail strict review dates remain in canonical history
 but are omitted from review metadata without date repair. A backup explicitly
 exported from accepted history records a schema-1 compatibility marker when it
@@ -107,6 +125,15 @@ Firestore per-document limit remains a separate history-size constraint.
 `PlaidTransactionsSyncAdapter` enforces explicit USD account mapping, signed
 amounts, pending/posted linkage, complete pagination before cursor publication,
 bounded retries, mutation restarts, and a deadline.
+For the exact mapped `Checking Account` alias, an explicit provider `income`
+classification or `INCOME`/`PAYROLL` category is stored as a positive income
+amount. Checking reimbursements remain negative expenses, ordinary checking
+expenses retain their provider sign, and other account aliases are unchanged.
+Legacy untouched pending checking payroll rows are derived to the same positive
+income form on hydration with a candidate revision bump; their signed provider
+amount remains in `sourceOriginal`, accepted history is never rewritten, and a
+reviewer changing the type back to expense restores that preserved negative
+sign.
 
 The production Functions wrapper is in `production-service.js` and
 `functions/index.js`; its rollout, Secret Manager roles, exact origin, Link

@@ -28,6 +28,78 @@ assert.equal(store.stage([record({ sourceId: 'provider-1' })], { source: 'synthe
 const second = store.stage([record({ sourceId: 'provider-2' })], { source: 'synthetic', batchId: 'batch-2' });
 assert.equal(second.length, 1);
 assert.deepEqual(second[0].overlap, [first[0].id]);
+const fuzzyStore = new review.ReviewStore();
+const csvPurchase = fuzzyStore.stage([record({ sourceId: 'csv-purchase', date: '2026-10-09', merchant: 'National Car Rental', description: 'National Car Rental', amount: -147.23 })], { source: 'bank-csv', batchId: 'fuzzy-csv' })[0];
+const providerPurchase = fuzzyStore.stage([record({ sourceId: 'provider-purchase', date: '2026-10-10', merchant: 'National Car Rental VenX', description: 'NATIONAL CAR RENTAL #123', amount: -147.23 })], { source: 'bank-provider', batchId: 'fuzzy-provider' })[0];
+assert.deepEqual(providerPurchase.overlap, [csvPurchase.id]);
+assert.equal(providerPurchase.overlapDetails[0].dateDeltaDays, 1);
+assert.equal(providerPurchase.overlapDetails[0].reason, 'nearby date and merchant tokens');
+assert.equal(providerPurchase.overlapDetails[0].matched.description, 'National Car Rental');
+assert.equal(fuzzyStore.stage([record({ sourceId: 'wrong-account', date: '2026-10-10', merchant: 'National Car Rental VenX', description: 'NATIONAL CAR RENTAL #123', account: 'CFU', payment_method: 'CFU', amount: -147.23 })], { source: 'bank-provider', batchId: 'wrong-account' })[0].overlap.length, 0);
+assert.equal(fuzzyStore.stage([record({ sourceId: 'wrong-date', date: '2026-10-20', merchant: 'National Car Rental VenX', description: 'NATIONAL CAR RENTAL #123', amount: -147.23 })], { source: 'bank-provider', batchId: 'wrong-date' })[0].overlap.length, 0);
+const recomputeCandidate = fuzzyStore.stage([record({ sourceId: 'recompute', date: '2026-10-10', merchant: 'Other Merchant', description: 'Other Merchant', amount: -147.23 })], { source: 'bank-csv', batchId: 'recompute' })[0];
+assert.equal(recomputeCandidate.overlap.length, 0);
+const recomputed = fuzzyStore.edit(recomputeCandidate.id, { merchant: 'National Car Rental', description: 'National Car Rental terminal' }, recomputeCandidate.revision);
+assert.ok(recomputed.overlap.includes(csvPurchase.id));
+assert.ok(fuzzyStore.get(providerPurchase.id).overlap.includes(recomputed.id));
+const fuzzyBackup = review.createBackup({ transactions: [], categories: [{ name: 'Restaurants' }], budgets: {}, merchantDefaults: {}, review: fuzzyStore.exportReview() });
+const fuzzyRestored = new review.ReviewStore();
+fuzzyRestored.restoreReview(fuzzyBackup.review);
+assert.equal(fuzzyRestored.get(providerPurchase.id).overlapDetails[0].matched.description, 'National Car Rental');
+
+// Hydration upgrades an untouched legacy checking payroll row while keeping
+// the provider's signed source snapshot. A later explicit expense edit is
+// never reclassified by the compatibility rule, and overlap matching uses the
+// corrected canonical amount.
+const legacyPayroll = review.normalizeCandidate(record({
+    source: 'bank-provider', sourceIdentity: 'plaid:chase:Checking:legacy-payroll', sourceRevision: '1',
+    date: '2026-10-08', description: 'Employer Payroll', merchant: 'Employer Payroll',
+    amount: -1250, account: 'Checking Account', payment_method: 'Checking Account', category: 'Transfer,Payroll', type: 'expense'
+}), 'bank-provider', 0, 'legacy-payroll');
+legacyPayroll.status = review.STATES.PENDING;
+legacyPayroll.revision = 1;
+legacyPayroll.reviewedRevision = 1;
+legacyPayroll.sourceOriginal = { ...legacyPayroll };
+delete legacyPayroll.sourceOriginal.status;
+delete legacyPayroll.sourceOriginal.revision;
+delete legacyPayroll.sourceOriginal.reviewedRevision;
+legacyPayroll.sourceOriginal.amount = -1250;
+const matchingLegacyCsv = review.normalizeCandidate(record({
+    source: 'bank-csv', sourceIdentity: 'csv-payroll', sourceRevision: '1', date: '2026-10-08',
+    description: 'Employer Payroll', merchant: 'Employer Payroll', amount: 1250,
+    account: 'Checking Account', payment_method: 'Checking Account', category: 'Income', type: 'income'
+}), 'bank-csv', 0, 'legacy-payroll-csv');
+matchingLegacyCsv.status = review.STATES.PENDING;
+matchingLegacyCsv.revision = 1;
+matchingLegacyCsv.reviewedRevision = 1;
+const reviewedExpense = review.normalizeCandidate(record({
+    source: 'bank-provider', sourceIdentity: 'plaid:chase:Checking:reviewed-expense', sourceRevision: '1',
+    date: '2026-10-08', description: 'Payroll reimbursement', amount: -42,
+    account: 'Checking Account', payment_method: 'Checking Account', category: 'Transfer,Payroll', type: 'expense'
+}), 'bank-provider', 0, 'reviewed-expense');
+reviewedExpense.status = review.STATES.PENDING;
+reviewedExpense.revision = 2;
+reviewedExpense.reviewedRevision = 2;
+reviewedExpense.sourceOriginal = { ...reviewedExpense };
+const hydratedIncomeStore = new review.ReviewStore();
+hydratedIncomeStore.restoreReview({ schemaVersion: review.VERSION, pending: [legacyPayroll, matchingLegacyCsv, reviewedExpense], rejected: [], accepted: [], audit: [], receipts: [], batchMeta: [] });
+const hydratedPayroll = hydratedIncomeStore.get(legacyPayroll.id);
+assert.deepEqual({ type: hydratedPayroll.type, amount: hydratedPayroll.amount, revision: hydratedPayroll.revision }, { type: 'income', amount: 1250, revision: 2 });
+assert.equal(hydratedPayroll.sourceOriginal.amount, -1250);
+assert.ok(hydratedPayroll.overlap.includes(matchingLegacyCsv.id), 'corrected income amount participates in overlap evidence');
+assert.deepEqual({ type: hydratedIncomeStore.get(reviewedExpense.id).type, amount: hydratedIncomeStore.get(reviewedExpense.id).amount, revision: hydratedIncomeStore.get(reviewedExpense.id).revision }, { type: 'expense', amount: -42, revision: 2 });
+const toggledReimbursement = hydratedIncomeStore.edit(legacyPayroll.id, { type: 'expense', amount: 1250 }, hydratedPayroll.revision);
+assert.deepEqual({ type: toggledReimbursement.type, amount: toggledReimbursement.amount, revision: toggledReimbursement.revision }, { type: 'expense', amount: -1250, revision: 3 });
+assert.equal(toggledReimbursement.sourceOriginal.amount, -1250);
+const warningStore = new review.ReviewStore();
+const warningRows = warningStore.stage([
+    record({ sourceId: 'warning-csv', date: '2026-10-09', merchant: 'National Car Rental', description: 'National Car Rental', amount: -147.23 }),
+    record({ sourceId: 'warning-provider', date: '2026-10-10', merchant: 'National Car Rental VenX', description: 'NATIONAL CAR RENTAL #123', amount: -147.23 })
+], { source: 'bank-csv', batchId: 'warning-pending' });
+await warningStore.approveSelected([warningRows[0].id], { online: true, authenticated: true, actor: 'reviewer@example.test', authorize: () => ({ actor: 'reviewer@example.test' }), acknowledge: () => true });
+assert.equal(warningStore.get(warningRows[1].id).status, review.STATES.PENDING, 'an unselected pending overlap remains reviewable after the other row is explicitly added');
+assert.equal(Object.prototype.hasOwnProperty.call(warningStore.get(warningRows[0].id), 'overlapDetails'), false, 'derived overlap evidence must not enter accepted review rows');
+await assert.rejects(() => warningStore.approveSelected([warningRows[1].id], { online: true, authenticated: true, actor: 'reviewer@example.test', authorize: () => ({ actor: 'reviewer@example.test' }), acknowledge: () => true }), /Possible duplicate/);
 const correction = store.stage([record({ sourceId: 'provider-2', sourceRevision: '2', amount: -4.5 })], { source: 'synthetic', batchId: 'correction' });
 assert.equal(correction.length, 1);
 assert.equal(store.get(second[0].id).status, 'superseded');

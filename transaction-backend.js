@@ -83,7 +83,8 @@
             'Route not found.', 'Browser staging is limited to CSV observations.',
             'Approval candidates were already rejected or accepted.', 'A durable review transaction failed.'
         ]);
-        return allowed.has(message) ? message : 'Approval service request failed.';
+        if (allowed.has(message) || /^Possible duplicate requires review: [A-Za-z0-9._:/@-]+$/.test(message) || /^Amendment target changed since review: [A-Za-z0-9._:/@-]+$/.test(message)) return message;
+        return 'Approval service request failed.';
     }
 
     function invalidResponseError(status) {
@@ -131,7 +132,13 @@
     }
 
     function normalizeInboundCandidate(record, source, index, batchId) {
-        const candidate = review.normalizeCandidate(record, source, index, batchId);
+        const input = { ...(record || {}) };
+        const providerSignedAmount = String(source || '').toLowerCase() === 'bank-provider' && Number.isFinite(Number(input.providerSignedAmount))
+            ? Number(input.providerSignedAmount)
+            : null;
+        delete input.providerSignedAmount;
+        const candidate = review.normalizeCandidate(input, source, index, batchId);
+        if (providerSignedAmount !== null) Object.defineProperty(candidate, '__providerSignedAmount', { value: providerSignedAmount, enumerable: false, configurable: true });
         if (text(record && record.sourceIdentity) && text(record && record.sourceRevision)) {
             candidate.sourceIdentity = text(record.sourceIdentity);
             candidate.sourceRevision = text(record.sourceRevision);
@@ -143,7 +150,7 @@
 
     function immutableSource(record) {
         const source = clone(record || {});
-        ['status', 'revision', 'reviewedRevision', 'overlap', 'rejectedBy',
+        ['status', 'revision', 'reviewedRevision', 'overlap', 'overlapDetails', 'rejectedBy',
             'rejectedAt', 'deferredBy', 'deferredAt', 'supersededBy',
             'supersededAt', 'approvedBy', 'approvedAt', 'sourceOriginal'].forEach(field => {
             delete source[field];
@@ -198,6 +205,83 @@
         if (!match) return false;
         const check = new Date(Date.UTC(Number(match[1]), Number(match[2]) - 1, Number(match[3])));
         return check.getUTCFullYear() === Number(match[1]) && check.getUTCMonth() + 1 === Number(match[2]) && check.getUTCDate() === Number(match[3]);
+    }
+
+    function syncRuntimeSetting(config, fallbackCutoffDate) {
+        const source = config || {};
+        const activation = source.syncActivation;
+        const baseline = text(activation && activation.cutoffDate) || text(fallbackCutoffDate);
+        if (!validDate(baseline)) throw new Error('Sync activation is not ready.');
+        const runtime = source.syncSettings;
+        if (runtime === undefined || runtime === null) return { cutoffDate: baseline, revision: Number.isSafeInteger(activation && activation.revision) && activation.revision >= 1 ? activation.revision : 0 };
+        if (!runtime || typeof runtime !== 'object' || Array.isArray(runtime) || !validDate(runtime.cutoffDate) || text(runtime.cutoffDate) < baseline || !Number.isSafeInteger(runtime.revision) || runtime.revision < 1) throw new Error('Sync activation is not ready.');
+        return { cutoffDate: text(runtime.cutoffDate), revision: runtime.revision };
+    }
+
+    function createProtectedSyncSettings(options) {
+        const opts = options || {};
+        if (!opts.db || typeof opts.db.collection !== 'function' || typeof opts.db.runTransaction !== 'function') throw new Error('A Firestore sync settings client is required.');
+        const householdId = text(opts.householdId);
+        const configCollection = text(opts.configCollection || 'protectedAppConfig');
+        const configDocument = text(opts.configDocument || 'transactionService');
+        const connectionCollection = text(opts.connectionsCollection || 'protectedConnections');
+        const requiredKeys = [...new Set((opts.requiredConnectionKeys || ['chase', 'capital-one']).map(text).filter(Boolean))];
+        const syncReadiness = typeof opts.syncReadiness === 'function' ? opts.syncReadiness : null;
+        const clock = typeof opts.clock === 'function' ? opts.clock : () => new Date().toISOString();
+        const authorize = typeof opts.authorize === 'function' ? opts.authorize : async auth => {
+            if (!auth || auth.tokenVerified !== true || !text(auth.uid) || !text(auth.email)) throw new Error('Authenticated server authorization is required.');
+            if (text(auth.householdId) !== householdId) throw new Error('User is not a member of this household.');
+            return auth;
+        };
+        const configRef = opts.db.collection(configCollection).doc(configDocument);
+        const connectionRef = key => opts.db.collection(connectionCollection).doc(key);
+        const read = async auth => {
+            const user = await authorize(auth);
+            const snapshot = await configRef.get();
+            const config = snapshot && snapshot.exists ? snapshot.data() || {} : {};
+            const activation = config.syncActivation;
+            if (!activation || typeof activation !== 'object' || Array.isArray(activation) || text(config.householdId) !== householdId || config.allowed !== true || activation.enabled !== true) return { ready: false, cutoffDate: null, revision: null };
+            const readiness = syncReadiness ? await syncReadiness(user) : null;
+            if (readiness && readiness.ready !== true) return { ready: false, cutoffDate: null, revision: null };
+            const setting = syncRuntimeSetting(config, opts.fallbackCutoverDate);
+            return { ready: true, cutoffDate: setting.cutoffDate, revision: setting.revision, actor: text(user.uid) };
+        };
+        const update = async (auth, cutoffDate, expectedRevision) => {
+            const user = await authorize(auth);
+            const requested = text(cutoffDate);
+            if (!validDate(requested)) throw new Error('Cutoff date must be a real YYYY-MM-DD date.');
+            const clockValue = clock();
+            const clockText = typeof clockValue === 'number' && Number.isFinite(clockValue)
+                ? new Date(clockValue).toISOString()
+                : text(clockValue);
+            const today = clockText.slice(0, 10);
+            if (!validDate(today)) throw new Error('Sync settings clock is invalid.');
+            if (requested > today) throw new Error('Cutoff date cannot be in the future.');
+            if (!Number.isSafeInteger(expectedRevision) || expectedRevision < 0) throw new Error('Sync settings revision is required.');
+            if (syncReadiness) {
+                const readiness = await syncReadiness(user);
+                if (!readiness || readiness.ready !== true) throw new Error('Sync activation is not ready.');
+            }
+            return opts.db.runTransaction(async transaction => {
+                const configSnapshot = await transaction.get(configRef);
+                const config = configSnapshot && configSnapshot.exists ? configSnapshot.data() || {} : {};
+                const activation = config.syncActivation;
+                if (!activation || typeof activation !== 'object' || Array.isArray(activation) || text(config.householdId) !== householdId || config.allowed !== true || activation.enabled !== true) throw new Error('Sync activation is not ready.');
+                const current = syncRuntimeSetting(config, opts.fallbackCutoverDate);
+                if (current.revision !== expectedRevision) throw new Error('Sync settings changed since they were loaded.');
+                if (requested < current.cutoffDate) throw new Error('Cutoff date can only move forward; earlier dates require an explicit backfill operation.');
+                for (const key of requiredKeys) {
+                    const snapshot = await transaction.get(connectionRef(key));
+                    const record = snapshot && snapshot.exists ? snapshot.data() || {} : {};
+                    const ownerMatches = text(record.ownerUid) === text(user.uid);
+                    if (!ownerMatches || text(record.householdId) !== householdId) throw new Error('User is not authorized for this provider connection.');
+                }
+                const next = { ...clone(config), syncSettings: { cutoffDate: requested, revision: current.revision + 1, updatedAt: text(clock()), updatedBy: text(user.uid) } };
+                transaction.set(configRef, next);
+                return { ok: true, cutoffDate: requested, revision: current.revision + 1 };
+            });
+        };
+        return Object.freeze({ read, update });
     }
 
     function observationDigest(kind, item) {
@@ -327,6 +411,7 @@
         accepted.reviewRevision = candidate.revision;
         delete accepted.status;
         delete accepted.overlap;
+        delete accepted.overlapDetails;
         delete accepted.revision;
         delete accepted.reviewedRevision;
         // batchId and source identity remain useful for historical batch
@@ -524,12 +609,22 @@
                     }
                     if ([...this.accepted.values()].some(item => item.sourceIdentity === candidate.sourceIdentity && item.sourceRevision === candidate.sourceRevision)) return;
                     candidate.status = review.STATES.PENDING;
+                    const providerClassification = source === 'bank-provider' && (candidate.providerClassification === 'income' || candidate.providerClassification === 'expense')
+                        ? candidate.providerClassification
+                        : '';
                     candidate.sourceOriginal = immutableSource(candidate);
+                    if (opts.serverIngest === true && source === 'bank-provider' && Number.isFinite(candidate.__providerSignedAmount)) candidate.sourceOriginal.amount = candidate.__providerSignedAmount;
+                    if (providerClassification) candidate.sourceOriginal.providerClassification = providerClassification;
+                    delete candidate.providerClassification;
                     candidate.revision = (old || priorPending || priorHistory ? (old || priorPending || priorHistory).revision : 0) + 1;
                     candidate.reviewedRevision = candidate.revision;
-                    candidate.overlap = this.findOverlap(candidate);
                     this.pending.set(candidate.id, candidate);
                     staged.push(clone(candidate));
+                });
+                this.recomputeOverlaps();
+                staged.forEach(candidate => {
+                    const refreshed = this.pending.get(candidate.id);
+                    if (refreshed) Object.assign(candidate, clone(refreshed));
                 });
                 if (!staged.length) return { revision: this.revision, candidates: [] };
                 this.batchMeta.set(batchId, { ...clone(opts.batchMeta || {}), ids: staged.map(candidate => candidate.id) });
@@ -540,19 +635,32 @@
         }
 
         findOverlap(candidate) {
-            const candidateFingerprint = safeFingerprint(candidate);
-            if (!candidateFingerprint) return [];
-            return [...this.pending.entries(), ...this.accepted.entries()]
-                .filter(([key, item]) => {
-                    const itemId = text(key) || text(item && item.id);
-                    return itemId !== candidate.id && safeFingerprint(item) === candidateFingerprint;
-                })
-                .map(([key, item]) => text(key) || text(item && item.id));
+            return this.findOverlapDetails(candidate).map(detail => detail.id);
+        }
+
+        findOverlapDetails(candidate) {
+            return review.overlapDetailsFor(candidate, [...this.pending.entries(), ...this.accepted.entries()]);
+        }
+
+        recomputeOverlaps() {
+            for (const candidate of this.pending.values()) {
+                const details = this.findOverlapDetails(candidate);
+                candidate.overlap = details.map(detail => detail.id);
+                candidate.overlapDetails = details;
+            }
         }
 
         async listPending(auth) {
             this.authorize(auth);
+            this.normalizeHydratedPending();
             return [...this.pending.values()].map(clone);
+        }
+
+        normalizeHydratedPending() {
+            for (const [id, candidate] of this.pending.entries()) {
+                const normalized = review.normalizePendingCandidate(candidate);
+                if (normalized && normalized.id === id) this.pending.set(id, normalized);
+            }
         }
 
         async edit(auth, candidateId, patch, expectedRevision) {
@@ -561,7 +669,7 @@
                 const current = this.pending.get(text(candidateId));
                 if (!current) throw new Error('Candidate is no longer pending.');
                 if (current.revision !== expectedRevision) throw new Error('Candidate changed since it was loaded.');
-                const next = review.normalizeCandidate({ ...current, ...clone(patch), sourceIdentity: current.sourceIdentity, sourceRevision: current.sourceRevision }, current.source, 0, current.batchId);
+                const next = review.normalizeEditedCandidate({ ...current, sourceIdentity: current.sourceIdentity, sourceRevision: current.sourceRevision }, patch);
                 next.sourceIdentity = current.sourceIdentity;
                 next.sourceRevision = current.sourceRevision;
                 next.id = current.id;
@@ -569,11 +677,11 @@
                 next.revision = current.revision + 1;
                 next.reviewedRevision = next.revision;
                 next.status = review.STATES.PENDING;
-                next.overlap = this.findOverlap(next);
                 this.pending.set(current.id, next);
+                this.recomputeOverlaps();
                 this.audit.push({ action: 'edit', actor: user.email, id: current.id, revision: next.revision, at: this.clock() });
                 this.revision += 1;
-                return clone(next);
+                return clone(this.pending.get(current.id));
             });
         }
 
@@ -603,10 +711,11 @@
                     candidate.status = review.STATES.PENDING;
                     candidate.revision = 1;
                     candidate.reviewedRevision = 1;
-                    candidate.overlap = this.findOverlap(candidate);
                     this.pending.set(candidate.id, candidate);
                     return candidate;
                 });
+                this.recomputeOverlaps();
+                created.forEach(candidate => Object.assign(candidate, clone(this.pending.get(candidate.id))));
                 for (const [batchId, metadata] of this.batchMeta.entries()) {
                     if (metadata && Array.isArray(metadata.ids) && metadata.ids.includes(id)) this.batchMeta.set(batchId, { ...metadata, ids: metadata.ids.flatMap(value => value === id ? created.map(item => item.id) : [value]) });
                 }
@@ -754,6 +863,7 @@
                 }
                 const selected = ids.map(id => this.pending.get(id));
                 if (selected.some(candidate => !candidate)) throw new Error('Every candidate must remain pending for approval.');
+                this.recomputeOverlaps();
                 selected.forEach((candidate, index) => {
                     if (candidate.revision !== revisions[index]) throw new Error(`Candidate ${candidate.id} changed since review.`);
                     if (candidate.status !== review.STATES.PENDING && candidate.status !== review.STATES.DEFERRED) throw new Error(`Candidate ${candidate.id} is not approvable.`);
@@ -762,18 +872,20 @@
                     // the complete selection. A staged overlap index can be stale
                     // after another edit/delete, and two matching pending rows
                     // still require an explicit duplicate override.
-                    const candidateFingerprint = safeFingerprint(candidate);
-                    if (candidateFingerprint) {
-                        const acceptedOverlap = [...this.accepted.entries()].some(([acceptedKey, acceptedItem]) => {
-                            if (safeFingerprint(acceptedItem) !== candidateFingerprint) return false;
-                            const isAmendmentTarget = (candidate.amendment === 'modified' || candidate.amendment === 'removed') &&
-                                acceptedItem.sourceIdentity === candidate.sourceIdentity &&
-                                (!candidate.targetSourceRevision || acceptedItem.sourceRevision === candidate.targetSourceRevision);
-                            return !isAmendmentTarget;
-                        });
-                        const selectedOverlap = selected.some(other => other !== candidate && safeFingerprint(other) === candidateFingerprint);
-                        if ((acceptedOverlap || selectedOverlap) && input.allowOverlap !== true) throw new Error(`Possible duplicate requires review: ${candidate.id}`);
-                    }
+                    const acceptedOverlap = this.findOverlapDetails(candidate).some(detail => {
+                        const acceptedItem = this.accepted.get(detail.id);
+                        if (!acceptedItem) return false;
+                        const isAmendmentTarget = (candidate.amendment === 'modified' || candidate.amendment === 'removed') &&
+                            acceptedItem.sourceIdentity === candidate.sourceIdentity &&
+                            (!candidate.targetSourceRevision || acceptedItem.sourceRevision === candidate.targetSourceRevision);
+                        return !isAmendmentTarget;
+                    });
+                    const selectedOverlap = selected.some(other => other !== candidate && review.possibleOverlapDetails(candidate, other, other.id));
+                    // Pending rows remain reviewable warnings. Only rows selected
+                    // together in this approval are blocked, so a user can make
+                    // an explicit decision on one row while leaving its possible
+                    // overlap in the inbox for later review.
+                    if ((acceptedOverlap || selectedOverlap) && input.allowOverlap !== true) throw new Error(`Possible duplicate requires review: ${candidate.id}`);
                     if (candidate.amendment === 'modified' || candidate.amendment === 'removed') {
                         const targetItems = amendmentTargetItems(candidate, [...this.accepted.values()]);
                         if (!candidate.targetAcceptedDigest || !targetItems.length || acceptedTargetSetDigest(targetItems) !== candidate.targetAcceptedDigest) throw new Error(`Amendment target changed since review: ${candidate.id}`);
@@ -860,6 +972,7 @@
         }
 
         exportState() {
+            this.normalizeHydratedPending();
             return {
                 pending: [...this.pending.entries()].map(([id, value]) => [id, clone(value)]),
                 rejected: [...this.rejected.entries()].map(([id, value]) => [id, clone(value)]),
@@ -874,6 +987,7 @@
         }
 
         exportReviewSnapshot() {
+            this.normalizeHydratedPending();
             // Keep legacy rows in canonical accepted state, but omit rows that
             // cannot satisfy the strict review schema. No date is fabricated;
             // accepted-history backup compatibility is handled by the
@@ -928,7 +1042,12 @@
         }
 
         restoreState(snapshot) {
-            this.pending = new Map(snapshot.pending);
+            this.pending = new Map((snapshot.pending || []).map(entry => {
+                const key = Array.isArray(entry) ? entry[0] : entry && entry.id;
+                const value = Array.isArray(entry) ? entry[1] : entry;
+                const normalized = review.normalizePendingCandidate(value);
+                return [key, normalized];
+            }));
             this.rejected = new Map(snapshot.rejected);
             this.accepted = new Map(snapshot.accepted);
             this.approvedAmendments = new Map(snapshot.approvedAmendments || []);
@@ -937,6 +1056,7 @@
             this.audit = snapshot.audit;
             this.revision = snapshot.revision;
             this.state = snapshot.state;
+            this.recomputeOverlaps();
         }
     }
 
@@ -1149,7 +1269,8 @@
         async listPending(auth) {
             this.authorize(auth);
             const snapshot = await this.repository.read();
-            return (snapshot.pending || []).map(entry => clone(Array.isArray(entry) ? entry[1] : entry));
+            const memory = this.makeMemory(snapshot);
+            return memory.listPending(auth);
         }
         async exportReview(auth) {
             this.authorize(auth);
@@ -1349,6 +1470,8 @@
         async updateLinkToken(connectionKey) { return this.request('link-update', { connectionKey, mode: 'update' }); }
         async sync(connectionKey) { return this.request('sync', { connectionKey }); }
         async syncReadiness() { return this.get('sync-readiness'); }
+        async syncSettings() { return this.get('sync-settings'); }
+        async updateSyncSettings(cutoffDate, expectedRevision) { return this.request('sync-settings', { cutoffDate, expectedRevision }); }
 
         async edit(candidateId, patch, expectedRevision) { return this.request('edit', { candidateId, patch, expectedRevision }); }
         async split(candidateId, parts, expectedRevision) { return this.request('split', { candidateId, parts, expectedRevision }); }
@@ -1425,8 +1548,10 @@
                 else if (url.pathname === '/review' && request.method === 'GET' && typeof backend.exportReview === 'function') result = await backend.exportReview(auth);
                 else if (url.pathname === '/sync-readiness' && request.method === 'GET' && typeof opts.syncReadiness === 'function') {
                     const readiness = await opts.syncReadiness(auth);
-                    result = { ready: readiness && readiness.ready === true, revision: readiness && readiness.revision, cutoffDate: readiness && readiness.cutoffDate, connectionKeys: readiness && readiness.connectionKeys };
+                    result = { ready: readiness && readiness.ready === true, revision: readiness && readiness.revision, cutoffDate: readiness && readiness.cutoffDate, cutoffRevision: readiness && readiness.cutoffRevision, connectionKeys: readiness && readiness.connectionKeys };
                 }
+                else if (url.pathname === '/sync-settings' && request.method === 'GET' && opts.syncSettings && typeof opts.syncSettings.read === 'function') result = await opts.syncSettings.read(auth);
+                else if (url.pathname === '/sync-settings' && request.method === 'POST' && opts.syncSettings && typeof opts.syncSettings.update === 'function') result = await opts.syncSettings.update(auth, body.cutoffDate, body.expectedRevision);
                 else if (url.pathname === '/stage' && request.method === 'POST') {
                     const source = text(body.source || body.records && body.records[0] && body.records[0].source || 'manual-csv').toLowerCase();
                     if (!['manual-csv', 'bank-csv', 'historical-csv'].includes(source)) throw new Error('Browser staging is limited to CSV observations.');
@@ -1446,7 +1571,7 @@
                 return jsonResponse(response, 200, result);
             } catch (error) {
                 const message = text(error && error.message) || 'Request failed.';
-                const status = /authentication|approved app user|existing app user|household|Bearer|membership/i.test(message) ? 401 : /CORS origin/i.test(message) ? 403 : /changed|pending|approval|invalid|revision|Route|too large|JSON/i.test(message) || message === 'Browser staging is limited to CSV observations.' ? 409 : 500;
+                const status = /authentication|approved app user|existing app user|household|Bearer|membership/i.test(message) ? 401 : /CORS origin/i.test(message) ? 403 : /changed|pending|approval|duplicate requires review|invalid|revision|Route|too large|JSON/i.test(message) || message === 'Browser staging is limited to CSV observations.' ? 409 : 500;
                 let diagnostic = null;
                 if (typeof opts.errorDiagnostic === 'function') {
                     try {
@@ -1612,16 +1737,23 @@
             const signedAmount = amount;
             const category = text(item.category || item.personal_finance_category && (item.personal_finance_category.primary || item.personal_finance_category.detailed) || 'Uncategorized');
             const classified = this.classify ? text(await this.classify({ kind, id, amount: signedAmount, category, name: text(item.name), merchantName: text(item.merchant_name), accountId, currency: 'USD', pending: item.pending === true })) : '';
+            const categoryIncome = !classified && signedAmount < 0 && review.hasCheckingIncomeCategory(category);
+            const checkingIncome = account === review.CHECKING_ACCOUNT_ALIAS && (classified === 'income' || categoryIncome);
+            const type = checkingIncome || classified === 'income' ? 'income' : 'expense';
+            const canonicalAmount = checkingIncome ? Math.abs(signedAmount) : signedAmount;
             const revision = `sha256:${observationDigest(kind, { ...item, classification: classified })}`;
             const linkedId = text(item.pending_transaction_id) || id;
             const candidate = {
                 source: 'bank-provider', sourceIdentity: `plaid:${identityPart(connectionKey || 'connection')}:${identityPart(accountId)}:${identityPart(linkedId)}`, sourceRevision: revision,
                 date: text(item.date), description: text(item.name || item.merchant_name || id),
-                amount: signedAmount, account, payment_method: account, merchant: text(item.merchant_name || item.name || id), category,
-                // Plaid's sign is preserved. Refunds are negative expenses in
-                // this app; only an explicit server classifier can mark an
-                // observation as income.
-                type: classified === 'income' ? 'income' : 'expense', currency: 'USD', amendment: kind === 'removed' ? 'removed' : kind,
+                amount: canonicalAmount, account, payment_method: account, merchant: text(item.merchant_name || item.name || id), category,
+                // Plaid's sign is preserved for expenses and non-checking
+                // accounts. Checking income uses a positive canonical amount;
+                // retain the provider sign only in a server-side staging hint
+                // so sourceOriginal can preserve the raw observation.
+                type, currency: 'USD', amendment: kind === 'removed' ? 'removed' : kind,
+                ...(checkingIncome ? { providerSignedAmount: signedAmount } : {}),
+                ...(classified === 'income' || classified === 'expense' ? { providerClassification: classified } : {}),
                 ...(text(item.pending_transaction_id) ? { pendingTransactionId: text(item.pending_transaction_id) } : {}),
                 providerPending: item.pending === true
             };
@@ -1777,9 +1909,16 @@
             const opts = options || {};
             const connection = text(connectionKey);
             if (!connection) throw new Error('Sync connection key is required.');
+            let thisRunCutoverDate = this.cutoverDate;
+            let thisRunCutoverRevision = null;
             if (this.syncReadiness) {
                 const readiness = await this.syncReadiness(user, connection);
-                if (!readiness || readiness.ready !== true || text(readiness.cutoffDate) !== this.cutoverDate) throw new Error('Sync activation is not ready.');
+                if (!readiness || readiness.ready !== true || !validDate(readiness.cutoffDate)) throw new Error('Sync activation is not ready.');
+                // Pin the authenticated runtime setting for this run. A later
+                // settings update applies only to the next run and cannot
+                // change the provider request or cursor fence in flight.
+                thisRunCutoverDate = text(readiness.cutoffDate);
+                thisRunCutoverRevision = Number.isSafeInteger(readiness.cutoffRevision) ? readiness.cutoffRevision : readiness.revision;
             }
             const runId = text(opts.runId || uniqueRunId(connection, this.clock));
             const now = Date.now();
@@ -1799,8 +1938,8 @@
                 const storedCursor = await this.repository.getCursor(connection);
                 const cursor = storedCursor && storedCursor.cursor ? storedCursor.cursor : null;
                 const connectionAuth = this.connectionResolver ? await this.connectionResolver(connection, clone(user)) : {};
-                const existingSourceIdentities = this.cutoverDate ? await this.knownProviderSourceIdentities(user) : [];
-                const result = await this.provider.fetchDelta({ connectionKey: connection, cursor, cutoverDate: this.cutoverDate, existingSourceIdentities, user: clone(user), ...(deadlineAt === null ? {} : { deadlineAt }), ...(connectionAuth || {}) });
+                const existingSourceIdentities = thisRunCutoverDate ? await this.knownProviderSourceIdentities(user) : [];
+                const result = await this.provider.fetchDelta({ connectionKey: connection, cursor, cutoverDate: thisRunCutoverDate, cutoffRevision: thisRunCutoverRevision, existingSourceIdentities, user: clone(user), ...(deadlineAt === null ? {} : { deadlineAt }), ...(connectionAuth || {}) });
                 if (!result || !Array.isArray(result.pages) || !text(result.cursor)) throw new Error('Provider returned an incomplete paginated delta.');
                 const expectedIds = [];
                 for (const [index, page] of result.pages.entries()) {
@@ -1814,7 +1953,7 @@
                 }
                 const published = await this.repository.publishCursor(runId, result.cursor, expectedIds, connection, { now: this.clock() });
                 coordinator.finish(runId, true);
-                return { runId, lease, cursor: published.cursor, staged: expectedIds.length };
+                return { runId, lease, cursor: published.cursor, staged: expectedIds.length, cutoffDate: thisRunCutoverDate, cutoffRevision: thisRunCutoverRevision };
             } catch (error) {
                 try { coordinator.finish(runId, false); } catch (_) { /* Preserve the provider error. */ }
                 throw error;
@@ -1834,6 +1973,7 @@
         FirestoreSyncRepository,
         BrowserApprovalClient,
         PlaidTransactionsSyncAdapter,
+        createProtectedSyncSettings,
         verifyFirebaseAuthorization,
         createHttpHandler,
         OnOpenSyncService

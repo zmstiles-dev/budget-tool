@@ -22,8 +22,144 @@
         return String(value ?? '').trim();
     }
 
+    const CHECKING_ACCOUNT_ALIAS = 'Checking Account';
+
+    function checkingAccount(record) {
+        const source = record || {};
+        return text(source.account || source.payment_method) === CHECKING_ACCOUNT_ALIAS;
+    }
+
+    function categoryTokens(value) {
+        return new Set(text(value).toUpperCase().split(/[^A-Z0-9]+/).filter(Boolean));
+    }
+
+    // A provider payroll/income category is an explicit classification. A
+    // merchant name is deliberately excluded so checking reimbursements and
+    // other credits cannot be converted by a name heuristic.
+    function hasCheckingIncomeCategory(value) {
+        const tokens = categoryTokens(value);
+        return tokens.has('PAYROLL') || (tokens.has('INCOME') && !tokens.has('TAX'));
+    }
+
+    function normalizeCheckingIncomeAmount(record) {
+        const candidate = record || {};
+        if (candidate.type === 'income' && checkingAccount(candidate)) candidate.amount = Math.abs(integerCents(candidate.amount) / 100);
+        return candidate;
+    }
+
+    function sourceOriginalForCorrection(candidate, rawAmount) {
+        const original = candidate && candidate.sourceOriginal && typeof candidate.sourceOriginal === 'object'
+            ? clone(candidate.sourceOriginal)
+            : clone(candidate || {});
+        if (rawAmount !== undefined) original.amount = rawAmount;
+        ['status', 'revision', 'reviewedRevision', 'overlap', 'overlapDetails', 'rejectedBy', 'rejectedAt',
+            'deferredBy', 'deferredAt', 'supersededBy', 'supersededAt', 'approvedBy', 'approvedAt', 'sourceOriginal'].forEach(field => delete original[field]);
+        return original;
+    }
+
+    // Hydration compatibility for provider payroll rows written before the
+    // checking-income sign rule existed. Only an untouched first revision is
+    // eligible for inferred classification; a user-edited expense remains an
+    // expense. Explicit income rows are normalized at every revision.
+    function normalizePendingCandidate(candidate) {
+        const source = clone(candidate || {});
+        const explicitIncome = source.type === 'income';
+        const untouched = Number(source.revision) === 1 && Number(source.reviewedRevision) === 1;
+        const originalCategory = source.sourceOriginal && text(source.sourceOriginal.category);
+        const originalType = source.sourceOriginal && text(source.sourceOriginal.type);
+        const matchesOriginalClassification = !source.sourceOriginal
+            || (originalCategory === text(source.category) && (!originalType || originalType === text(source.type)));
+        const providerClassification = text(source.providerClassification || source.sourceOriginal && source.sourceOriginal.providerClassification);
+        const inferredPayroll = source.source === 'bank-provider' && checkingAccount(source) && source.type !== 'income'
+            && untouched && Number(source.amount) < 0 && hasCheckingIncomeCategory(source.category)
+            && matchesOriginalClassification
+            && !providerClassification
+            && !categoryTokens(source.category).has('REIMBURSEMENT');
+        if (!checkingAccount(source) || (!explicitIncome && !inferredPayroll)) return source;
+        const rawAmount = Number(source.amount);
+        const normalized = normalizeCheckingIncomeAmount({ ...source, ...(inferredPayroll ? { type: 'income' } : {}) });
+        if (normalized.amount === source.amount && normalized.type === source.type) return source;
+        normalized.sourceOriginal = sourceOriginalForCorrection(source, rawAmount);
+        normalized.revision = Number.isSafeInteger(source.revision) ? source.revision + 1 : source.revision;
+        normalized.reviewedRevision = normalized.revision;
+        normalized.fingerprint = stableFingerprint(normalized);
+        return normalized;
+    }
+
     function normalizeDescription(value) {
         return text(value).toLowerCase().replace(/[^a-z0-9]+/g, ' ').trim();
+    }
+
+    const OVERLAP_DATE_WINDOW_DAYS = 3;
+    const OVERLAP_STOP_WORDS = new Set(['a', 'an', 'and', 'at', 'card', 'charge', 'co', 'company', 'inc', 'invoice', 'llc', 'payment', 'purchase', 'store', 'the', 'transaction']);
+
+    function overlapAccount(record) {
+        return normalizeDescription(record && (record.account || record.payment_method));
+    }
+
+    function overlapTokens(record) {
+        const source = [record && record.merchant, record && record.description].map(normalizeDescription).filter(Boolean).join(' ');
+        return new Set(source.split(/\s+/).filter(token => token.length >= 3 && !OVERLAP_STOP_WORDS.has(token)));
+    }
+
+    function overlapDateDeltaDays(left, right) {
+        const first = text(left && left.date);
+        const second = text(right && right.date);
+        if (!strictDate(first) || !strictDate(second)) return null;
+        return Math.abs((Date.parse(`${first}T00:00:00Z`) - Date.parse(`${second}T00:00:00Z`)) / 86400000);
+    }
+
+    function possibleOverlapDetails(candidate, item, itemId) {
+        if (!candidate || !item || candidate.id && item.id && candidate.id === item.id) return null;
+        let candidateAmount;
+        let itemAmount;
+        try {
+            candidateAmount = integerCents(candidate.amount);
+            itemAmount = integerCents(item.amount);
+        } catch (_) {
+            return null;
+        }
+        const account = overlapAccount(candidate);
+        if (!account || account !== overlapAccount(item) || candidateAmount !== itemAmount) return null;
+        const dateDeltaDays = overlapDateDeltaDays(candidate, item);
+        if (dateDeltaDays === null || dateDeltaDays > OVERLAP_DATE_WINDOW_DAYS) return null;
+        const candidateDescription = normalizeDescription(candidate.description);
+        const itemDescription = normalizeDescription(item.description);
+        const candidateMerchant = normalizeDescription(candidate.merchant);
+        const itemMerchant = normalizeDescription(item.merchant);
+        const exactDescription = candidateDescription && candidateDescription === itemDescription;
+        const exactMerchant = candidateMerchant && candidateMerchant === itemMerchant;
+        const leftTokens = overlapTokens(candidate);
+        const rightTokens = overlapTokens(item);
+        const sharedTokens = [...leftTokens].filter(token => rightTokens.has(token)).sort();
+        const combinedTokens = new Set([...leftTokens, ...rightTokens]);
+        // A one-token match is only useful when it is a distinctive token and
+        // at least one side is short. This avoids warning on unrelated rows
+        // that happen to share generic words such as "store" or "payment".
+        const distinctiveSharedToken = sharedTokens.some(token => token.length >= 4);
+        const shortMerchantMatch = distinctiveSharedToken && (leftTokens.size <= 2 || rightTokens.size <= 2);
+        if (!exactDescription && !exactMerchant && sharedTokens.length < 2 && !shortMerchantMatch) return null;
+        const confidence = exactDescription || exactMerchant || sharedTokens.length >= 2 ? 'high' : 'medium';
+        return {
+            id: text(itemId || item.id),
+            confidence,
+            dateDeltaDays,
+            account: text(candidate.account || candidate.payment_method),
+            amount: candidateAmount / 100,
+            candidate: { date: text(candidate.date), description: text(candidate.description), merchant: text(candidate.merchant) },
+            matched: { date: text(item.date), description: text(item.description), merchant: text(item.merchant) },
+            sharedWords: sharedTokens,
+            wordCoverage: combinedTokens.size ? sharedTokens.length / combinedTokens.size : 1,
+            reason: exactDescription ? 'same normalized description' : exactMerchant ? 'same normalized merchant' : 'nearby date and merchant tokens'
+        };
+    }
+
+    function overlapDetailsFor(candidate, items) {
+        return (items || []).map(entry => {
+            const item = Array.isArray(entry) ? entry[1] : entry;
+            const itemId = Array.isArray(entry) ? entry[0] : item && item.id;
+            return possibleOverlapDetails(candidate, item, itemId);
+        }).filter(Boolean);
     }
 
     function integerCents(value) {
@@ -61,6 +197,9 @@
 
     function normalizeCandidate(record, source, index, batchId) {
         const candidate = { ...clone(record) };
+        // Provider-only metadata is consumed by the protected backend while
+        // constructing sourceOriginal and must never become a review field.
+        delete candidate.providerSignedAmount;
         candidate.source = text(source || candidate.source || 'manual-csv') || 'manual-csv';
         candidate.sourceIdentity = sourceKey(candidate, candidate.source, index);
         candidate.sourceRevision = text(candidate.sourceRevision || candidate.revision || '1') || '1';
@@ -72,6 +211,7 @@
         candidate.category = text(candidate.category) || 'Uncategorized';
         candidate.merchant = text(candidate.merchant || candidate.description);
         candidate.type = candidate.type === 'income' ? 'income' : 'expense';
+        normalizeCheckingIncomeAmount(candidate);
         if (!strictDate(candidate.date)) throw new Error('Candidate date must be a real YYYY-MM-DD date.');
         if (!candidate.description) throw new Error('Candidate description is required.');
         if (!candidate.account) throw new Error('Candidate account is required.');
@@ -79,6 +219,21 @@
         candidate.batchId = text(batchId || candidate.batchId || 'batch-unknown');
         candidate.id = `${candidate.sourceIdentity}@${candidate.sourceRevision}`;
         return candidate;
+    }
+
+    function normalizeEditedCandidate(current, patch) {
+        const source = current || {};
+        const changes = clone(patch || {});
+        const next = { ...source, ...changes };
+        const originalAmount = Number(source.sourceOriginal && source.sourceOriginal.amount);
+        const currentAmount = Number(source.amount);
+        const requestedAmount = Number(next.amount);
+        const typeToggle = source.type === 'income' && next.type === 'expense' && checkingAccount(source)
+            && Number.isFinite(originalAmount) && originalAmount < 0
+            && Number.isFinite(currentAmount) && currentAmount === Math.abs(originalAmount)
+            && Number.isFinite(requestedAmount) && requestedAmount === currentAmount;
+        if (typeToggle) next.amount = originalAmount;
+        return normalizeCandidate(next, next.source, 0, next.batchId);
     }
 
     const ACCEPTED_HISTORY_DATE_COMPATIBILITY_VERSION = 1;
@@ -281,10 +436,13 @@
                 candidate.status = STATES.PENDING;
                 candidate.revision = (prior ? prior.revision : 0) + 1;
                 candidate.reviewedRevision = candidate.revision;
-                candidate.overlap = this.findOverlap(candidate);
-                if (candidate.overlap.length) this.overlaps.set(candidate.id, candidate.overlap);
                 this.pending.set(candidate.id, candidate);
                 staged.push(clone(candidate));
+            });
+            this.recomputeOverlaps();
+            staged.forEach(candidate => {
+                const refreshed = this.pending.get(candidate.id);
+                if (refreshed) Object.assign(candidate, clone(refreshed));
             });
             this.batchMeta.set(batchId, { ...clone(opts.batchMeta || {}), ids: staged.map(item => item.id) });
             this.audit.push({ action: 'stage', batchId, source, count: staged.length, at: new Date().toISOString() });
@@ -292,12 +450,21 @@
         }
 
         findOverlap(candidate) {
-            const matches = [];
-            const all = [...this.pending.values(), ...this.accepted.values()];
-            for (const item of all) {
-                if (item.id !== candidate.id && item.fingerprint === candidate.fingerprint) matches.push(item.id);
+            return overlapDetailsFor(candidate, [...this.pending.values(), ...this.accepted.values()]).map(detail => detail.id);
+        }
+
+        findOverlapDetails(candidate) {
+            return overlapDetailsFor(candidate, [...this.pending.entries(), ...this.accepted.entries()]);
+        }
+
+        recomputeOverlaps() {
+            this.overlaps.clear();
+            for (const [id, candidate] of this.pending.entries()) {
+                const details = this.findOverlapDetails(candidate);
+                candidate.overlap = details.map(detail => detail.id);
+                candidate.overlapDetails = details;
+                if (candidate.overlap.length) this.overlaps.set(id, candidate.overlap.slice());
             }
-            return matches;
         }
 
         list(options) {
@@ -307,22 +474,23 @@
 
         get(id) { return clone(this.pending.get(id) || this.accepted.get(id) || this.rejected.get(id)); }
 
-        edit(id, patch) {
+        edit(id, patch, expectedRevision) {
             this.assertUnlocked(id);
             const current = this.pending.get(id);
             if (!current) throw new Error('Candidate is no longer pending.');
+            if (expectedRevision !== undefined && current.revision !== expectedRevision) throw new Error('Candidate changed since it was loaded.');
             const next = { ...current, ...clone(patch) };
-            const normalized = normalizeCandidate(next, next.source, 0, next.batchId);
+            const normalized = normalizeEditedCandidate(current, patch);
             normalized.sourceIdentity = current.sourceIdentity;
             normalized.id = current.id;
             normalized.sourceRevision = current.sourceRevision;
             normalized.revision = current.revision + 1;
             normalized.reviewedRevision = normalized.revision;
             normalized.status = STATES.PENDING;
-            normalized.overlap = this.findOverlap(normalized);
             this.pending.set(id, normalized);
+            this.recomputeOverlaps();
             this.audit.push({ action: 'edit', id, revision: normalized.revision, at: new Date().toISOString() });
-            return clone(normalized);
+            return clone(this.pending.get(id));
         }
 
         split(id, parts) {
@@ -347,10 +515,11 @@
                 candidate.status = STATES.PENDING;
                 candidate.revision = 1;
                 candidate.reviewedRevision = 1;
-                candidate.overlap = this.findOverlap(candidate);
                 this.pending.set(candidate.id, candidate);
                 return candidate;
             });
+            this.recomputeOverlaps();
+            created.forEach(candidate => Object.assign(candidate, clone(this.pending.get(candidate.id))));
             for (const [batchId, metadata] of this.batchMeta.entries()) {
                 if (metadata && Array.isArray(metadata.ids) && metadata.ids.includes(id)) this.batchMeta.set(batchId, { ...metadata, ids: metadata.ids.flatMap(value => value === id ? created.map(item => item.id) : [value]) });
             }
@@ -440,11 +609,13 @@
                 }
                 return { accepted: [], receipts: [] };
             }
+            this.recomputeOverlaps();
+            const selectedIds = new Set(selected.map(item => item.id));
             for (const candidate of selected) {
                 if (candidate.status === STATES.REJECTED) throw new Error('Rejected candidates cannot be approved.');
                 if (candidate.providerPending === true || candidate.pending === true) throw new Error(`Provider pending observation ${candidate.id} must post before approval.`);
                 if (candidate.reviewedRevision !== candidate.revision) throw new Error(`Candidate ${candidate.id} changed after review.`);
-                if (candidate.overlap && candidate.overlap.some(id => this.accepted.has(id)) && opts.allowOverlap !== true) throw new Error(`Possible duplicate requires review: ${candidate.id}`);
+                if (candidate.overlap && candidate.overlap.some(id => this.accepted.has(id) || selectedIds.has(id)) && opts.allowOverlap !== true) throw new Error(`Possible duplicate requires review: ${candidate.id}`);
             }
             const key = suppliedKey || selected.map(item => `${item.id}:${item.revision}`).sort().join(',');
             if (this.receipts.has(key)) return clone(this.receipts.get(key));
@@ -466,7 +637,13 @@
                     const current = this.pending.get(candidate.id);
                     if (current !== candidate || current.revision !== candidate.revision) throw new Error(`Candidate ${candidate.id} changed during approval.`);
                 });
-                payload.forEach(item => {
+                const acceptedPayload = payload.map(item => {
+                    const accepted = { ...item };
+                    delete accepted.overlap;
+                    delete accepted.overlapDetails;
+                    return accepted;
+                });
+                acceptedPayload.forEach(item => {
                     this.pending.delete(item.id);
                     if (item.amendment === 'modified' || item.amendment === 'removed') {
                         for (const [acceptedId, accepted] of this.accepted.entries()) {
@@ -478,9 +655,9 @@
                     // the canonical accepted state omits removed rows.
                     this.accepted.set(item.id, item);
                 });
-                this.receipts.set(key, { accepted: clone(payload), receipts: [clone(receipt)] });
+                this.receipts.set(key, { accepted: clone(acceptedPayload), receipts: [clone(receipt)] });
                 this.audit.push({ action: 'approve', actor, candidateIds: receipt.candidateIds, revisions: receipt.revisions, at: receipt.approvedAt });
-                return { accepted: clone(payload), receipts: [clone(receipt)] };
+                return { accepted: clone(acceptedPayload), receipts: [clone(receipt)] };
             } finally {
                 this.inFlight.delete(key);
                 selected.forEach(candidate => {
@@ -503,7 +680,10 @@
 
         restoreReview(snapshot) {
             validateReviewSnapshot(snapshot);
-            const pending = new Map((snapshot.pending || []).map(candidate => [candidate.id, clone(candidate)]));
+            const pending = new Map((snapshot.pending || []).map(candidate => {
+                const normalized = normalizePendingCandidate(candidate);
+                return [normalized.id, normalized];
+            }));
             const rejected = new Map((snapshot.rejected || []).map(candidate => [candidate.id, clone(candidate)]));
             const accepted = new Map((snapshot.accepted || []).map(candidate => [candidate.id, clone(candidate)]));
             const receipts = new Map((snapshot.receipts || []).map(record => [record.idempotencyKey, { accepted: clone(record.accepted), receipts: clone(record.receipts) }]));
@@ -513,7 +693,7 @@
             this.receipts = receipts;
             this.audit = clone(snapshot.audit || []);
             this.batchMeta = new Map((snapshot.batchMeta || []).map(([batchId, value]) => [batchId, clone(value)]));
-            this.overlaps = new Map([...pending.values()].filter(candidate => candidate.overlap && candidate.overlap.length).map(candidate => [candidate.id, candidate.overlap.slice()]));
+            this.recomputeOverlaps();
             this.inFlight.clear();
             this.candidateLocks.clear();
             return this.exportReview();
@@ -639,7 +819,7 @@
         async fetchDelta() { throw new Error(this.reason); }
     }
 
-    const api = Object.freeze({ VERSION, STATES, normalizeCandidate, stableFingerprint, ReviewStore, InMemorySyncRepository, SyncCoordinator, DisabledProviderAdapter, createBackup, validateSnapshot, validateReviewSnapshot, restoreBackup, migrateLegacyBackup });
+    const api = Object.freeze({ VERSION, STATES, CHECKING_ACCOUNT_ALIAS, normalizeCandidate, normalizePendingCandidate, normalizeEditedCandidate, hasCheckingIncomeCategory, stableFingerprint, possibleOverlapDetails, overlapDetailsFor, ReviewStore, InMemorySyncRepository, SyncCoordinator, DisabledProviderAdapter, createBackup, validateSnapshot, validateReviewSnapshot, restoreBackup, migrateLegacyBackup });
     if (typeof module !== 'undefined' && module.exports) module.exports = api;
     else root.TransactionReview = api;
 })(typeof globalThis === 'undefined' ? this : globalThis);
