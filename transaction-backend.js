@@ -168,6 +168,22 @@
         return source;
     }
 
+    const PROVIDER_TRACKING_FIELDS = Object.freeze([
+        'providerTransactionId', 'providerAccountId', 'providerConnectionKey',
+        'pendingTransactionId', 'providerPending', 'providerClassification',
+        'transaction_id', 'pending_transaction_id', 'account_id'
+    ]);
+
+    function restoreProviderTrackingFields(current, next) {
+        const source = current || {};
+        const target = next || {};
+        PROVIDER_TRACKING_FIELDS.forEach(field => {
+            if (Object.prototype.hasOwnProperty.call(source, field)) target[field] = clone(source[field]);
+            else delete target[field];
+        });
+        return target;
+    }
+
     // Browser approval retries may include the candidate body when the stage
     // response was lost. Compare the review fields that affect the accepted
     // row, while ignoring server-owned lifecycle metadata and transport-only
@@ -593,7 +609,62 @@
             return this.mutex.run(this.householdId, async () => {
                 const staged = [];
                 const seen = new Set();
-                (records || []).forEach((record, index) => {
+                let incoming = (records || []).slice();
+                if (source === 'bank-provider') {
+                    // A pending transaction can be represented by a sparse
+                    // removed row and a posted added row in the same delta.
+                    // Group by the stable linked identity first so the
+                    // removal is superseded only by a posted replacement that
+                    // explicitly carries that pending ID. A generic modified
+                    // observation must never overwrite a real accepted
+                    // removal, and an ordinary Array#sort comparator cannot
+                    // express these ordering rules transitively when pages
+                    // interleave multiple identities.
+                    const groups = new Map();
+                    incoming.forEach((record, index) => {
+                        const identity = text(record && record.sourceIdentity);
+                        const key = identity || `__provider-record-${index}`;
+                        if (!groups.has(key)) groups.set(key, { firstIndex: index, records: [] });
+                        groups.get(key).records.push(record);
+                    });
+                    incoming = [...groups.values()].sort((left, right) => left.firstIndex - right.firstIndex).flatMap(group => {
+                        const removed = group.records.filter(record => text(record && record.amendment) === 'removed');
+                        if (!removed.length) return group.records;
+                        const removedIds = new Set(removed.flatMap(record => [
+                            record && record.providerTransactionId,
+                            record && record.transaction_id,
+                            record && record.id,
+                            text(record && record.sourceIdentity).split(':').pop()
+                        ].map(text).filter(Boolean)));
+                        const nonRemoved = group.records.filter(record => text(record && record.amendment) !== 'removed');
+                        const replacements = nonRemoved.filter(record => {
+                            if (text(record && record.amendment) === 'removed' || record && record.providerPending === true) return false;
+                            const pendingId = text(record && (record.pendingTransactionId || record.pending_transaction_id));
+                            const providerId = text(record && (record.providerTransactionId || record.transaction_id));
+                            return pendingId && removedIds.has(pendingId) && providerId && providerId !== pendingId;
+                        });
+                        if (nonRemoved.length && replacements.length !== nonRemoved.length) throw new Error('Provider delta contains ambiguous mixed lifecycle observations.');
+                        if (!replacements.length) return removed;
+                        // If the posted replacement is already accepted, the
+                        // paired pending removal is the provider's lifecycle
+                        // cleanup event and must be discarded. Otherwise it
+                        // could become a misleading removal amendment after
+                        // the duplicate added row is correctly skipped below.
+                        const acceptedReplacement = replacements.some(record => {
+                            const identity = text(record && record.sourceIdentity);
+                            const revision = text(record && record.sourceRevision);
+                            const providerId = text(record && (record.providerTransactionId || record.transaction_id));
+                            return [...this.accepted.values()].some(item => {
+                                if (identity && text(item && item.sourceIdentity) !== identity) return false;
+                                if (revision && text(item && item.sourceRevision) === revision) return true;
+                                const original = item && item.sourceOriginal && typeof item.sourceOriginal === 'object' ? item.sourceOriginal : {};
+                                return providerId && (text(item && item.providerTransactionId) === providerId || text(original.providerTransactionId) === providerId);
+                            });
+                        });
+                        return acceptedReplacement ? replacements : [...removed, ...replacements];
+                    });
+                }
+                incoming.forEach((record, index) => {
                     const candidate = normalizeInboundCandidate(record, source || record.source || 'manual-csv', index, batchId);
                     if (seen.has(candidate.id)) return;
                     seen.add(candidate.id);
@@ -680,6 +751,7 @@
                 if (!current) throw new Error('Candidate is no longer pending.');
                 if (current.revision !== expectedRevision) throw new Error('Candidate changed since it was loaded.');
                 const next = review.normalizeEditedCandidate({ ...current, sourceIdentity: current.sourceIdentity, sourceRevision: current.sourceRevision }, patch);
+                restoreProviderTrackingFields(current, next);
                 next.sourceIdentity = current.sourceIdentity;
                 next.sourceRevision = current.sourceRevision;
                 next.id = current.id;
@@ -1734,6 +1806,8 @@
                 const prior = this.resolveRemoved ? await this.resolveRemoved(id, item) : null;
                 if (!prior || !prior.date || prior.amount === undefined || !text(prior.account_id || prior.account)) throw new Error('Removed provider transaction could not be hydrated from accepted history.');
                 item = { ...prior, ...item, date: item.date || prior.date, amount: item.amount === undefined ? prior.amount : item.amount, account_id: item.account_id || prior.account_id || prior.account };
+                const historicalType = !Object.prototype.propertyIsEnumerable.call(prior, '__historicalType') ? text(prior.__historicalType) : '';
+                if (historicalType) Object.defineProperty(item, '__historicalType', { value: historicalType, enumerable: false });
             }
             if (!this.accountMap) throw new Error('Plaid account name mapping is not configured.');
             const accountId = text(item.account_id || item.account);
@@ -1748,7 +1822,13 @@
             if (!Number.isFinite(amount)) throw new Error('Plaid transaction amount is invalid.');
             const signedAmount = amount;
             const category = text(item.category || item.personal_finance_category && (item.personal_finance_category.primary || item.personal_finance_category.detailed) || 'Uncategorized');
-            const classified = this.classify ? text(await this.classify({ kind, id, amount: signedAmount, category, name: text(item.name), merchantName: text(item.merchant_name), accountId, currency: 'USD', pending: item.pending === true })) : '';
+            const classifierResult = this.classify ? text(await this.classify({ kind, id, amount: signedAmount, category, name: text(item.name), merchantName: text(item.merchant_name), accountId, currency: 'USD', pending: item.pending === true })) : '';
+            // Durable removal hydration may carry a server-only historical
+            // type marker. It is intentionally ignored when supplied as an
+            // enumerable provider field, so raw provider data cannot inject a
+            // classification through this compatibility path.
+            const historicalClassification = !Object.prototype.propertyIsEnumerable.call(item, '__historicalType') ? text(item.__historicalType) : '';
+            const classified = classifierResult || historicalClassification;
             const categoryIncome = !classified && signedAmount < 0 && review.hasCheckingIncomeCategory(category);
             const checkingIncome = account === review.CHECKING_ACCOUNT_ALIAS && (classified === 'income' || categoryIncome);
             const type = checkingIncome || classified === 'income' ? 'income' : 'expense';
@@ -1757,6 +1837,7 @@
             const linkedId = text(item.pending_transaction_id) || id;
             const candidate = {
                 source: 'bank-provider', sourceIdentity: `plaid:${identityPart(connectionKey || 'connection')}:${identityPart(accountId)}:${identityPart(linkedId)}`, sourceRevision: revision,
+                providerTransactionId: id, providerAccountId: accountId, providerConnectionKey: text(connectionKey || 'connection'),
                 date: text(item.date), description: text(item.name || item.merchant_name || id),
                 amount: canonicalAmount, account, payment_method: account, merchant: text(item.merchant_name || item.name || id), category,
                 // Plaid's sign is preserved for expenses and non-checking
@@ -1783,6 +1864,8 @@
             for (let restart = 0; restart <= this.maxMutationRestarts; restart += 1) {
                 this.assertSyncActive(opts);
                 const pages = [];
+                const hydrationById = new Map();
+                const deferredRemoved = [];
                 let rawObservations = 0;
                 let skippedObservations = 0;
                 let cutoffExcluded = 0;
@@ -1820,21 +1903,55 @@
                     if (!Array.isArray(response.added) || !Array.isArray(response.modified) || !Array.isArray(response.removed) || typeof response.has_more !== 'boolean' || typeof response.next_cursor !== 'string' || !text(response.next_cursor)) throw new Error('Plaid sync returned an incomplete page.');
                     rawObservations += response.added.length + response.modified.length + response.removed.length;
                     const records = [];
+                    const rememberHydration = item => {
+                        const value = item || {};
+                        const providerId = text(value.transaction_id || value.id);
+                        const pendingId = text(value.pending_transaction_id);
+                        if (providerId) hydrationById.set(providerId, value);
+                        if (pendingId) hydrationById.set(pendingId, value);
+                    };
+                    const mergeHydration = (item, hydrated) => {
+                        const removedAccountId = text(item && (item.account_id || item.account));
+                        const hydratedAccountId = text(hydrated && (hydrated.account_id || hydrated.account));
+                        if (removedAccountId && hydratedAccountId && removedAccountId !== hydratedAccountId) throw new Error('Removed provider transaction account does not match its replacement.');
+                        return {
+                            ...hydrated,
+                            ...item,
+                            transaction_id: item && (item.transaction_id || item.id) || hydrated.transaction_id,
+                            account_id: removedAccountId || hydratedAccountId,
+                            date: item && item.date || hydrated.date,
+                            amount: item && item.amount !== undefined ? item.amount : hydrated.amount
+                        };
+                    };
                     for (const [index, item] of response.added.entries()) {
+                        rememberHydration(item);
                         const record = await this.normalizeTransaction(item, 'added', index, cursor, opts.connectionKey);
                         if (record) records.push(record); else skippedObservations += 1;
                     }
                     for (const [index, item] of response.modified.entries()) {
+                        rememberHydration(item);
                         const record = await this.normalizeTransaction(item, 'modified', index, cursor, opts.connectionKey);
                         if (record) records.push(record); else skippedObservations += 1;
                     }
                     for (const [index, item] of response.removed.entries()) {
-                        const record = await this.normalizeTransaction(item, 'removed', index, cursor, opts.connectionKey);
+                        const sparse = !item || !item.date || item.amount === undefined || !item.account_id && !item.account;
+                        const providerId = text(item && (item.transaction_id || item.id));
+                        const sameDeltaHydration = providerId && hydrationById.get(providerId);
+                        if (sparse && !sameDeltaHydration) {
+                            // A sparse removed row can be paired with its
+                            // posted replacement on a later page. Defer it
+                            // until the complete delta is available; the
+                            // durable resolver still covers prior history.
+                            deferredRemoved.push({ item, index, cursor, pageIndex: pages.length });
+                            continue;
+                        }
+                        const hydrated = sameDeltaHydration ? mergeHydration(item, sameDeltaHydration) : item;
+                        const record = await this.normalizeTransaction(hydrated, 'removed', index, cursor, opts.connectionKey);
                         if (record) records.push(record); else skippedObservations += 1;
                     }
                     pages.push({ records });
                     const nextCursor = text(response.next_cursor);
-                    if (hasMore && nextCursor === cursor) throw new Error('Plaid sync cursor did not advance.');
+                    if (response.has_more === true && nextCursor === cursor) throw new Error('Plaid sync cursor did not advance.');
                     cursor = nextCursor;
                     hasMore = response.has_more === true;
                     if (opts.cutoverDate) {
@@ -1852,16 +1969,30 @@
                         );
                         cutoffExcluded += beforeCutover - pages[pages.length - 1].records.length;
                     }
-                    if (!hasMore) return {
-                        pages,
-                        cursor,
-                        counts: {
-                            rawObservations,
-                            skippedObservations,
-                            cutoffExcluded,
-                            resultingRecords: pages.reduce((count, page) => count + page.records.length, 0)
+                    if (!hasMore) {
+                        for (const deferred of deferredRemoved) {
+                            const providerId = text(deferred.item && (deferred.item.transaction_id || deferred.item.id));
+                            const sameDeltaHydration = providerId && hydrationById.get(providerId);
+                            const hydrated = sameDeltaHydration ? mergeHydration(deferred.item, sameDeltaHydration) : deferred.item;
+                            const record = await this.normalizeTransaction(hydrated, 'removed', deferred.index, deferred.cursor, opts.connectionKey);
+                            if (!record) { skippedObservations += 1; continue; }
+                            if (opts.cutoverDate && record.date < text(opts.cutoverDate) && !(record.amendment !== 'added' && existingSourceIdentities.has(text(record.sourceIdentity)))) {
+                                cutoffExcluded += 1;
+                                continue;
+                            }
+                            pages[deferred.pageIndex].records.push(record);
                         }
-                    };
+                        return {
+                            pages,
+                            cursor,
+                            counts: {
+                                rawObservations,
+                                skippedObservations,
+                                cutoffExcluded,
+                                resultingRecords: pages.reduce((count, page) => count + page.records.length, 0)
+                            }
+                        };
+                    }
                 }
             }
             throw new Error('Plaid sync did not complete.');

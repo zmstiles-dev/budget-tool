@@ -3,6 +3,7 @@ const { EventEmitter } = require('node:events');
 const review = require('../transaction-review.js');
 const backendApi = require('../transaction-backend.js');
 const { createBudgetService } = require('../transaction-service.js');
+const production = require('../production-service.js');
 const appConfig = require('../transaction-config.js');
 
 const auth = { uid: 'sync-user', email: 'reviewer@example.test', tokenVerified: true, householdId: 'household-1' };
@@ -44,6 +45,12 @@ function request(method, url, body, origin) {
 
 function response() {
     return { statusCode: 0, headers: {}, body: '', setHeader(name, value) { this.headers[name] = value; }, end(body) { this.body = body || ''; } };
+}
+
+async function seedCursor(repository, connectionKey, cursor, now = 0) {
+    await repository.acquireLease(connectionKey, `seed-${connectionKey}-${cursor}`, { now });
+    await repository.publishCursor(`seed-${connectionKey}-${cursor}`, cursor, [], connectionKey, { now });
+    await repository.releaseLease(connectionKey, `seed-${connectionKey}-${cursor}`);
 }
 
 ;(async () => {
@@ -110,6 +117,147 @@ function response() {
     assert.deepEqual(plaidCalls, ['start', 'start', 'page-1']);
     assert.equal(plaidResult.pages.flatMap(page => page.records).length, 2);
     assert.equal(plaidResult.pages[1].records[0].amendment, 'removed');
+
+    const terminalSameCursor = new backendApi.PlaidTransactionsSyncAdapter({
+        accountMap: { Checking: 'Checking Account' },
+        client: { sync: async () => ({ added: [], modified: [], removed: [], has_more: false, next_cursor: 'saved-cursor' }) }
+    });
+    const terminalSameCursorResult = await terminalSameCursor.fetchDelta({ accessToken: 'test', cursor: 'saved-cursor', connectionKey: 'chase' });
+    assert.equal(terminalSameCursorResult.cursor, 'saved-cursor');
+    assert.deepEqual(terminalSameCursorResult.counts, { rawObservations: 0, skippedObservations: 0, cutoffExcluded: 0, resultingRecords: 0 });
+    const nonAdvancingPage = new backendApi.PlaidTransactionsSyncAdapter({
+        accountMap: { Checking: 'Checking Account' },
+        client: { sync: async () => ({ added: [], modified: [], removed: [], has_more: true, next_cursor: 'stuck-cursor' }) }
+    });
+    await assert.rejects(() => nonAdvancingPage.fetchDelta({ accessToken: 'test', cursor: 'stuck-cursor', connectionKey: 'chase' }), /cursor did not advance/);
+
+    const pendingPosted = {
+        transaction_id: 'posted-replacement', pending_transaction_id: 'pending-replacement', date: '2026-10-12', amount: 19.25,
+        account_id: 'Checking', currency_code: 'USD', name: 'Posted replacement', merchant_name: 'Posted replacement', category: 'Food', pending: false
+    };
+    const sparsePendingRemoval = { transaction_id: 'pending-replacement', account_id: 'Checking' };
+    const samePageReplacement = new backendApi.PlaidTransactionsSyncAdapter({
+        accountMap: { Checking: 'Checking Account' },
+        client: { sync: async () => ({ added: [pendingPosted], modified: [], removed: [sparsePendingRemoval], has_more: false, next_cursor: 'same-page-replacement' }) }
+    });
+    const samePageResult = await samePageReplacement.fetchDelta({ accessToken: 'test', cursor: 'prior', connectionKey: 'chase' });
+    const samePageRecords = samePageResult.pages.flatMap(page => page.records);
+    assert.equal(samePageRecords.length, 2, 'same-page pending lifecycle emits both provider observations for backend coalescing');
+    const samePageBackend = new backendApi.ProtectedReviewBackend({ householdId: auth.householdId, allowedUsers: [auth.email], initialState: { categories: reviewCategories } });
+    await samePageBackend.stage(auth, samePageRecords, { source: 'bank-provider', serverIngest: true, batchId: 'same-page-replacement' });
+    let samePagePending = await samePageBackend.listPending(auth);
+    assert.equal(samePagePending.length, 1);
+    assert.equal(samePagePending[0].providerPending, false);
+    assert.equal(samePagePending[0].amendment, 'added');
+    const postedApproval = await samePageBackend.approve(auth, { candidateIds: [samePagePending[0].id], revisions: [samePagePending[0].revision], idempotencyKey: 'same-page-replacement-approval' });
+    assert.equal(postedApproval.accepted.length, 1);
+    await samePageBackend.stage(auth, samePageRecords, { source: 'bank-provider', serverIngest: true, batchId: 'same-page-replacement-duplicate' });
+    assert.equal((await samePageBackend.listPending(auth)).length, 0, 'duplicate posted add suppresses its paired pending removal after acceptance');
+
+    const crossPageReplacement = new backendApi.PlaidTransactionsSyncAdapter({
+        accountMap: { Checking: 'Checking Account' },
+        client: { sync: async requestBody => requestBody.cursor === 'prior'
+            ? ({ added: [], modified: [], removed: [sparsePendingRemoval], has_more: true, next_cursor: 'cross-page-1' })
+            : ({ added: [pendingPosted], modified: [], removed: [], has_more: false, next_cursor: 'cross-page-2' }) }
+    });
+    const crossPageResult = await crossPageReplacement.fetchDelta({ accessToken: 'test', cursor: 'prior', connectionKey: 'chase' });
+    const crossPageRecords = crossPageResult.pages.flatMap(page => page.records);
+    assert.equal(crossPageRecords.length, 2, 'cross-page pending lifecycle is hydrated from the posted replacement');
+    const crossPageBackend = new backendApi.ProtectedReviewBackend({ householdId: auth.householdId, allowedUsers: [auth.email], initialState: { categories: reviewCategories } });
+    await crossPageBackend.stage(auth, crossPageRecords, { source: 'bank-provider', serverIngest: true, batchId: 'cross-page-replacement' });
+    const crossPagePending = await crossPageBackend.listPending(auth);
+    assert.equal(crossPagePending.length, 1);
+    assert.equal(crossPagePending[0].amendment, 'added');
+    const mismatchedReplacementAccount = new backendApi.PlaidTransactionsSyncAdapter({
+        accountMap: { Checking: 'Checking Account', Savings: 'Savings Account' },
+        client: { sync: async () => ({ added: [pendingPosted], modified: [], removed: [{ transaction_id: 'pending-replacement', account_id: 'Savings' }], has_more: false, next_cursor: 'mismatched-account' }) }
+    });
+    await assert.rejects(() => mismatchedReplacementAccount.fetchDelta({ accessToken: 'test', cursor: 'prior', connectionKey: 'chase' }), /does not match its replacement/);
+
+    const interleavedBackend = new backendApi.ProtectedReviewBackend({ householdId: auth.householdId, allowedUsers: [auth.email], initialState: { categories: reviewCategories } });
+    const acceptedForRemoval = await interleavedBackend.stage(auth, [candidate({
+        source: 'bank-provider', sourceIdentity: 'plaid:chase:Checking:accepted-removal', sourceRevision: 'accepted-removal-1',
+        providerTransactionId: 'accepted-removal', providerAccountId: 'Checking', providerConnectionKey: 'chase', providerPending: false
+    })], { source: 'bank-provider', serverIngest: true, batchId: 'accepted-removal-seed' });
+    await interleavedBackend.approve(auth, { candidateIds: [acceptedForRemoval.candidates[0].id], revisions: [acceptedForRemoval.candidates[0].revision], idempotencyKey: 'accepted-removal-seed-approval' });
+    const interleavedPosted = { ...samePageRecords.find(record => record.providerTransactionId === 'posted-replacement'), sourceRevision: 'interleaved-posted-1' };
+    const interleavedPendingRemoval = { ...samePageRecords.find(record => record.providerTransactionId === 'pending-replacement'), sourceRevision: 'interleaved-pending-1' };
+    const interleavedTrueRemoval = candidate({
+        source: 'bank-provider', sourceIdentity: 'plaid:chase:Checking:accepted-removal', sourceRevision: 'accepted-removal-2', amendment: 'removed',
+        providerTransactionId: 'accepted-removal', providerAccountId: 'Checking', providerConnectionKey: 'chase', providerPending: false
+    });
+    const interleavedGenericModified = candidate({
+        source: 'bank-provider', sourceIdentity: 'plaid:chase:Checking:accepted-removal', sourceRevision: 'accepted-removal-3', amendment: 'modified',
+        providerTransactionId: 'accepted-removal', providerAccountId: 'Checking', providerConnectionKey: 'chase', providerPending: false, description: 'Generic provider modification'
+    });
+    await assert.rejects(() => interleavedBackend.stage(auth, [interleavedPosted, interleavedGenericModified, interleavedPendingRemoval, interleavedTrueRemoval], { source: 'bank-provider', serverIngest: true, batchId: 'interleaved-provider-pages' }), /ambiguous mixed lifecycle/);
+    assert.equal((await interleavedBackend.listPending(auth)).length, 0, 'ambiguous interleaved lifecycle leaves the review inbox unchanged');
+    await interleavedBackend.stage(auth, [interleavedPosted, interleavedPendingRemoval], { source: 'bank-provider', serverIngest: true, batchId: 'interleaved-provider-pages-retry' });
+    await interleavedBackend.stage(auth, [interleavedTrueRemoval], { source: 'bank-provider', serverIngest: true, batchId: 'interleaved-provider-removal' });
+    const interleavedPending = await interleavedBackend.listPending(auth);
+    assert.equal(interleavedPending.length, 2);
+    assert.equal(interleavedPending.find(item => item.sourceIdentity.endsWith('pending-replacement')).amendment, 'added');
+    assert.equal(interleavedPending.find(item => item.sourceIdentity.endsWith('accepted-removal')).amendment, 'removed', 'true accepted removal remains an explicit amendment');
+
+    const sameCursorRepository = new review.InMemorySyncRepository({ cooldownMs: 100 });
+    await seedCursor(sameCursorRepository, 'chase', 'saved-cursor', 0);
+    const sameCursorBackend = new backendApi.ProtectedReviewBackend({ householdId: auth.householdId, allowedUsers: [auth.email], initialState: { categories: reviewCategories } });
+    const sameCursorSync = new backendApi.OnOpenSyncService({
+        enabled: true, cutoverDate: '2026-01-01', provider: terminalSameCursor,
+        repository: sameCursorRepository, reviewBackend: sameCursorBackend,
+        connectionOwners: { chase: auth.uid }, connectionResolver: async () => ({ accessToken: 'test' }),
+        cooldownMs: 100, clock: () => 100
+    });
+    const sameCursorRun = await sameCursorSync.runOnOpen(auth, 'chase', { runId: 'same-cursor-terminal' });
+    assert.equal(sameCursorRun.cursor, 'saved-cursor');
+    await assert.rejects(() => sameCursorSync.runOnOpen(auth, 'chase', { runId: 'same-cursor-cooldown' }), /cooldown/);
+
+    const unknownAccountRepository = new review.InMemorySyncRepository({ cooldownMs: 0 });
+    await seedCursor(unknownAccountRepository, 'chase', 'known-cursor', 0);
+    const unknownAccountBackend = new backendApi.ProtectedReviewBackend({ householdId: auth.householdId, allowedUsers: [auth.email], initialState: { categories: reviewCategories } });
+    const unknownAccountProvider = new backendApi.PlaidTransactionsSyncAdapter({
+        accountMap: { Checking: 'Checking Account' },
+        client: { sync: async () => ({ added: [{ transaction_id: 'unknown-account-sync', date: '2026-10-12', amount: 4, account_id: 'NotMapped', currency_code: 'USD', name: 'Unknown account' }], modified: [], removed: [], has_more: false, next_cursor: 'unknown-account-next' }) }
+    });
+    const unknownAccountSync = new backendApi.OnOpenSyncService({
+        enabled: true, cutoverDate: '2026-01-01', provider: unknownAccountProvider,
+        repository: unknownAccountRepository, reviewBackend: unknownAccountBackend,
+        connectionOwners: { chase: auth.uid }, connectionResolver: async () => ({ accessToken: 'test' }),
+        cooldownMs: 0, clock: () => 100
+    });
+    await assert.rejects(() => unknownAccountSync.runOnOpen(auth, 'chase', { runId: 'unknown-account-sync' }), /account is not mapped/);
+    assert.equal((await unknownAccountRepository.getCursor('chase')).cursor, 'known-cursor', 'unknown provider accounts do not advance the durable cursor');
+    const ignoredAccountProvider = new backendApi.PlaidTransactionsSyncAdapter({
+        accountMap: { Checking: 'Checking Account' }, ignoredAccountIds: ['Ignored'],
+        client: { sync: async () => ({ added: [{ transaction_id: 'ignored-account-sync', date: '2026-10-12', amount: 4, account_id: 'Ignored', currency_code: 'USD', name: 'Ignored account' }], modified: [], removed: [], has_more: false, next_cursor: 'ignored-account-next' }) }
+    });
+    const ignoredAccountResult = await ignoredAccountProvider.fetchDelta({ accessToken: 'test', cursor: 'known-cursor', connectionKey: 'chase' });
+    assert.equal(ignoredAccountResult.pages[0].records.length, 0);
+    assert.equal(ignoredAccountResult.counts.skippedObservations, 1, 'explicitly ignored provider accounts are skipped safely');
+
+    const persistenceBaseRepository = new review.InMemorySyncRepository({ cooldownMs: 0 });
+    await seedCursor(persistenceBaseRepository, 'chase', 'persisted-cursor', 0);
+    const persistenceRepository = {
+        acquireLease: (...args) => persistenceBaseRepository.acquireLease(...args),
+        releaseLease: (...args) => persistenceBaseRepository.releaseLease(...args),
+        getCursor: (...args) => persistenceBaseRepository.getCursor(...args),
+        stagePage: (...args) => persistenceBaseRepository.stagePage(...args),
+        publishCursor: async () => { throw new Error('Synthetic cursor persistence failure.'); }
+    };
+    const persistenceBackend = new backendApi.ProtectedReviewBackend({ householdId: auth.householdId, allowedUsers: [auth.email], initialState: { categories: reviewCategories } });
+    const persistenceProvider = new backendApi.PlaidTransactionsSyncAdapter({
+        accountMap: { Checking: 'Checking Account' },
+        client: { sync: async () => ({ added: [{ transaction_id: 'persistence-row', date: '2026-10-12', amount: 5, account_id: 'Checking', currency_code: 'USD', name: 'Persist me', category: 'Food' }], modified: [], removed: [], has_more: false, next_cursor: 'persisted-next' }) }
+    });
+    const persistenceSync = new backendApi.OnOpenSyncService({
+        enabled: true, cutoverDate: '2026-01-01', provider: persistenceProvider,
+        repository: persistenceRepository, reviewBackend: persistenceBackend,
+        connectionOwners: { chase: auth.uid }, connectionResolver: async () => ({ accessToken: 'test' }),
+        cooldownMs: 0, clock: () => 100
+    });
+    await assert.rejects(() => persistenceSync.runOnOpen(auth, 'chase', { runId: 'persistence-failure' }), /Synthetic cursor persistence failure/);
+    assert.equal((await persistenceBaseRepository.getCursor('chase')).cursor, 'persisted-cursor');
+    assert.equal((await persistenceBackend.listPending(auth)).length, 1, 'cursor persistence failure keeps the staged inbox row for retry');
 
     const signed = new backendApi.PlaidTransactionsSyncAdapter({
         accountMap: { Checking: 'Checking Account' },
@@ -424,6 +572,112 @@ function response() {
         idempotencyKey: 'altered-stage-response-approval'
     }), /changed since review/);
     assert.equal((await alteredStageDurable.listPending(auth)).length, 1);
+
+    // The production composition resolves a sparse removed observation from
+    // durable accepted history, then stages an explicit amendment without
+    // mutating the accepted row or its budget totals. A fresh backend instance
+    // reads the same Firestore-shaped state to cover the cross-instance path.
+    const productionRemovalDb = fakeFirestore();
+    const acceptedProviderRow = candidate({
+        source: 'bank-provider', sourceIdentity: 'plaid:chase:Checking:accepted-provider', sourceRevision: 'accepted-provider-1',
+        date: '2026-10-12', description: 'Accepted provider purchase', amount: 42, category: 'Food',
+        providerTransactionId: 'accepted-provider', providerAccountId: 'Checking', providerConnectionKey: 'chase', providerPending: false,
+        sourceOriginal: {
+            source: 'bank-provider', sourceIdentity: 'plaid:chase:Checking:accepted-provider', sourceRevision: 'accepted-provider-1',
+            date: '2026-10-12', description: 'Accepted provider purchase', merchant: 'Accepted provider purchase', amount: 42,
+            category: 'Food', account: 'Checking Account', payment_method: 'Checking Account', type: 'expense', currency: 'USD',
+            providerTransactionId: 'accepted-provider', providerAccountId: 'Checking', providerConnectionKey: 'chase', providerPending: false
+        }
+    });
+    const acceptedIncomeRow = candidate({
+        source: 'bank-provider', sourceIdentity: 'plaid:chase:Checking:accepted-income', sourceRevision: 'accepted-income-1',
+        date: '2026-10-13', description: 'Accepted checking income', amount: 25, category: 'Other', type: 'income',
+        providerTransactionId: 'accepted-income', providerAccountId: 'Checking', providerConnectionKey: 'chase', providerPending: false,
+        sourceOriginal: {
+            source: 'bank-provider', sourceIdentity: 'plaid:chase:Checking:accepted-income', sourceRevision: 'accepted-income-1',
+            date: '2026-10-13', description: 'Accepted checking income', merchant: 'Accepted checking income', amount: 25,
+            category: 'Other', account: 'Checking Account', payment_method: 'Checking Account', type: 'income', currency: 'USD',
+            providerTransactionId: 'accepted-income', providerAccountId: 'Checking', providerConnectionKey: 'chase', providerPending: false
+        }
+    });
+    productionRemovalDb.values.set('shared/data', {
+        transactions: [acceptedProviderRow, acceptedIncomeRow], categories: reviewCategories, budgets: { '2026-10': { Food: 42, Other: 25 } },
+        merchantDefaults: {}, categoryGroups: [], categoryColors: {}, categoryOrder: [], revision: 4
+    });
+    const productionConnections = {
+        assertKey(key) { if (!['chase', 'capital-one'].includes(key)) throw new Error('Provider connection key is not configured.'); return key; },
+        async getAuthorized(key) { if (!['chase', 'capital-one'].includes(key)) throw new Error('Provider connection is not configured.'); return { connectionKey: key, householdId: auth.householdId, ownerUid: auth.uid, enabled: true, secretVersion: 'synthetic-secret-version', accountMap: { Checking: 'Checking Account' } }; },
+        async getOwner() { return auth.uid; }
+    };
+    const productionService = production.createProductionService({
+        db: productionRemovalDb, householdId: auth.householdId, allowedUsers: [auth.email], authenticate: async () => auth,
+        connections: productionConnections, tokenStore: { async resolveAccessToken(key) { return key; } }, lifecycle: { },
+        plaidClient: {}, plaidSyncClient: { sync: async requestBody => requestBody.access_token === 'capital-one'
+            ? ({ added: [], modified: [], removed: [{ transaction_id: 'canceled-provider', account_id: 'Checking' }], has_more: false, next_cursor: 'canceled-provider-cursor' })
+            : ({ added: [], modified: [], removed: [{ transaction_id: 'accepted-provider', account_id: 'Checking' }, { transaction_id: 'accepted-income', account_id: 'Checking' }], has_more: false, next_cursor: 'production-removal-cursor' }) },
+        syncEnabled: true, activeConnectionKeys: ['chase', 'capital-one'], allowedConnectionKeys: ['chase', 'capital-one'], syncConnectionKeys: ['chase', 'capital-one'],
+        cutoverDate: '2026-10-09'
+    });
+    const trackingBackend = new backendApi.ProtectedReviewBackend({ householdId: auth.householdId, allowedUsers: [auth.email], initialState: { categories: reviewCategories } });
+    const trackingStage = await trackingBackend.stage(auth, [candidate({
+        source: 'bank-provider', sourceIdentity: 'plaid:chase:Checking:tracking-edit', sourceRevision: 'tracking-edit-1',
+        providerTransactionId: 'tracking-edit', providerAccountId: 'Checking', providerConnectionKey: 'chase', pendingTransactionId: 'tracking-pending', providerPending: false
+    })], { source: 'bank-provider', serverIngest: true, batchId: 'tracking-edit' });
+    const trackingEdited = await trackingBackend.edit(auth, trackingStage.candidates[0].id, {
+        providerTransactionId: 'forged-transaction', providerAccountId: 'ForgedAccount', providerConnectionKey: 'capital-one',
+        pendingTransactionId: 'forged-pending', providerPending: true, transaction_id: 'forged-raw', pending_transaction_id: 'forged-raw-pending', account_id: 'forged-account'
+    }, trackingStage.candidates[0].revision);
+    assert.deepEqual({
+        providerTransactionId: trackingEdited.providerTransactionId, providerAccountId: trackingEdited.providerAccountId,
+        providerConnectionKey: trackingEdited.providerConnectionKey, pendingTransactionId: trackingEdited.pendingTransactionId,
+        providerPending: trackingEdited.providerPending
+    }, { providerTransactionId: 'tracking-edit', providerAccountId: 'Checking', providerConnectionKey: 'chase', pendingTransactionId: 'tracking-pending', providerPending: false }, 'provider tracking metadata is immutable across review edits');
+    assert.deepEqual({
+        providerTransactionId: trackingEdited.sourceOriginal.providerTransactionId, providerAccountId: trackingEdited.sourceOriginal.providerAccountId,
+        providerConnectionKey: trackingEdited.sourceOriginal.providerConnectionKey, pendingTransactionId: trackingEdited.sourceOriginal.pendingTransactionId
+    }, { providerTransactionId: 'tracking-edit', providerAccountId: 'Checking', providerConnectionKey: 'chase', pendingTransactionId: 'tracking-pending' });
+    assert.equal(Object.prototype.hasOwnProperty.call(trackingEdited, 'transaction_id'), false);
+    const browserTrackingStore = new review.ReviewStore();
+    const browserTrackingStage = browserTrackingStore.stage([candidate({
+        source: 'bank-provider', sourceIdentity: 'plaid:chase:Checking:browser-tracking', sourceRevision: 'browser-tracking-1',
+        providerTransactionId: 'browser-tracking', providerAccountId: 'Checking', providerConnectionKey: 'chase', pendingTransactionId: 'browser-pending', providerPending: false,
+        sourceOriginal: { source: 'bank-provider', sourceIdentity: 'plaid:chase:Checking:browser-tracking', providerTransactionId: 'browser-tracking', providerAccountId: 'Checking', providerConnectionKey: 'chase', pendingTransactionId: 'browser-pending' }
+    })], { source: 'bank-provider', batchId: 'browser-tracking' });
+    const browserTrackingEdited = browserTrackingStore.edit(browserTrackingStage[0].id, { providerTransactionId: 'forged-browser', providerAccountId: 'Forged', providerConnectionKey: 'capital-one', pendingTransactionId: 'forged-browser-pending', providerPending: true, sourceOriginal: { providerTransactionId: 'forged-source' } }, 1);
+    assert.equal(browserTrackingEdited.providerTransactionId, 'browser-tracking');
+    assert.equal(browserTrackingEdited.providerAccountId, 'Checking');
+    assert.equal(browserTrackingEdited.providerConnectionKey, 'chase');
+    assert.equal(browserTrackingEdited.pendingTransactionId, 'browser-pending');
+    assert.equal(browserTrackingEdited.providerPending, false);
+    assert.equal(browserTrackingEdited.sourceOriginal.providerTransactionId, 'browser-tracking');
+    const forgedPersistedProvider = productionRemovalDb.values.get('shared/data');
+    forgedPersistedProvider.transactions[0] = { ...forgedPersistedProvider.transactions[0], providerTransactionId: 'forged-transaction', providerAccountId: 'ForgedAccount', providerConnectionKey: 'capital-one', pendingTransactionId: 'forged-pending', providerPending: true };
+    productionRemovalDb.values.set('shared/data', forgedPersistedProvider);
+    const productionRemovalRun = await productionService.syncService.runOnOpen(auth, 'chase', { runId: 'production-sparse-removal' });
+    assert.equal(productionRemovalRun.cursor, 'production-removal-cursor');
+    const durableProductionPending = await productionService.backend.listPending(auth);
+    assert.equal(durableProductionPending.length, 2);
+    const durableRemovedPurchase = durableProductionPending.find(item => item.providerTransactionId === 'accepted-provider');
+    const durableRemovedIncome = durableProductionPending.find(item => item.providerTransactionId === 'accepted-income');
+    assert.equal(durableRemovedPurchase.amendment, 'removed');
+    assert.equal(durableRemovedPurchase.sourceIdentity, acceptedProviderRow.sourceIdentity);
+    assert.equal(durableRemovedPurchase.providerAccountId, 'Checking');
+    assert.equal(durableRemovedPurchase.providerConnectionKey, 'chase');
+    assert.equal(durableRemovedPurchase.providerPending, false);
+    assert.equal(durableRemovedIncome.type, 'income', 'checking-income removal keeps its historical classification');
+    assert.equal(durableRemovedIncome.amount, 25, 'checking-income removal restores the provider sign before normalization');
+    assert.equal(durableRemovedIncome.category, 'Other');
+    const freshProductionBackend = new backendApi.DurableProtectedReviewBackend({
+        repository: new backendApi.FirestoreReviewRepository({ db: productionRemovalDb, householdId: auth.householdId }),
+        householdId: auth.householdId, allowedUsers: [auth.email], initialState: { categories: reviewCategories }
+    });
+    const freshProductionState = await freshProductionBackend.exportState(auth);
+    assert.equal(freshProductionState.accepted.length, 2, 'accepted provider removal remains an explicit review amendment');
+    assert.equal(freshProductionState.state.budgets['2026-10'].Food, 42, 'accepted budget totals remain unchanged until an explicit amendment approval');
+    assert.equal(freshProductionState.state.budgets['2026-10'].Other, 25, 'accepted checking-income totals remain unchanged until an explicit amendment approval');
+    assert.equal((await freshProductionBackend.listPending(auth)).length, 2, 'durable review rows survive a fresh backend instance');
+    await assert.rejects(() => productionService.syncService.runOnOpen(auth, 'capital-one', { runId: 'production-canceled-unknown' }), /hydrated from accepted history/);
+    assert.equal(await productionService.syncRepository.getCursor('capital-one'), null, 'canceled or unknown provider removals fail closed without cursor advancement');
 
     // Exercise the same HTTP and BrowserApprovalClient path. The stage body
     // is sent to the real handler, its response is intentionally discarded,
