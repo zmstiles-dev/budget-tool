@@ -1,0 +1,118 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Budget Tool transaction diagnostic</title>
+  <script src="https://www.gstatic.com/firebasejs/10.12.0/firebase-app-compat.js"></script>
+  <script src="https://www.gstatic.com/firebasejs/10.12.0/firebase-auth-compat.js"></script>
+  <style>
+    :root { color-scheme: light; font: 16px/1.45 system-ui, sans-serif; --bg: #f5f7fa; --surface: #fff; --text: #1f2933; --muted: #52606d; --accent: #2563eb; --danger: #b42318; }
+    body { margin: 0; min-height: 100vh; background: var(--bg); color: var(--text); }
+    main { max-width: 42rem; margin: 0 auto; padding: 2rem 1rem 4rem; }
+    section { background: var(--surface); border: 1px solid #d9e2ec; border-radius: .75rem; padding: 1.25rem; box-shadow: 0 3px 12px #102a430d; }
+    h1 { margin-top: 0; font-size: 1.35rem; }
+    p { margin: .65rem 0; }
+    .muted { color: var(--muted); }
+    .danger { color: var(--danger); }
+    button, a.button { display: inline-block; border: 0; border-radius: .45rem; padding: .65rem .9rem; font: inherit; font-weight: 650; text-decoration: none; cursor: pointer; }
+    button { background: var(--accent); color: #fff; }
+    button:disabled { cursor: not-allowed; opacity: .5; }
+    a.button { background: #e8f0fe; color: #174ea6; }
+    pre { overflow: auto; white-space: pre-wrap; overflow-wrap: anywhere; background: #f8fafc; border: 1px solid #d9e2ec; border-radius: .45rem; padding: .75rem; min-height: 3rem; }
+  </style>
+</head>
+<body>
+  <main>
+    <section>
+      <h1>Capital One transaction diagnostic</h1>
+      <p class="muted">This one-shot check reads the already linked account and returns aggregate transaction sync counts. It does not add an account or change your budget.</p>
+      <p id="identity">Checking the existing Budget Tool sign-in…</p>
+      <p><a class="button" href="https://zmstiles-dev.github.io/budget-tool/">Open Budget Tool sign-in</a></p>
+      <button id="run" type="button" disabled>Run one diagnostic check</button>
+      <pre id="result" aria-live="polite">Waiting for the approved existing account.</pre>
+    </section>
+  </main>
+  <script>
+    (() => {
+      'use strict';
+      const OWNER_EMAIL = 'captainicebow@gmail.com';
+      const DIAGNOSTIC_ENDPOINT = 'https://stiles-budget-tool.netlify.app/.netlify/functions/budgetTransactions/diagnostics/capital-one-transactions';
+      const firebaseConfig = {
+        apiKey: 'AIzaSyAR9Py4dYHQqpbHk_jF13ZC6EkrYGvAeQc',
+        authDomain: 'budget-tool-sync.firebaseapp.com',
+        projectId: 'budget-tool-sync',
+        storageBucket: 'budget-tool-sync.firebasestorage.app',
+        messagingSenderId: '869331943580',
+        appId: '1:869331943580:web:c26d4a375adf3b65556d59',
+        measurementId: 'G-4LV55ZL48V'
+      };
+      firebase.initializeApp(firebaseConfig);
+      const auth = firebase.auth();
+      const identity = document.getElementById('identity');
+      const run = document.getElementById('run');
+      const result = document.getElementById('result');
+      let currentUser = null;
+      let sent = false;
+
+      function display(value) {
+        result.textContent = typeof value === 'string' ? value : JSON.stringify(value, null, 2);
+      }
+      function safeMessage(value, secrets) {
+        if (typeof value !== 'string') return undefined;
+        let message = value.replace(/[\u0000-\u001f\u007f]+/g, ' ').replace(/\s+/g, ' ').trim();
+        message = message.replace(/bearer\s+[A-Za-z0-9._~-]+/ig, 'bearer [redacted]').replace(/access[_ -]?token\s*[:=]\s*[^,; ]+/ig, 'access_token=[redacted]').replace(/(PLAID-(?:CLIENT-ID|SECRET)|client[_ -]?(?:id|secret)|api[_ -]?key)\s*[:=]\s*[^,; ]+/ig, '$1=[redacted]');
+        for (const secret of secrets) if (typeof secret === 'string' && secret) message = message.replaceAll(secret, '[redacted]');
+        if (!/^[\x20-\x7e]{1,512}$/.test(message) || /[A-Za-z0-9+/_=-]{40,}/.test(message)) return undefined;
+        return message.slice(0, 256);
+      }
+      function safeResponse(response, redactionSecrets = []) {
+        const provider = response && response.provider && typeof response.provider === 'object' ? response.provider : {};
+        const safe = { status: response && (response.status === 'success' || response.status === 'provider-error') ? response.status : 'blocked' };
+        if (safe.status !== 'blocked') {
+          safe.provider = {};
+          for (const key of ['httpStatus', 'requestId', 'errorCode', 'errorType', 'transactionsUpdateStatus', 'addedCount', 'modifiedCount', 'removedCount', 'hasMore', 'cursorPresent', 'mappedAccountMatchCount']) {
+            const value = provider[key];
+            if (['httpStatus', 'addedCount', 'modifiedCount', 'removedCount', 'mappedAccountMatchCount'].includes(key) && (!Number.isSafeInteger(value) || value < 0 || value > 1000000000)) continue;
+            if (key === 'requestId' && !/^[A-Za-z0-9._-]{1,128}$/.test(String(value || ''))) continue;
+            if (['errorCode', 'errorType'].includes(key) && !/^[A-Z][A-Z0-9_]{1,63}$/.test(String(value || ''))) continue;
+            if (key === 'transactionsUpdateStatus' && !/^[A-Za-z0-9_-]{1,64}$/.test(String(value || ''))) continue;
+            if (['hasMore', 'cursorPresent'].includes(key) && typeof value !== 'boolean') continue;
+            if (value !== undefined) safe.provider[key] = value;
+          }
+          const message = safeMessage(provider.message, redactionSecrets);
+          if (message !== undefined) safe.provider.message = message;
+        } else safe.errorCode = /^[A-Z][A-Z0-9_]{1,63}$/.test(String(response && response.errorCode || '')) ? response.errorCode : 'DIAGNOSTIC_BLOCKED';
+        return safe;
+      }
+
+      auth.onAuthStateChanged(user => {
+        currentUser = user || null;
+        const approved = Boolean(user && user.emailVerified === true && String(user.email || '').toLowerCase() === OWNER_EMAIL);
+        run.disabled = !approved || sent;
+        if (!user) { identity.textContent = 'Sign in to the existing Budget Tool account, then return here.'; display('Waiting for the approved existing account.'); return; }
+        if (!approved) { identity.textContent = 'The signed-in account is not the approved verified Budget Tool owner.'; identity.className = 'danger'; display('Diagnostic blocked before any provider request.'); return; }
+        identity.textContent = `Signed in as ${user.email}. The diagnostic is ready.`;
+        identity.className = '';
+        display('Ready. Select the button once to use the single diagnostic claim.');
+      });
+
+      run.addEventListener('click', async () => {
+        if (sent || !currentUser || currentUser.emailVerified !== true || String(currentUser.email || '').toLowerCase() !== OWNER_EMAIL) return;
+        sent = true;
+        run.disabled = true;
+        display('Running the single diagnostic request…');
+        try {
+          const idToken = await currentUser.getIdToken(false);
+          const response = await fetch(DIAGNOSTIC_ENDPOINT, { method: 'POST', credentials: 'omit', cache: 'no-store', headers: { Authorization: `Bearer ${idToken}` } });
+          let body = {};
+          try { body = await response.json(); } catch (_) { body = { status: 'blocked', errorCode: 'RESPONSE_INVALID' }; }
+          display({ httpStatus: response.status, ...safeResponse(body, [idToken]) });
+        } catch (_) {
+          display({ status: 'blocked', errorCode: 'REQUEST_INDETERMINATE' });
+        }
+      });
+    })();
+  </script>
+</body>
+</html>
