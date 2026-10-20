@@ -131,6 +131,116 @@ function safeKey(value, label) {
     return key;
 }
 
+function decodeProviderIdentityPart(value) {
+    try { return decodeURIComponent(text(value)); } catch (_) { return ''; }
+}
+
+function providerIdentityParts(candidate) {
+    const identity = text(candidate && candidate.sourceIdentity);
+    const parts = identity.split(':');
+    if (parts.length < 4 || parts[0] !== 'plaid') return null;
+    return {
+        connectionKey: decodeProviderIdentityPart(parts[1]),
+        accountId: decodeProviderIdentityPart(parts[2]),
+        linkedId: decodeProviderIdentityPart(parts.slice(3).join(':'))
+    };
+}
+
+function providerHistoryRows(snapshot) {
+    const rows = [];
+    const append = value => {
+        if (!Array.isArray(value)) return;
+        value.forEach(entry => {
+            const row = Array.isArray(entry) ? entry[1] : entry;
+            if (row && typeof row === 'object' && !Array.isArray(row)) rows.push(row);
+        });
+    };
+    // Prefer canonical accepted history, then durable review history. The
+    // first match therefore targets an accepted observation when one exists,
+    // while still recovering rows that were rejected or left pending.
+    append(snapshot && snapshot.accepted);
+    append(snapshot && snapshot.pending);
+    append(snapshot && snapshot.rejected);
+    append(snapshot && snapshot.approvedAmendments);
+    append(snapshot && snapshot.state && snapshot.state.transactions);
+    return rows;
+}
+
+function providerHistoryMatch(candidate, requestedIds, requestedAccountId, connectionKey) {
+    const sourceOriginal = candidate && candidate.sourceOriginal && !Array.isArray(candidate.sourceOriginal) && typeof candidate.sourceOriginal === 'object'
+        ? candidate.sourceOriginal
+        : {};
+    const hasImmutableSource = Object.keys(sourceOriginal).length > 0;
+    if (text(candidate && candidate.source) !== 'bank-provider' && text(sourceOriginal.source) !== 'bank-provider') return false;
+    const immutableIdentity = providerIdentityParts(sourceOriginal);
+    const identity = immutableIdentity || (!hasImmutableSource ? providerIdentityParts(candidate) : null);
+    const candidateConnectionKey = text(sourceOriginal.providerConnectionKey || sourceOriginal.connectionKey) || text(immutableIdentity && immutableIdentity.connectionKey) || (!hasImmutableSource ? text(candidate && (candidate.providerConnectionKey || candidate.connectionKey)) || text(identity && identity.connectionKey) : '');
+    if (!candidateConnectionKey || connectionKey && candidateConnectionKey !== connectionKey) return false;
+    const candidateAccountId = text(sourceOriginal.providerAccountId) || text(immutableIdentity && immutableIdentity.accountId) || (!hasImmutableSource ? text(candidate && candidate.providerAccountId) || text(identity && identity.accountId) : '');
+    if (!candidateAccountId || requestedAccountId && candidateAccountId !== requestedAccountId) return false;
+    const candidateIds = new Set((hasImmutableSource ? [
+        sourceOriginal.providerTransactionId,
+        sourceOriginal.pendingTransactionId,
+        sourceOriginal.pending_transaction_id,
+        sourceOriginal.transaction_id,
+        immutableIdentity && immutableIdentity.linkedId
+    ] : [
+        candidate && candidate.providerTransactionId,
+        candidate && candidate.pendingTransactionId,
+        candidate && candidate.pending_transaction_id,
+        candidate && candidate.transaction_id,
+        identity && identity.linkedId
+    ]).map(text).filter(Boolean));
+    return [...requestedIds].some(id => candidateIds.has(id));
+}
+
+function hydrateRemovedProviderObservation(candidate, item, transactionId, options) {
+    const sourceOriginal = candidate && candidate.sourceOriginal && !Array.isArray(candidate.sourceOriginal) && typeof candidate.sourceOriginal === 'object'
+        ? candidate.sourceOriginal
+        : {};
+    const hasImmutableSource = Object.keys(sourceOriginal).length > 0;
+    const immutableIdentity = providerIdentityParts(sourceOriginal);
+    const identity = immutableIdentity || (!hasImmutableSource ? providerIdentityParts(candidate) : null);
+    const providerTransactionId = text(sourceOriginal.providerTransactionId) || text(sourceOriginal.transaction_id) || text(immutableIdentity && immutableIdentity.linkedId) || (!hasImmutableSource ? text(candidate && candidate.providerTransactionId) || text(candidate && candidate.transaction_id) || text(identity && identity.linkedId) : '') || text(transactionId) || text(item && item.transaction_id);
+    const pendingTransactionId = text(sourceOriginal.pendingTransactionId) || text(sourceOriginal.pending_transaction_id) || (!hasImmutableSource ? text(candidate && candidate.pendingTransactionId) || text(candidate && candidate.pending_transaction_id) : '');
+    const accountId = text(sourceOriginal.providerAccountId) || text(immutableIdentity && immutableIdentity.accountId) || (!hasImmutableSource ? text(candidate && candidate.providerAccountId) || text(identity && identity.accountId) : '') || text(item && (item.account_id || item.account));
+    const date = text(sourceOriginal.date) || text(candidate && candidate.date);
+    let amount = sourceOriginal.amount !== undefined && sourceOriginal.amount !== null ? sourceOriginal.amount : candidate && candidate.amount;
+    if (!providerTransactionId || !accountId || !date || amount === undefined || amount === null || !Number.isFinite(Number(amount))) return null;
+    const currency = text(sourceOriginal.currency || sourceOriginal.currency_code || candidate && (candidate.currency || candidate.currency_code) || 'USD').toUpperCase();
+    if (currency !== 'USD') return null;
+    const historicalType = text(sourceOriginal.type || candidate && candidate.type);
+    const historicalAccount = text(sourceOriginal.account || sourceOriginal.payment_method || candidate && (candidate.account || candidate.payment_method));
+    if (historicalType === 'income' && historicalAccount === 'Checking Account' && Number(amount) > 0) amount = -Math.abs(Number(amount));
+    const hydrated = {
+        transaction_id: providerTransactionId,
+        ...(pendingTransactionId ? { pending_transaction_id: pendingTransactionId } : {}),
+        account_id: accountId,
+        date,
+        amount,
+        iso_currency_code: currency,
+        name: text(sourceOriginal.description) || text(candidate && candidate.description) || providerTransactionId,
+        merchant_name: text(sourceOriginal.merchant) || text(candidate && candidate.merchant) || text(sourceOriginal.description) || text(candidate && candidate.description) || providerTransactionId,
+        category: text(sourceOriginal.category) || text(candidate && candidate.category) || 'Uncategorized',
+        pending: hasImmutableSource ? sourceOriginal.providerPending === true : candidate && candidate.providerPending === true
+    };
+    if (historicalType === 'income' || historicalType === 'expense') Object.defineProperty(hydrated, '__historicalType', { value: historicalType, enumerable: false });
+    return hydrated;
+}
+
+async function resolveRemovedProviderObservation(backend, auth, transactionId, item, options) {
+    if (!backend || typeof backend.exportState !== 'function') return null;
+    const requestedIds = new Set([text(transactionId), text(item && item.transaction_id), text(item && item.pending_transaction_id)].filter(Boolean));
+    if (!requestedIds.size) return null;
+    const requestedAccountId = text(item && (item.account_id || item.account));
+    const connectionKey = text(options && options.connectionKey);
+    const snapshot = options && options.snapshot
+        ? options.snapshot
+        : await backend.exportState(auth);
+    const candidate = providerHistoryRows(snapshot).find(row => providerHistoryMatch(row, requestedIds, requestedAccountId, connectionKey));
+    return candidate ? hydrateRemovedProviderObservation(candidate, item, transactionId, options) : null;
+}
+
 function requestId(value, label) {
     const id = text(value);
     if (!/^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$/.test(id)) throw new Error(`${label || 'A Link exchange request ID'} is required.`);
@@ -1768,9 +1878,16 @@ function createProductionService(options) {
         redirectUri: opts.redirectUri,
         clock: opts.clock
     });
+    let composed;
     const dynamicProvider = opts.provider || (opts.plaidSyncClient ? {
         async fetchDelta(input) {
             const connection = await connections.getAuthorized(input.connectionKey, input.user);
+            let removedHistory;
+            const resolveRemoved = opts.resolveRemoved || (async (transactionId, item) => {
+                if (removedHistory === undefined) removedHistory = composed && composed.backend ? composed.backend.exportState(input.user) : null;
+                const snapshot = removedHistory && typeof removedHistory.then === 'function' ? await removedHistory : removedHistory;
+                return resolveRemovedProviderObservation(composed && composed.backend, input.user, transactionId, item, { connectionKey: input.connectionKey, accountMap: connection.accountMap, snapshot });
+            });
             const adapter = new backendApi.PlaidTransactionsSyncAdapter({
                 client: opts.plaidSyncClient,
                 accountMap: connection.accountMap,
@@ -1780,13 +1897,13 @@ function createProductionService(options) {
                 maxMutationRestarts: opts.maxMutationRestarts,
                 backoffMs: opts.backoffMs,
                 clock: opts.clock,
-                resolveRemoved: opts.resolveRemoved,
+                resolveRemoved,
                 classify: opts.classify
             });
             return adapter.fetchDelta({ ...input, accessToken: await tokenStore.resolveAccessToken(input.connectionKey, connection.secretVersion) });
         }
     } : undefined);
-    const composed = createBudgetService({
+    composed = createBudgetService({
         db: opts.db,
         householdId,
         allowedUsers: allowedUserEmails,

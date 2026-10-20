@@ -18,6 +18,22 @@
         return JSON.parse(JSON.stringify(value));
     }
 
+    const PROVIDER_TRACKING_FIELDS = Object.freeze([
+        'providerTransactionId', 'providerAccountId', 'providerConnectionKey',
+        'pendingTransactionId', 'providerPending', 'providerClassification',
+        'transaction_id', 'pending_transaction_id', 'account_id'
+    ]);
+
+    function restoreProviderTrackingFields(current, next) {
+        const source = current || {};
+        const target = next || {};
+        PROVIDER_TRACKING_FIELDS.forEach(field => {
+            if (Object.prototype.hasOwnProperty.call(source, field)) target[field] = clone(source[field]);
+            else delete target[field];
+        });
+        return target;
+    }
+
     function text(value) {
         return String(value ?? '').trim();
     }
@@ -481,6 +497,9 @@
             if (expectedRevision !== undefined && current.revision !== expectedRevision) throw new Error('Candidate changed since it was loaded.');
             const next = { ...current, ...clone(patch) };
             const normalized = normalizeEditedCandidate(current, patch);
+            restoreProviderTrackingFields(current, normalized);
+            if (Object.prototype.hasOwnProperty.call(current, 'sourceOriginal')) normalized.sourceOriginal = clone(current.sourceOriginal);
+            else delete normalized.sourceOriginal;
             normalized.sourceIdentity = current.sourceIdentity;
             normalized.id = current.id;
             normalized.sourceRevision = current.sourceRevision;
