@@ -150,13 +150,15 @@ async function main() {
     ensureDirectory(artifactFunctions, 'Netlify artifact functions');
     ensureDirectory(artifactRuntime, 'Netlify artifact runtime');
     ensureDirectory(artifactPublic, 'Netlify artifact public');
+    const publicSource = safeRealPath(path.join(netlifyDir, 'public', '.gitkeep'), 'public sentinel', true);
+    fs.copyFileSync(publicSource, path.join(artifactPublic, '.gitkeep'));
 
     const runtimeManifest = JSON.parse(fs.readFileSync(path.join(runtimeSource, 'manifest.json'), 'utf8'));
     const runtimeEntries = Object.keys(runtimeManifest.files || {});
     assertEntries(runtimeSource, [...runtimeEntries, 'manifest.json'], 'prepared runtime');
     assertEntries(path.join(netlifyDir, 'public'), ['.gitkeep'], 'Netlify public source');
     assertEntries(artifactPublic, ['.gitkeep'], 'artifact public');
-    assertEntries(artifactFunctions, ['budgetTransactions.mjs', '_runtime'], 'artifact functions');
+    assertEntries(artifactFunctions, ['budgetTransactions.mjs', '_runtime'], 'artifact functions', false);
 
     const esbuild = require(path.join(netlifyDir, 'node_modules', 'esbuild'));
     const entry = safeRealPath(path.join(functionsDir, 'budgetTransactions.mjs'), 'Netlify function entry', true);
@@ -186,8 +188,6 @@ async function main() {
         fs.copyFileSync(source, path.join(artifactRuntime, entryName));
     }
     assertEntries(artifactRuntime, runtimeEntries, 'artifact runtime');
-    const publicSource = safeRealPath(path.join(netlifyDir, 'public', '.gitkeep'), 'public sentinel', true);
-    fs.copyFileSync(publicSource, path.join(artifactPublic, '.gitkeep'));
 
     // Use Netlify's own production bundler to create the uploadable archive.
     // The source and output inventories above are fixed before invoking it so

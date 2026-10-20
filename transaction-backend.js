@@ -86,8 +86,13 @@
             'Sync settings are not configured.', 'Sync settings revision is required.',
             'Sync settings changed since they were loaded.', 'Cutoff date must be a real YYYY-MM-DD date.',
             'Cutoff date cannot be in the future.',
-            'Cutoff date can only move forward; earlier dates require an explicit backfill operation.'
+            'Cutoff date can only move forward; earlier dates require an explicit backfill operation.',
+            'This transaction is still pending with the bank and cannot be added until it posts.',
+            'Provider transactions must use an existing budget category.'
         ]);
+        if (/^Provider pending observation .+ must post before approval\.$/.test(message)) {
+            return 'This transaction is still pending with the bank and cannot be added until it posts.';
+        }
         if (allowed.has(message) || /^Possible duplicate requires review: [A-Za-z0-9._:/@-]+$/.test(message) || /^Amendment target changed since review: [A-Za-z0-9._:/@-]+$/.test(message)) return message;
         return 'Approval service request failed.';
     }
@@ -873,6 +878,7 @@
                     if (candidate.revision !== revisions[index]) throw new Error(`Candidate ${candidate.id} changed since review.`);
                     if (candidate.status !== review.STATES.PENDING && candidate.status !== review.STATES.DEFERRED) throw new Error(`Candidate ${candidate.id} is not approvable.`);
                     if (candidate.providerPending === true || candidate.pending === true) throw new Error(`Provider pending observation ${candidate.id} must post before approval.`);
+                    if (candidate.source === 'bank-provider' && !this.state.categories.some(category => category && text(category.name) === text(candidate.category))) throw new Error('Provider transactions must use an existing budget category.');
                     // Recompute overlap against the current accepted history and
                     // the complete selection. A staged overlap index can be stale
                     // after another edit/delete, and two matching pending rows
@@ -958,6 +964,7 @@
                 }
             });
             accepted.forEach(candidate => {
+                if (candidate.source === 'bank-provider') return;
                 const name = text(candidate.category);
                 if (!name || this.state.categories.some(category => category && text(category.name) === name)) return;
                 this.state.categories.push({ name, type: candidate.type === 'income' ? 'income' : 'expense' });

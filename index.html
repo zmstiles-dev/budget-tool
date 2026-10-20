@@ -557,6 +557,7 @@
             <div class="form-group">
                 <label>Category</label>
                 <select id="modalCategory" style="width:100%;padding:8px;border:1px solid var(--border-strong);border-radius:4px;"></select>
+                <div id="modalCategoryHint" style="margin-top:6px;color:var(--muted);font-size:0.82rem;"></div>
             </div>
             <div class="form-group" id="newCategoryRow" style="display:none;">
                 <label>New Category Name</label>
@@ -573,10 +574,20 @@
                     </div>
                 </div>
             </div>
+            <div id="reviewDecisionPanel" style="display:none;margin-top:15px;padding:15px;background:var(--surface-alt);border-radius:8px;" aria-live="polite">
+                <div style="display:block;margin-bottom:8px;font-weight:600;">After saving this review</div>
+                <div style="display:flex;gap:8px;flex-wrap:wrap;">
+                    <button class="btn btn-success" id="reviewDecisionApprove">Add to budget</button>
+                    <button class="btn btn-danger" id="reviewDecisionReject">Reject</button>
+                    <button class="btn btn-secondary" id="reviewDecisionHold">Hold for later</button>
+                </div>
+                <div id="reviewDecisionReason" style="margin-top:8px;color:var(--muted);font-size:0.85rem;"></div>
+            </div>
             <div style="display: flex; gap: 10px; justify-content: flex-end; margin-top: 20px;">
                 <button class="btn btn-danger" id="deleteTransaction">Delete</button>
                 <button class="btn btn-secondary" id="splitTransaction">Split</button>
-                <button class="btn btn-secondary" id="reviewSkip" style="display:none;">Skip</button>
+                <button class="btn btn-secondary" id="reviewSkip" style="display:none;">Hold for later</button>
+                <button class="btn btn-danger" id="reviewReject" style="display:none;">Reject</button>
                 <button class="btn btn-secondary" id="reviewClose" style="display:none;">Close</button>
                 <button class="btn btn-success" id="saveTransaction">Approve</button>
             </div>
@@ -3026,8 +3037,59 @@
             }).join('');
         }
 
+        const PROVIDER_PENDING_REVIEW_MESSAGE = 'This transaction is still pending with the bank and cannot be added until it posts.';
+
+        function reviewCandidateIsProviderPending(candidate) {
+            return !!(candidate && (candidate.providerPending === true || candidate.pending === true));
+        }
+
+        function providerHistoricalCategory(candidate) {
+            if (!candidate || candidate.source !== 'bank-provider') return null;
+            const historical = getDefaultCategory(candidate.merchant || candidate.description);
+            const name = historical && String(historical.category || '').trim();
+            return name && categories.some(category => category && String(category.name || '').trim() === name) ? name : null;
+        }
+
+        function providerReviewCategoryValue(candidate) {
+            if (!candidate || candidate.source !== 'bank-provider') return '';
+            const current = String(candidate.category || '').trim();
+            const original = candidate.sourceOriginal && String(candidate.sourceOriginal.category || '').trim();
+            const currentExists = categories.some(category => category && String(category.name || '').trim() === current);
+            if (currentExists && original && current !== original) return current;
+            return providerHistoricalCategory(candidate) || (currentExists ? current : '');
+        }
+
+        function reviewDisplayCategory(candidate) {
+            if (candidate && candidate.source === 'bank-provider') return providerReviewCategoryValue(candidate) || 'Uncategorized';
+            return candidate && candidate.category || 'Uncategorized';
+        }
+
+        function providerCategorySelectionReady(candidate) {
+            if (!candidate || candidate.source !== 'bank-provider') return true;
+            const category = String(candidate.category || '').trim();
+            const exists = categories.some(item => item && String(item.name || '').trim() === category);
+            return exists;
+        }
+
+        function reviewCandidateSelectionReason(candidate) {
+            if (reviewCandidateIsProviderPending(candidate)) return PROVIDER_PENDING_REVIEW_MESSAGE;
+            if (candidate && candidate.source === 'bank-provider' && !providerCategorySelectionReady(candidate)) {
+                return 'Choose an existing budget category before adding this provider transaction.';
+            }
+            return '';
+        }
+
+        function reviewCandidateIsSelectable(candidate) {
+            return !!(candidate && (candidate.status === 'pending' || candidate.status === 'deferred') && !reviewCandidateSelectionReason(candidate));
+        }
+
         function reviewSelectionIds() {
-            return Array.from(document.querySelectorAll('#reviewList input.review-select:checked')).map(input => input.dataset.reviewId);
+            const selectionReasonFor = candidate => typeof reviewCandidateSelectionReason === 'function' ? reviewCandidateSelectionReason(candidate) : '';
+            const selectable = candidate => !!(candidate && (!candidate.status || candidate.status === 'pending' || candidate.status === 'deferred') && !selectionReasonFor(candidate));
+            const candidateFor = id => typeof reviewStore.get === 'function' ? reviewStore.get(id) : (reviewStore.list() || []).find(item => item && item.id === id);
+            return Array.from(document.querySelectorAll('#reviewList input.review-select:checked'))
+                .map(input => input.dataset.reviewId)
+                .filter(id => selectable(candidateFor(id)));
         }
 
         function reviewSourceLabel(source) {
@@ -3046,6 +3108,8 @@
         function renderReviewInbox() {
             const list = document.getElementById('reviewList');
             if (!list) return;
+            const selectionReasonFor = candidate => typeof reviewCandidateSelectionReason === 'function' ? reviewCandidateSelectionReason(candidate) : '';
+            const displayCategoryFor = candidate => typeof reviewDisplayCategory === 'function' ? reviewDisplayCategory(candidate) : (candidate && candidate.category || 'Uncategorized');
             const status = document.getElementById('reviewStatus');
             const syncLabel = typeof bankSyncState === 'undefined' ? 'not configured' : bankSyncState;
             const candidates = reviewStore.list();
@@ -3061,10 +3125,13 @@
                     const details = Array.isArray(candidate.overlapDetails) ? candidate.overlapDetails : [];
                     const fallbackOverlap = candidate.overlap && candidate.overlap.length ? `<div style="color:#a65d00;font-size:0.8rem;">Possible overlap: ${candidate.overlap.length} existing observation(s). Review before adding.</div>` : '';
                     const overlap = details.length ? `<div style="color:#a65d00;font-size:0.8rem;">Possible overlap: ${details.map(detail => `${escapeHTML(detail.matched.date)} · ${escapeHTML(detail.matched.description || detail.matched.merchant || 'Existing observation')} · ${detail.amount < 0 ? '-' : ''}$${Math.abs(Number(detail.amount)).toFixed(2)} · ${escapeHTML(detail.account)} (${escapeHTML(detail.reason)})`).join(' | ')}. Review before adding.</div>` : fallbackOverlap;
+                    const selectionReasonText = selectionReasonFor(candidate);
+                    const pendingReason = selectionReasonText ? `<div style="color:#a65d00;font-size:0.8rem;">${escapeHTML(selectionReasonText)}</div>` : '';
+                    const selectionReason = selectionReasonText ? ` aria-label="${escapeHTML(candidate.description)} — ${escapeHTML(selectionReasonText)}" disabled title="${escapeHTML(selectionReasonText)}"` : ` aria-label="Select ${escapeHTML(candidate.description)}"`;
                     return `<div class="review-row" data-review-row="${escapeHTML(candidate.id)}" style="display:grid;grid-template-columns:auto 1fr auto;gap:10px;align-items:start;padding:12px 0;border-bottom:1px solid var(--border);">
-                        <input class="review-select" type="checkbox" data-review-id="${escapeHTML(candidate.id)}" aria-label="Select ${escapeHTML(candidate.description)}"${selectedSet.has(candidate.id) ? ' checked' : ''}>
-                        <div style="min-width:0;"><div style="font-weight:600;">${escapeHTML(candidate.description)}</div><div style="font-size:0.82rem;color:var(--muted);">${escapeHTML(candidate.date)} · ${escapeHTML(candidate.account)} · ${escapeHTML(reviewCandidateLabel(candidate))}</div>${overlap}</div>
-                        <div style="text-align:right;white-space:nowrap;"><div style="font-weight:600;">${candidate.amount < 0 ? '-' : ''}$${Math.abs(Number(candidate.amount)).toFixed(2)}</div><div style="font-size:0.82rem;color:var(--muted);">${escapeHTML(candidate.category)}</div></div>
+                        <input class="review-select" type="checkbox" data-review-id="${escapeHTML(candidate.id)}"${selectionReason}${selectedSet.has(candidate.id) ? ' checked' : ''}>
+                        <div style="min-width:0;"><div style="font-weight:600;">${escapeHTML(candidate.description)}</div><div style="font-size:0.82rem;color:var(--muted);">${escapeHTML(candidate.date)} · ${escapeHTML(candidate.account)} · ${escapeHTML(reviewCandidateLabel(candidate))}</div>${pendingReason}${overlap}</div>
+                        <div style="text-align:right;white-space:nowrap;"><div style="font-weight:600;">${candidate.amount < 0 ? '-' : ''}$${Math.abs(Number(candidate.amount)).toFixed(2)}</div><div style="font-size:0.82rem;color:var(--muted);">${escapeHTML(displayCategoryFor(candidate))}</div></div>
                         <div style="grid-column:2 / -1;display:flex;gap:8px;flex-wrap:wrap;"><button class="btn btn-secondary review-edit" data-review-id="${escapeHTML(candidate.id)}" style="padding:4px 9px;">Review</button><button class="btn btn-secondary review-split" data-review-id="${escapeHTML(candidate.id)}" style="padding:4px 9px;">Split</button><button class="btn btn-secondary review-defer" data-review-id="${escapeHTML(candidate.id)}" style="padding:4px 9px;">Defer</button><button class="btn btn-danger review-reject" data-review-id="${escapeHTML(candidate.id)}" style="padding:4px 9px;">Reject</button></div>
                     </div>`;
                 }).join('');
@@ -3118,7 +3185,7 @@
         }
 
         function addReviewCategoriesToState(state, records) {
-            [...new Set(records.map(item => item.category).filter(category => category && category !== 'Uncategorized'))].forEach(catName => {
+            [...new Set(records.filter(item => item.source !== 'bank-provider').map(item => item.category).filter(category => category && category !== 'Uncategorized'))].forEach(catName => {
                 if (!state.categories.find(c => c.name === catName)) {
                     const usedColors = state.categories.map(c => c.color);
                     const availableColor = categoryColorPalette.find(c => !usedColors.includes(c)) || categoryColorPalette[state.categories.length % categoryColorPalette.length];
@@ -3262,75 +3329,216 @@
             });
         }
 
-        async function approveSelectedReviewTransactions() {
-            const ids = reviewSelectionIds();
-            if (!ids.length) return;
-            const selected = ids.map(id => reviewStore.get(id)).filter(Boolean);
-            if (selected.some(item => !['bank-csv', 'historical-csv', 'bank-provider'].includes(item.source))) {
-                alert('This source is not configured for approval.');
-                return;
+        async function approveReviewIds(ids, options) {
+            const opts = options || {};
+            const requestedIds = [...new Set((ids || []).map(String).filter(Boolean))];
+            if (!requestedIds.length) return { accepted: [], receipts: [] };
+            const selected = requestedIds.map(id => reviewStore.get(id)).filter(item => reviewCandidateIsSelectable(item));
+            if (selected.length !== requestedIds.length) {
+                const invalid = requestedIds.map(id => reviewStore.get(id)).find(item => !reviewCandidateIsSelectable(item));
+                throw new Error(reviewCandidateSelectionReason(invalid) || 'Review selection is no longer available.');
             }
-            if (!currentUser) {
-                alert('Sign in again before adding transactions. No accepted data was changed.');
-                return;
-            }
+            if (selected.some(item => !['bank-csv', 'historical-csv', 'bank-provider'].includes(item.source))) throw new Error('This source is not configured for approval.');
+            if (!currentUser) throw new Error('Sign in again before adding transactions. No accepted data was changed.');
             const service = window.transactionApprovalService;
-            if (!service || service.serverBacked !== true) {
-                alert('Approval service is unavailable. No accepted data was changed.');
-                return;
-            }
-            const budgetBatches = selectedReviewBudgetBatches(ids);
+            if (!service || service.serverBacked !== true) throw new Error('Approval service is unavailable. No accepted data was changed.');
+            const budgetBatches = selectedReviewBudgetBatches(requestedIds);
             const approvalBaseline = cloneAcceptedState();
             const approvalUser = currentUser;
             const approvalGeneration = authGeneration;
             let durableApprovalAcknowledged = false;
+            let approvalResult;
             try {
-                const result = await reviewStore.approveSelected(ids, {
-                    online: navigator.onLine !== false,
-                    authenticated: true,
-                    actor: currentUser.email || currentUser.uid,
-                    authorize: async ({ actor }) => {
-                        if (approvalGeneration !== authGeneration || approvalUser !== currentUser || !currentUser || (currentUser.email || currentUser.uid) !== actor) throw new Error('Approval actor is no longer signed in.');
-                        if (typeof currentUser.getIdTokenResult !== 'function') throw new Error('Fresh authenticated server authorization is unavailable.');
-                        const token = await currentUser.getIdTokenResult(true);
-                        if (!token || !token.token) throw new Error('Fresh authenticated server authorization is unavailable.');
-                        return { actor, uid: currentUser.uid, authTime: token.claims && token.claims.auth_time };
-                    },
-                    allowOverlap: document.getElementById('allowReviewOverlaps').checked,
-                    idempotencyKey: `csv-${ids.slice().sort().join(',')}`,
-                    acknowledge: async (payload, receipt, context) => {
-                        if (service && (service.serverBacked === true || typeof service.approve === 'function' && selected.some(item => item.source === 'bank-provider'))) {
-                            const acknowledged = await service.approve(payload, receipt, { ...context, budgetBatches });
-                            durableApprovalAcknowledged = !!(acknowledged && acknowledged.ok === true);
-                            if (approvalGeneration !== authGeneration || approvalUser !== currentUser || !currentUser) throw new Error('Authentication changed before approval was acknowledged.');
-                            if (!acknowledged || acknowledged.ok !== true || !acknowledged.state) throw new Error('Approval service did not return a canonical acknowledged state.');
-                            acceptedStateEpoch += 1;
-                            const installed = await persistApprovedReview(payload, budgetBatches, { skipCloud: true, canonicalState: acknowledged.state, expectedState: approvalBaseline, expectedGeneration: approvalGeneration, expectedUser: approvalUser });
-                            if (Number.isSafeInteger(acknowledged.revision) && acknowledged.revision >= 0) cloudRevision = acknowledged.revision;
-                            return installed;
-                        }
-                        return persistApprovedReview(payload, budgetBatches, { expectedState: approvalBaseline, expectedGeneration: approvalGeneration, expectedUser: approvalUser });
+                const result = await reviewStore.approveSelected(requestedIds, {
+                online: navigator.onLine !== false,
+                authenticated: true,
+                actor: currentUser.email || currentUser.uid,
+                authorize: async ({ actor }) => {
+                    if (approvalGeneration !== authGeneration || approvalUser !== currentUser || !currentUser || (currentUser.email || currentUser.uid) !== actor) throw new Error('Approval actor is no longer signed in.');
+                    if (typeof currentUser.getIdTokenResult !== 'function') throw new Error('Fresh authenticated server authorization is unavailable.');
+                    const token = await currentUser.getIdTokenResult(true);
+                    if (!token || !token.token) throw new Error('Fresh authenticated server authorization is unavailable.');
+                    return { actor, uid: currentUser.uid, authTime: token.claims && token.claims.auth_time };
+                },
+                allowOverlap: opts.allowOverlap === true,
+                idempotencyKey: opts.idempotencyKey || `csv-${requestedIds.slice().sort().join(',')}`,
+                acknowledge: async (payload, receipt, context) => {
+                    if (service && (service.serverBacked === true || typeof service.approve === 'function' && selected.some(item => item.source === 'bank-provider'))) {
+                        const acknowledged = await service.approve(payload, receipt, { ...context, budgetBatches });
+                        durableApprovalAcknowledged = !!(acknowledged && acknowledged.ok === true);
+                        if (approvalGeneration !== authGeneration || approvalUser !== currentUser || !currentUser) throw new Error('Authentication changed before approval was acknowledged.');
+                        if (!acknowledged || acknowledged.ok !== true || !acknowledged.state) throw new Error('Approval service did not return a canonical acknowledged state.');
+                        acceptedStateEpoch += 1;
+                        const installed = await persistApprovedReview(payload, budgetBatches, { skipCloud: true, canonicalState: acknowledged.state, expectedState: approvalBaseline, expectedGeneration: approvalGeneration, expectedUser: approvalUser });
+                        if (Number.isSafeInteger(acknowledged.revision) && acknowledged.revision >= 0) cloudRevision = acknowledged.revision;
+                        return installed;
                     }
+                    return persistApprovedReview(payload, budgetBatches, { expectedState: approvalBaseline, expectedGeneration: approvalGeneration, expectedUser: approvalUser });
+                }
                 });
-                budgetBatches.forEach(batch => {
-                    const remaining = (batch.ids || []).some(id => {
-                        const item = reviewStore.get(id);
-                        return item && (item.status === 'pending' || item.status === 'deferred');
-                    });
-                    if (!remaining) pendingReviewBudgets.delete(batch.batchId);
+                approvalResult = result;
+            } catch (error) {
+                error.durableApprovalAcknowledged = durableApprovalAcknowledged;
+                throw error;
+            }
+            budgetBatches.forEach(batch => {
+                const remaining = (batch.ids || []).some(id => {
+                    const item = reviewStore.get(id);
+                    return item && (item.status === 'pending' || item.status === 'deferred');
                 });
-                pendingImport = [];
-                pendingImportBudgets = {};
-                populateDateFilters();
-                populateCategoryFilters();
-                initializeCumulativeBanks();
-                renderAll();
-                renderReviewInbox();
+                if (!remaining) pendingReviewBudgets.delete(batch.batchId);
+            });
+            pendingImport = [];
+            pendingImportBudgets = {};
+            populateDateFilters();
+            populateCategoryFilters();
+            initializeCumulativeBanks();
+            renderAll();
+            renderReviewInbox();
+            return { result: approvalResult, durableApprovalAcknowledged };
+        }
+
+        async function approveSelectedReviewTransactions() {
+            const ids = reviewSelectionIds();
+            if (!ids.length) return;
+            try {
+                const { result, durableApprovalAcknowledged } = await approveReviewIds(ids, { allowOverlap: document.getElementById('allowReviewOverlaps').checked });
                 alert(`Added ${result.accepted.length} selected transaction${result.accepted.length === 1 ? '' : 's'}.`);
             } catch (error) {
-                alert(`${durableApprovalAcknowledged ? 'Approval was saved on the server, but this screen could not confirm the local install. Reload before retrying' : 'Nothing was added'}: ${error.message}`);
+                alert(`${error.durableApprovalAcknowledged ? 'Approval was saved on the server, but this screen could not confirm the local install. Reload before retrying' : 'Nothing was added'}: ${error.message}`);
                 renderReviewInbox();
                 if (lastPersistenceError) reportPersistenceError(lastPersistenceError);
+            }
+        }
+
+        function currentReviewModalCandidate() {
+            const id = categoryModalReviewIds[currentTransactionIndex];
+            const candidate = id && reviewStore.get(id);
+            return candidate && (candidate.status === 'pending' || candidate.status === 'deferred') ? { id, candidate } : null;
+        }
+
+        function setReviewModalBusy(value) {
+            categoryModalBusy = value === true;
+            ['saveTransaction', 'reviewSkip', 'reviewReject', 'reviewClose', 'reviewDecisionApprove', 'reviewDecisionReject', 'reviewDecisionHold'].forEach(id => {
+                const button = document.getElementById(id);
+                if (!button) return;
+                if (categoryModalBusy) {
+                    button.disabled = true;
+                } else if (id === 'reviewDecisionApprove') {
+                    const current = currentReviewModalCandidate();
+                    button.disabled = !!(current && reviewCandidateSelectionReason(current.candidate));
+                } else {
+                    button.disabled = false;
+                }
+            });
+        }
+
+        async function rejectCurrentReviewCandidate() {
+            if (categoryModalMode !== 'review' || categoryModalBusy) return;
+            const current = currentReviewModalCandidate();
+            if (!current) { closeCategoryReviewModal(); renderReviewInbox(); return; }
+            if (!window.confirm('Reject this transaction? It will stay out of your budget.')) return;
+            const generation = categoryModalGeneration;
+            const user = categoryModalUser;
+            const session = categoryModalSession;
+            const service = window.transactionApprovalService;
+            setReviewModalBusy(true);
+            try {
+                if (service && service.serverBacked === true) await service.reject(current.id, current.candidate.revision);
+                if (generation !== authGeneration || user !== currentUser) throw new Error('Authentication changed before review rejection was acknowledged.');
+                if (categoryModalSession !== session || categoryModalMode !== 'review') throw new Error('This review editor was closed before rejection completed. Reload the review inbox.');
+                reviewStore.reject(current.id, currentUser?.email);
+                renderReviewInbox();
+                advanceReviewModalAfterDecision(current.id);
+            } catch (error) {
+                alert(`Reject failed: ${error.message}`);
+            } finally {
+                if (categoryModalSession === session) setReviewModalBusy(false);
+            }
+        }
+
+        async function holdCurrentReviewCandidate() {
+            if (categoryModalMode !== 'review' || categoryModalBusy) return;
+            const current = currentReviewModalCandidate();
+            if (!current) { closeCategoryReviewModal(); renderReviewInbox(); return; }
+            const generation = categoryModalGeneration;
+            const user = categoryModalUser;
+            const session = categoryModalSession;
+            const service = window.transactionApprovalService;
+            const date = document.getElementById('modalDate').value;
+            const description = document.getElementById('modalDescription').value.trim();
+            const merchant = document.getElementById('modalMerchant').value.trim() || description;
+            const amount = parseFloat(document.getElementById('modalAmount').value);
+            const type = document.getElementById('modalType').value;
+            const account = document.getElementById('modalAccount').value.trim();
+            let category = document.getElementById('modalCategory').value;
+            if (category === '__new__') category = document.getElementById('newCategoryName').value.trim();
+            if (!date || !description || !account || !Number.isFinite(amount)) {
+                alert('Save the date, description, account and amount before holding this review.');
+                return;
+            }
+            if (!category) category = current.candidate.category;
+            const patch = { description, merchant, amount, date, category, account, payment_method: account, type };
+            const changed = ['description', 'merchant', 'amount', 'date', 'category', 'account', 'payment_method', 'type'].some(key => String(current.candidate[key] ?? '') !== String(patch[key] ?? ''));
+            setReviewModalBusy(true);
+            try {
+                let revision = current.candidate.revision;
+                if (changed) {
+                    if (service && service.serverBacked === true) {
+                        if (typeof service.edit !== 'function') throw new Error('Review edit service is unavailable. The transaction was not held.');
+                        await service.edit(current.id, patch, revision);
+                    }
+                    if (generation !== authGeneration || user !== currentUser) throw new Error('Authentication changed before review edit was acknowledged.');
+                    if (categoryModalSession !== session || categoryModalMode !== 'review') throw new Error('This review editor was closed before the hold edit completed. Reload the review inbox.');
+                    const edited = reviewStore.edit(current.id, patch, revision);
+                    revision = edited.revision;
+                    categoryModalCandidateRevision = revision;
+                }
+                if (service && service.serverBacked === true) await service.defer(current.id, revision);
+                if (generation !== authGeneration || user !== currentUser) throw new Error('Authentication changed before review hold was acknowledged.');
+                if (categoryModalSession !== session || categoryModalMode !== 'review') throw new Error('This review editor was closed before hold completed. Reload the review inbox.');
+                reviewStore.defer(current.id, currentUser?.email);
+                renderReviewInbox();
+                advanceReviewModalAfterDecision(current.id);
+            } catch (error) {
+                alert(`Hold failed: ${error.message}`);
+            } finally {
+                if (categoryModalSession === session) setReviewModalBusy(false);
+            }
+        }
+
+        async function approveCurrentReviewCandidate() {
+            if (categoryModalMode !== 'review' || categoryModalBusy) return;
+            const current = currentReviewModalCandidate();
+            if (!current) { closeCategoryReviewModal(); renderReviewInbox(); return; }
+            const reason = reviewCandidateSelectionReason(current.candidate);
+            if (reason) { alert(reason); return; }
+            const details = Array.isArray(current.candidate.overlapDetails) ? current.candidate.overlapDetails : [];
+            const evidence = details.length
+                ? details.map(detail => `${detail.matched.date} · ${detail.matched.description || detail.matched.merchant || 'Existing observation'} · ${detail.amount < 0 ? '-' : ''}$${Math.abs(Number(detail.amount)).toFixed(2)} · ${detail.account}`).join(' | ')
+                : (current.candidate.overlap && current.candidate.overlap.length ? `${current.candidate.overlap.length} existing observation(s)` : '');
+            const confirmation = evidence
+                ? `Possible overlap: ${evidence}. I reviewed this possible overlap and want to add the transaction to my budget.`
+                : 'Add this transaction to your budget? This will change your accepted transaction history.';
+            if (!window.confirm(confirmation)) return;
+            const generation = categoryModalGeneration;
+            const user = categoryModalUser;
+            const session = categoryModalSession;
+            setReviewModalBusy(true);
+            try {
+                const { result } = await approveReviewIds([current.id], {
+                    allowOverlap: !!evidence,
+                    idempotencyKey: `review-${current.id}-${current.candidate.revision}`
+                });
+                if (generation !== authGeneration || user !== currentUser) throw new Error('Authentication changed before approval was acknowledged.');
+                if (categoryModalSession !== session || categoryModalMode !== 'review') throw new Error('This review editor was closed before approval completed. Reload the review inbox.');
+                if (!result || !Array.isArray(result.accepted) || result.accepted.length !== 1) throw new Error('Approval service did not acknowledge this transaction.');
+                advanceReviewModalAfterDecision(current.id);
+            } catch (error) {
+                alert(`${error.durableApprovalAcknowledged ? 'Approval was saved on the server, but this screen could not confirm the local install. Reload before retrying' : 'Nothing was added'}: ${error.message}`);
+                renderReviewInbox();
+            } finally {
+                if (categoryModalSession === session) setReviewModalBusy(false);
             }
         }
 
@@ -3703,6 +3911,47 @@
             showCategoryModal(requestedIndex >= 0 ? requestedIndex : 0);
         }
 
+        function hideReviewDecisionPanel() {
+            const panel = document.getElementById('reviewDecisionPanel');
+            const reason = document.getElementById('reviewDecisionReason');
+            if (panel) panel.style.display = 'none';
+            if (reason) reason.textContent = '';
+            if (categoryModalMode === 'review') {
+                ['reviewSkip', 'reviewReject', 'saveTransaction'].forEach(id => { const button = document.getElementById(id); if (button) button.style.display = ''; });
+            }
+        }
+
+        function showReviewDecisionPanel(candidate) {
+            const panel = document.getElementById('reviewDecisionPanel');
+            const approve = document.getElementById('reviewDecisionApprove');
+            const reject = document.getElementById('reviewDecisionReject');
+            const hold = document.getElementById('reviewDecisionHold');
+            const reason = document.getElementById('reviewDecisionReason');
+            if (!panel || !approve || !reject || !hold) return;
+            const selectionReason = reviewCandidateSelectionReason(candidate);
+            approve.disabled = !!selectionReason;
+            reject.disabled = false;
+            hold.disabled = false;
+            if (selectionReason) {
+                if (reason) reason.textContent = selectionReason;
+            } else if (reason) {
+                reason.textContent = 'Choose one decision to continue this review queue.';
+            }
+            ['reviewSkip', 'reviewReject', 'saveTransaction'].forEach(id => { const button = document.getElementById(id); if (button) button.style.display = 'none'; });
+            panel.style.display = '';
+        }
+
+        function advanceReviewModalAfterDecision(candidateId) {
+            const index = categoryModalReviewIds.indexOf(candidateId);
+            if (index >= 0) categoryModalReviewIds.splice(index, 1);
+            if (!categoryModalReviewIds.length) {
+                closeCategoryReviewModal();
+                renderReviewInbox();
+                return;
+            }
+            showCategoryModal(Math.min(index < 0 ? currentTransactionIndex : index, categoryModalReviewIds.length - 1));
+        }
+
         function closeCategoryReviewModal() {
             document.getElementById('categoryModal').classList.remove('active');
             categoryModalMode = 'csv';
@@ -3713,12 +3962,14 @@
             categoryModalBusy = false;
             document.getElementById('saveTransaction').disabled = false;
             document.getElementById('reviewSkip').style.display = 'none';
+            document.getElementById('reviewReject').style.display = 'none';
             document.getElementById('reviewClose').style.display = 'none';
+            hideReviewDecisionPanel();
         }
 
         function showCategoryModal(index) {
             const reviewMode = categoryModalMode === 'review';
-            const reviewCandidates = reviewMode ? categoryModalReviewIds.map(id => reviewStore.get(id)).filter(Boolean) : [];
+            const reviewCandidates = reviewMode ? categoryModalReviewIds.map(id => reviewStore.get(id)).filter(item => item && (item.status === 'pending' || item.status === 'deferred')) : [];
             const items = reviewMode ? reviewCandidates : pendingImport;
             if (index >= items.length) {
                 if (reviewMode) closeCategoryReviewModal();
@@ -3754,9 +4005,15 @@
             typeSelect.value = t.type || 'expense';
 
             const categorySelect = document.getElementById('modalCategory');
-            const categoryOptions = categories.map(c => `<option value="${escapeHTML(c.name)}">${escapeHTML(c.name)}</option>`);
-            if (t.category && !categories.find(c => c.name === t.category)) categoryOptions.unshift(`<option value="${escapeHTML(t.category)}">${escapeHTML(t.category)}</option>`);
-            categorySelect.innerHTML = categoryOptions.join('') + '<option value="__new__">+ New Category</option>';
+            const providerReview = reviewMode && t.source === 'bank-provider';
+            const historicalCategory = providerHistoricalCategory(t);
+            const categoryOptions = (providerReview ? ['<option value="">Choose a budget category…</option>'] : []).concat(categories.map(c => `<option value="${escapeHTML(c.name)}">${escapeHTML(c.name)}</option>`));
+            if (!providerReview && t.category && !categories.find(c => c.name === t.category)) categoryOptions.unshift(`<option value="${escapeHTML(t.category)}">${escapeHTML(t.category)}</option>`);
+            categorySelect.innerHTML = categoryOptions.join('') + (providerReview ? '' : '<option value="__new__">+ New Category</option>');
+            const categoryHint = document.getElementById('modalCategoryHint');
+            if (categoryHint) categoryHint.textContent = providerReview
+                ? (historicalCategory ? `Suggested from your historical merchant category: ${historicalCategory}.` : 'Choose an existing budget category. Provider categories are not added automatically.')
+                : '';
 
             if (!reviewMode && t.merchant) {
                 const defaultInfo = getDefaultCategory(t.merchant);
@@ -3769,7 +4026,9 @@
                     }
                 }
             }
-            if (t.category && t.category !== 'Uncategorized' && categories.find(c => c.name === t.category)) {
+            if (providerReview) {
+                categorySelect.value = providerReviewCategoryValue(t);
+            } else if (t.category && t.category !== 'Uncategorized' && categories.find(c => c.name === t.category)) {
                 categorySelect.value = t.category;
             }
 
@@ -3781,9 +4040,12 @@
             document.getElementById('deleteTransaction').style.display = reviewMode ? 'none' : '';
             document.getElementById('splitTransaction').style.display = reviewMode ? 'none' : '';
             document.getElementById('reviewSkip').style.display = reviewMode ? '' : 'none';
+            document.getElementById('reviewReject').style.display = reviewMode ? '' : 'none';
             document.getElementById('reviewClose').style.display = reviewMode ? '' : 'none';
-            document.getElementById('saveTransaction').textContent = reviewMode ? 'Save & Next' : 'Approve';
+            document.getElementById('saveTransaction').textContent = reviewMode ? 'Save & choose action' : 'Approve';
             document.getElementById('saveTransaction').disabled = false;
+            setReviewModalBusy(false);
+            hideReviewDecisionPanel();
 
             document.getElementById('categoryModal').classList.add('active');
         }
@@ -3791,6 +4053,15 @@
         document.getElementById('modalCategory').addEventListener('change', function() {
             const isNew = this.value === '__new__';
             document.getElementById('newCategoryRow').style.display = isNew ? 'block' : 'none';
+            if (categoryModalMode === 'review' && !categoryModalBusy) hideReviewDecisionPanel();
+        });
+        ['modalAccount', 'modalDate', 'modalDescription', 'modalMerchant', 'modalAmount', 'modalType', 'newCategoryName'].forEach(id => {
+            const field = document.getElementById(id);
+            const hideDecisionAfterEdit = () => {
+                if (categoryModalMode === 'review' && !categoryModalBusy) hideReviewDecisionPanel();
+            };
+            field?.addEventListener('input', hideDecisionAfterEdit);
+            field?.addEventListener('change', hideDecisionAfterEdit);
         });
 
         document.getElementById('saveTransaction').addEventListener('click', () => {
@@ -3812,6 +4083,10 @@
                     category = newName;
                 }
                 if (!date || !description || !account || !Number.isFinite(amount) || !category) { alert('Date, description, account, amount and category are required.'); return; }
+                if (current.source === 'bank-provider' && !categories.some(item => item && String(item.name || '').trim() === String(category).trim())) {
+                    alert('Choose an existing budget category for provider transactions. New categories are not added automatically.');
+                    return;
+                }
                 const patch = { description, merchant: merchant || description, amount, date, category, account, payment_method: account, type };
                 const generation = categoryModalGeneration;
                 const user = categoryModalUser;
@@ -3830,7 +4105,8 @@
                         if (categoryModalSession !== session || categoryModalMode !== 'review') throw new Error('This review editor was closed before the save completed. Reload the review inbox.');
                         reviewStore.edit(candidateId, patch, expectedRevision);
                         renderReviewInbox();
-                        showCategoryModal(currentTransactionIndex + 1);
+                        showCategoryModal(currentTransactionIndex);
+                        showReviewDecisionPanel(reviewStore.get(candidateId));
                     } catch (error) {
                         alert(`Review edit failed: ${error.message}`);
                     } finally {
@@ -3905,8 +4181,12 @@
         });
         document.getElementById('reviewSkip').addEventListener('click', () => {
             if (categoryModalMode !== 'review' || categoryModalBusy) return;
-            showCategoryModal(currentTransactionIndex + 1);
+            holdCurrentReviewCandidate();
         });
+        document.getElementById('reviewReject').addEventListener('click', rejectCurrentReviewCandidate);
+        document.getElementById('reviewDecisionApprove').addEventListener('click', approveCurrentReviewCandidate);
+        document.getElementById('reviewDecisionReject').addEventListener('click', rejectCurrentReviewCandidate);
+        document.getElementById('reviewDecisionHold').addEventListener('click', holdCurrentReviewCandidate);
         document.getElementById('reviewClose').addEventListener('click', () => {
             if (categoryModalBusy) return;
             closeCategoryReviewModal();

@@ -6,6 +6,13 @@ const { createBudgetService } = require('../transaction-service.js');
 const appConfig = require('../transaction-config.js');
 
 const auth = { uid: 'sync-user', email: 'reviewer@example.test', tokenVerified: true, householdId: 'household-1' };
+const reviewCategories = [
+    { name: 'Restaurants', type: 'expense' },
+    { name: 'Transfer,Payroll', type: 'expense' },
+    { name: 'Food', type: 'expense' },
+    { name: 'Other', type: 'expense' },
+    { name: 'Refund', type: 'expense' }
+];
 const candidate = (overrides = {}) => ({
     date: '2026-10-10', description: 'Provider purchase', amount: -12.34,
     category: 'Restaurants', account: 'Checking Account', payment_method: 'Checking Account', type: 'expense', ...overrides
@@ -42,7 +49,7 @@ function response() {
 ;(async () => {
     const db = fakeFirestore();
     const repository = new backendApi.FirestoreReviewRepository({ db, householdId: 'household-1' });
-    const protectedBackend = new backendApi.DurableProtectedReviewBackend({ repository, householdId: 'household-1', allowedUsers: [auth.email] });
+    const protectedBackend = new backendApi.DurableProtectedReviewBackend({ repository, householdId: 'household-1', allowedUsers: [auth.email], initialState: { categories: reviewCategories } });
     const staged = await protectedBackend.stage(auth, [candidate({ sourceId: 'reloadable' })], { source: 'bank-csv', batchId: 'reload-batch', batchMeta: { budgets: { '2026-10': { Restaurants: 90 } } } });
     await protectedBackend.approve(auth, { candidateIds: [staged.candidates[0].id], revisions: [staged.candidates[0].revision], idempotencyKey: 'reload-approval' });
     const reviewSnapshot = await protectedBackend.exportReview(auth);
@@ -149,7 +156,7 @@ function response() {
     });
     const explicitExpenseRecord = (await explicitExpensePayroll.fetchDelta({ accessToken: 'test', cursor: '', connectionKey: 'chase' })).pages[0].records[0];
     assert.deepEqual({ type: explicitExpenseRecord.type, amount: explicitExpenseRecord.amount }, { type: 'expense', amount: -30 });
-    const explicitExpenseBackend = new backendApi.ProtectedReviewBackend({ householdId: auth.householdId, allowedUsers: [auth.email] });
+    const explicitExpenseBackend = new backendApi.ProtectedReviewBackend({ householdId: auth.householdId, allowedUsers: [auth.email], initialState: { categories: reviewCategories } });
     const explicitExpenseStage = await explicitExpenseBackend.stage(auth, [explicitExpenseRecord], { source: 'bank-provider', serverIngest: true, batchId: 'explicit-expense-payroll' });
     assert.deepEqual({ type: explicitExpenseStage.candidates[0].type, amount: explicitExpenseStage.candidates[0].amount }, { type: 'expense', amount: -30 });
     const explicitExpensePending = await explicitExpenseBackend.listPending(auth);
@@ -160,8 +167,8 @@ function response() {
     });
     const explicitCardIncomeRecord = (await explicitCardIncome.fetchDelta({ accessToken: 'test', cursor: '', connectionKey: 'chase' })).pages[0].records[0];
     assert.deepEqual({ type: explicitCardIncomeRecord.type, amount: explicitCardIncomeRecord.amount }, { type: 'income', amount: -30 }, 'non-checking explicit income keeps its provider sign');
-    const incomeBackend = new backendApi.ProtectedReviewBackend({ householdId: auth.householdId, allowedUsers: [auth.email] });
-    const stagedIncome = await incomeBackend.stage(auth, [classifiedIncomeRecord], { source: 'bank-provider', serverIngest: true, batchId: 'checking-income' });
+    const incomeBackend = new backendApi.ProtectedReviewBackend({ householdId: auth.householdId, allowedUsers: [auth.email], initialState: { categories: reviewCategories } });
+    const stagedIncome = await incomeBackend.stage(auth, [{ ...classifiedIncomeRecord, category: 'Restaurants' }], { source: 'bank-provider', serverIngest: true, batchId: 'checking-income' });
     assert.equal(stagedIncome.candidates[0].amount, 25);
     assert.equal(stagedIncome.candidates[0].sourceOriginal.amount, -25);
     const approvedIncome = await incomeBackend.approve(auth, { candidateIds: [stagedIncome.candidates[0].id], revisions: [stagedIncome.candidates[0].revision], idempotencyKey: 'checking-income-approval' });
@@ -190,7 +197,7 @@ function response() {
     });
     const directDefaultCutoff = await defaultCutoffProvider().fetchDelta({ accessToken: 'test', cursor: '', connectionKey: 'chase', cutoverDate: appConfig.FIRST_SYNC_CUTOVER_DATE });
     assert.deepEqual(directDefaultCutoff.counts, { rawObservations: 3, skippedObservations: 0, cutoffExcluded: 1, resultingRecords: 2 });
-    const defaultCutoffBackend = new backendApi.ProtectedReviewBackend({ householdId: 'household-1', allowedUsers: [auth.email] });
+    const defaultCutoffBackend = new backendApi.ProtectedReviewBackend({ householdId: 'household-1', allowedUsers: [auth.email], initialState: { categories: reviewCategories } });
     const defaultCutoffService = createBudgetService({
         backend: defaultCutoffBackend,
         syncEnabled: true,
@@ -209,7 +216,7 @@ function response() {
     // The initial cutover is a calendar-date gate for new observations. A
     // pre-cutover amendment for an already accepted provider identity remains
     // reviewable, and the accepted history itself is unchanged by sync.
-    const cutoffBackend = new backendApi.ProtectedReviewBackend({ householdId: 'household-1', allowedUsers: [auth.email] });
+    const cutoffBackend = new backendApi.ProtectedReviewBackend({ householdId: 'household-1', allowedUsers: [auth.email], initialState: { categories: reviewCategories } });
     const acceptedBeforeCutover = await cutoffBackend.stage(auth, [candidate({
         source: 'bank-provider', sourceIdentity: 'plaid:chase:Checking:existing-old', sourceRevision: 'accepted-1',
         date: '2026-10-10', description: 'Existing accepted purchase', amount: -20
@@ -335,14 +342,14 @@ function response() {
     assert.equal(oversizedResponse.statusCode, 409);
     assert.equal(restoreCalls, 1);
 
-    const splitBackend = new backendApi.ProtectedReviewBackend({ householdId: 'household-1', allowedUsers: [auth.email] });
+    const splitBackend = new backendApi.ProtectedReviewBackend({ householdId: 'household-1', allowedUsers: [auth.email], initialState: { categories: reviewCategories } });
     const splitStage = await splitBackend.stage(auth, [candidate({ sourceId: 'split-source', amount: -10 })], { source: 'bank-csv' });
     const split = await splitBackend.split(auth, splitStage.candidates[0].id, [{ category: 'Food', amount: '4.25' }, { category: 'Other', amount: '5.75' }], splitStage.candidates[0].revision);
     assert.equal(split.candidates.reduce((sum, item) => sum + item.amount, 0), -10);
     assert.equal(split.candidates[0].parentSourceIdentity, splitStage.candidates[0].sourceIdentity);
     await assert.rejects(() => splitBackend.split(auth, split.candidates[0].id, [{ category: 'Food', amount: '4.24' }, { category: 'Other', amount: '5.75' }], 1), /conserve/);
 
-    const amendmentBackend = new backendApi.ProtectedReviewBackend({ householdId: 'household-1', allowedUsers: [auth.email] });
+    const amendmentBackend = new backendApi.ProtectedReviewBackend({ householdId: 'household-1', allowedUsers: [auth.email], initialState: { categories: reviewCategories } });
     const original = await amendmentBackend.stage(auth, [candidate({ sourceIdentity: 'plaid:chase:checking:amend', sourceRevision: '1', amount: 100, source: 'bank-provider' })], { source: 'bank-provider', serverIngest: true });
     await amendmentBackend.approve(auth, { candidateIds: [original.candidates[0].id], revisions: [1], idempotencyKey: 'amend-original' });
     const modified = await amendmentBackend.stage(auth, [candidate({ sourceIdentity: 'plaid:chase:checking:amend', sourceRevision: '2', amount: 75, source: 'bank-provider', amendment: 'modified' })], { source: 'bank-provider', serverIngest: true });
@@ -355,7 +362,8 @@ function response() {
     review.validateReviewSnapshot(amendmentBackend.exportReviewSnapshot());
 
     const durableAmendDb = fakeFirestore();
-    const durableAmend = new backendApi.DurableProtectedReviewBackend({ repository: new backendApi.FirestoreReviewRepository({ db: durableAmendDb, householdId: 'household-1' }), householdId: 'household-1', allowedUsers: [auth.email] });
+    durableAmendDb.values.set('shared/data', { transactions: [], categories: reviewCategories, budgets: {}, merchantDefaults: {}, categoryGroups: [], categoryColors: {}, categoryOrder: [], revision: 0 });
+    const durableAmend = new backendApi.DurableProtectedReviewBackend({ repository: new backendApi.FirestoreReviewRepository({ db: durableAmendDb, householdId: 'household-1' }), householdId: 'household-1', allowedUsers: [auth.email], initialState: { categories: reviewCategories } });
     const durableOriginal = await durableAmend.stage(auth, [candidate({ source: 'bank-provider', sourceIdentity: 'plaid:durable:amend', sourceRevision: '1', amount: 100 })], { source: 'bank-provider', serverIngest: true });
     await durableAmend.approve(auth, { candidateIds: [durableOriginal.candidates[0].id], revisions: [1], idempotencyKey: 'durable-amend-original' });
     const durableModified = await durableAmend.stage(auth, [candidate({ source: 'bank-provider', sourceIdentity: 'plaid:durable:amend', sourceRevision: '2', amount: 75, amendment: 'modified' })], { source: 'bank-provider', serverIngest: true });
@@ -376,7 +384,7 @@ function response() {
     review.validateReviewSnapshot(await durableAmend.exportReview(auth));
 
     const inlineDurableDb = fakeFirestore();
-    const inlineDurable = new backendApi.DurableProtectedReviewBackend({ repository: new backendApi.FirestoreReviewRepository({ db: inlineDurableDb, householdId: 'household-1' }), householdId: 'household-1', allowedUsers: [auth.email] });
+    const inlineDurable = new backendApi.DurableProtectedReviewBackend({ repository: new backendApi.FirestoreReviewRepository({ db: inlineDurableDb, householdId: 'household-1' }), householdId: 'household-1', allowedUsers: [auth.email], initialState: { categories: reviewCategories } });
     const inlineApproval = await inlineDurable.approve(auth, {
         candidates: [candidate({ source: 'bank-csv', sourceId: 'durable-inline', account: 'Checking Account' })],
         idempotencyKey: 'durable-inline-approval'
@@ -384,7 +392,7 @@ function response() {
     assert.equal(inlineApproval.ok, true);
     assert.equal((await inlineDurable.exportState(auth)).accepted.length, 1);
     const inlineSubsetDb = fakeFirestore();
-    const inlineSubsetDurable = new backendApi.DurableProtectedReviewBackend({ repository: new backendApi.FirestoreReviewRepository({ db: inlineSubsetDb, householdId: 'household-1' }), householdId: 'household-1', allowedUsers: [auth.email] });
+    const inlineSubsetDurable = new backendApi.DurableProtectedReviewBackend({ repository: new backendApi.FirestoreReviewRepository({ db: inlineSubsetDb, householdId: 'household-1' }), householdId: 'household-1', allowedUsers: [auth.email], initialState: { categories: reviewCategories } });
     const inlineA = candidate({ source: 'bank-csv', sourceId: 'inline-subset-a' });
     const inlineB = candidate({ source: 'bank-csv', sourceId: 'inline-subset-b', description: 'Second inline row' });
     await assert.rejects(() => inlineSubsetDurable.approve(auth, {
@@ -400,7 +408,7 @@ function response() {
     // retry carrying the reviewed body may recover that server-pending row,
     // but an altered body must be rejected without consuming it.
     const lostStageDb = fakeFirestore();
-    const lostStageDurable = new backendApi.DurableProtectedReviewBackend({ repository: new backendApi.FirestoreReviewRepository({ db: lostStageDb, householdId: 'household-1' }), householdId: 'household-1', allowedUsers: [auth.email] });
+    const lostStageDurable = new backendApi.DurableProtectedReviewBackend({ repository: new backendApi.FirestoreReviewRepository({ db: lostStageDb, householdId: 'household-1' }), householdId: 'household-1', allowedUsers: [auth.email], initialState: { categories: reviewCategories } });
     const lostStage = await lostStageDurable.stage(auth, [candidate({ source: 'bank-csv', sourceId: 'lost-stage-response' })], { source: 'bank-csv', batchId: 'lost-stage-batch' });
     const lostStageApproval = await lostStageDurable.approve(auth, {
         candidates: [lostStage.candidates[0]], candidateIds: [lostStage.candidates[0].id], revisions: [lostStage.candidates[0].revision],
@@ -409,7 +417,7 @@ function response() {
     assert.equal(lostStageApproval.ok, true);
     assert.equal((await lostStageDurable.exportState(auth)).accepted.length, 1);
     const alteredStageDb = fakeFirestore();
-    const alteredStageDurable = new backendApi.DurableProtectedReviewBackend({ repository: new backendApi.FirestoreReviewRepository({ db: alteredStageDb, householdId: 'household-1' }), householdId: 'household-1', allowedUsers: [auth.email] });
+    const alteredStageDurable = new backendApi.DurableProtectedReviewBackend({ repository: new backendApi.FirestoreReviewRepository({ db: alteredStageDb, householdId: 'household-1' }), householdId: 'household-1', allowedUsers: [auth.email], initialState: { categories: reviewCategories } });
     const alteredStage = await alteredStageDurable.stage(auth, [candidate({ source: 'bank-csv', sourceId: 'altered-stage-response' })], { source: 'bank-csv', batchId: 'altered-stage-batch' });
     await assert.rejects(() => alteredStageDurable.approve(auth, {
         candidates: [{ ...alteredStage.candidates[0], description: 'Tampered after stage' }], candidateIds: [alteredStage.candidates[0].id], revisions: [alteredStage.candidates[0].revision],
@@ -421,7 +429,7 @@ function response() {
     // is sent to the real handler, its response is intentionally discarded,
     // and the client retries approval with no stagedIds cache.
     const browserLossDb = fakeFirestore();
-    const browserLossBackend = new backendApi.DurableProtectedReviewBackend({ repository: new backendApi.FirestoreReviewRepository({ db: browserLossDb, householdId: 'household-1' }), householdId: 'household-1', allowedUsers: [auth.email] });
+    const browserLossBackend = new backendApi.DurableProtectedReviewBackend({ repository: new backendApi.FirestoreReviewRepository({ db: browserLossDb, householdId: 'household-1' }), householdId: 'household-1', allowedUsers: [auth.email], initialState: { categories: reviewCategories } });
     const browserLossService = createBudgetService({ backend: browserLossBackend, authenticate: async () => auth, allowedOrigins: ['https://budget.example.test'] });
     const browserAuth = { currentUser: { async getIdToken() { return 'synthetic-browser-token'; } } };
     const browserFetch = async (url, options) => {
@@ -451,7 +459,7 @@ function response() {
     // a receipt-bound accepted row archives only the protected review record,
     // so audit remains bound while canonical totals stay empty. Explicit
     // reset invalidates receipts and cannot resurrect the prior row.
-    const receiptLifecycle = new backendApi.ProtectedReviewBackend({ householdId: 'household-1', allowedUsers: [auth.email] });
+    const receiptLifecycle = new backendApi.ProtectedReviewBackend({ householdId: 'household-1', allowedUsers: [auth.email], initialState: { categories: reviewCategories } });
     const receiptStage = await receiptLifecycle.stage(auth, [candidate({ source: 'bank-csv', sourceId: 'receipt-lifecycle' })], { source: 'bank-csv' });
     const receiptRequest = { candidateIds: [receiptStage.candidates[0].id], revisions: [receiptStage.candidates[0].revision], idempotencyKey: 'receipt-lifecycle-approval' };
     await receiptLifecycle.approve(auth, receiptRequest);
@@ -479,7 +487,7 @@ function response() {
     assert.equal(receiptLifecycle.exportReviewSnapshot().receipts.length, 0);
     await assert.rejects(() => receiptLifecycle.approve(auth, restoreRequest), /Every candidate must remain pending/);
 
-    const pendingBackend = new backendApi.ProtectedReviewBackend({ householdId: 'household-1', allowedUsers: [auth.email] });
+    const pendingBackend = new backendApi.ProtectedReviewBackend({ householdId: 'household-1', allowedUsers: [auth.email], initialState: { categories: reviewCategories } });
     const pendingStage = await pendingBackend.stage(auth, [candidate({ source: 'bank-provider', sourceIdentity: 'plaid:chase:checking:pending-link', sourceRevision: 'pending', providerPending: true })], { source: 'bank-provider', serverIngest: true });
     await assert.rejects(() => pendingBackend.approve(auth, { candidateIds: [pendingStage.candidates[0].id], revisions: [1], idempotencyKey: 'pending-approval' }), /must post/);
     const posted = await pendingBackend.stage(auth, [candidate({ source: 'bank-provider', sourceIdentity: 'plaid:chase:checking:pending-link', sourceRevision: 'posted', providerPending: false, amount: 15 })], { source: 'bank-provider', serverIngest: true });
