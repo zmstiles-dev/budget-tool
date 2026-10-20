@@ -4,6 +4,7 @@ const review = require('../transaction-review.js');
 
 const auth = { uid: 'user-1', email: 'reviewer@example.test', tokenVerified: true, householdId: 'household-1' };
 const other = { uid: 'user-2', email: 'other@example.test', tokenVerified: true, householdId: 'household-1' };
+const reviewCategories = [{ name: 'Restaurants', type: 'expense', color: '#3498db' }, { name: 'Transfer,Payroll', type: 'expense', color: '#9b59b6' }, { name: 'Food', type: 'expense', color: '#2ecc71' }, { name: 'Other', type: 'expense', color: '#f39c12' }];
 const record = (overrides = {}) => ({
     date: '2026-10-01', description: 'Coffee Shop', amount: -4.25,
     category: 'Restaurants', merchant: 'Coffee Shop', account: 'CFF',
@@ -38,7 +39,7 @@ await assert.rejects(() => backend.approve(auth, { ...request, candidateIds: ['o
 // A legacy provider payroll row is corrected only while it is still pending.
 // Hydration bumps its candidate revision, keeps the signed provider snapshot,
 // and leaves accepted history empty until the reviewer explicitly approves.
-const legacyHydrationBackend = new ProtectedReviewBackend({ householdId: 'household-1', allowedUsers: ['reviewer@example.test'] });
+const legacyHydrationBackend = new ProtectedReviewBackend({ householdId: 'household-1', allowedUsers: ['reviewer@example.test'], initialState: { categories: reviewCategories } });
 const legacyHydrationCandidate = review.normalizeCandidate(record({
     source: 'bank-provider', sourceIdentity: 'plaid:chase:Checking:legacy-payroll', sourceRevision: '1',
     date: '2026-10-08', description: 'Employer Payroll', merchant: 'Employer Payroll',
@@ -53,7 +54,7 @@ delete legacyHydrationCandidate.sourceOriginal.revision;
 delete legacyHydrationCandidate.sourceOriginal.reviewedRevision;
 legacyHydrationBackend.restoreState({
     pending: [[legacyHydrationCandidate.id, legacyHydrationCandidate]], rejected: [], accepted: [], approvedAmendments: [], receipts: [], batchMeta: [], audit: [], revision: 0,
-    state: { categories: [], budgets: {}, merchantDefaults: {}, categoryGroups: [], categoryColors: {}, categoryOrder: [] }
+    state: { categories: reviewCategories, budgets: {}, merchantDefaults: {}, categoryGroups: [], categoryColors: {}, categoryOrder: [] }
 });
 const hydratedLegacyRows = await legacyHydrationBackend.listPending(auth);
 assert.deepEqual({ type: hydratedLegacyRows[0].type, amount: hydratedLegacyRows[0].amount, revision: hydratedLegacyRows[0].revision }, { type: 'income', amount: 1250, revision: 2 });
@@ -99,7 +100,7 @@ await assert.rejects(() => approvedOverlapBackend.approve(auth, { candidateIds: 
 await approvedOverlapBackend.approve(auth, { candidateIds: [duplicateApproved.candidates[0].id], revisions: [1], idempotencyKey: 'duplicate-approved-allowed', allowOverlap: true });
 assert.equal((await approvedOverlapBackend.exportState(auth)).accepted.length, 2);
 
-const fuzzyBackend = new ProtectedReviewBackend({ householdId: 'household-1', allowedUsers: ['reviewer@example.test'] });
+const fuzzyBackend = new ProtectedReviewBackend({ householdId: 'household-1', allowedUsers: ['reviewer@example.test'], initialState: { categories: reviewCategories } });
 const fuzzyCsv = await fuzzyBackend.stage(auth, [record({ source: 'bank-csv', sourceId: 'fuzzy-csv', date: '2026-10-09', merchant: 'National Car Rental', description: 'National Car Rental', amount: -147.23 })], { source: 'bank-csv' });
 await fuzzyBackend.approve(auth, { candidateIds: [fuzzyCsv.candidates[0].id], revisions: [fuzzyCsv.candidates[0].revision], idempotencyKey: 'fuzzy-csv-accepted' });
 const fuzzyProvider = await fuzzyBackend.stage(auth, [record({ source: 'bank-provider', sourceId: 'fuzzy-provider', date: '2026-10-10', merchant: 'National Car Rental VenX', description: 'NATIONAL CAR RENTAL #123', amount: -147.23 })], { source: 'bank-provider', serverIngest: true });
@@ -107,9 +108,15 @@ assert.deepEqual(fuzzyProvider.candidates[0].overlap, [fuzzyCsv.candidates[0].id
 assert.equal(fuzzyProvider.candidates[0].overlapDetails[0].matched.description, 'National Car Rental');
 await assert.rejects(() => fuzzyBackend.approve(auth, { candidateIds: [fuzzyProvider.candidates[0].id], revisions: [1], idempotencyKey: 'fuzzy-provider-rejected' }), /Possible duplicate/);
 await fuzzyBackend.approve(auth, { candidateIds: [fuzzyProvider.candidates[0].id], revisions: [1], idempotencyKey: 'fuzzy-provider-allowed', allowOverlap: true });
+assert.deepEqual((await fuzzyBackend.exportState()).state.categories.map(category => category.name), reviewCategories.map(category => category.name), 'Provider approval must not auto-create a taxonomy category.');
 for (const [, acceptedItem] of fuzzyBackend.accepted.entries()) {
     assert.equal(Object.prototype.hasOwnProperty.call(acceptedItem, 'overlapDetails'), false, 'derived overlap evidence must not enter canonical accepted rows');
 }
+const unknownProviderCategory = await fuzzyBackend.stage(auth, [record({ source: 'bank-provider', sourceId: 'unknown-provider-category', category: 'Plaid Food and Dining' })], { source: 'bank-provider', serverIngest: true });
+await assert.rejects(() => fuzzyBackend.approve(auth, {
+    candidateIds: [unknownProviderCategory.candidates[0].id], revisions: [unknownProviderCategory.candidates[0].revision], idempotencyKey: 'unknown-provider-category'
+}), /existing budget category/);
+assert.equal((await fuzzyBackend.listPending(auth)).some(item => item.id === unknownProviderCategory.candidates[0].id), true, 'Unknown provider categories remain pending after approval rejection.');
 
 const settingsValues = new Map([
     ['protectedAppConfig/transactionService', { allowed: true, householdId: 'household-1', cleanupPlan: { enabled: true, targetConnectionKey: 'capital-one' }, syncActivation: { enabled: true, cutoffDate: '2026-10-09', revision: 2, connections: { chase: {}, 'capital-one': {} } } }],
@@ -146,7 +153,7 @@ assert.equal((await numericClockSettings.update(auth, '2026-10-11', 3)).revision
 // Matching pending rows are also an explicit duplicate decision. Approval
 // recomputes against current accepted history, rather than trusting the overlap
 // index captured when the review row was staged.
-const duplicatePendingBackend = new ProtectedReviewBackend({ householdId: 'household-1', allowedUsers: ['reviewer@example.test'] });
+const duplicatePendingBackend = new ProtectedReviewBackend({ householdId: 'household-1', allowedUsers: ['reviewer@example.test'], initialState: { categories: reviewCategories } });
 const duplicatePending = await duplicatePendingBackend.stage(auth, [record({ sourceId: 'duplicate-pending-a' }), record({ sourceId: 'duplicate-pending-b' })], { source: 'historical-csv' });
 assert.equal(duplicatePending.candidates.length, 2);
 await assert.rejects(() => duplicatePendingBackend.approve(auth, {
@@ -162,7 +169,7 @@ await duplicatePendingBackend.approve(auth, {
 
 const currentHistoryBackend = new ProtectedReviewBackend({
     householdId: 'household-1', allowedUsers: ['reviewer@example.test'],
-    initialState: { transactions: [record({ sourceId: 'current-history' })] }
+    initialState: { transactions: [record({ sourceId: 'current-history' })], categories: reviewCategories }
 });
 const currentHistoryStage = await currentHistoryBackend.stage(auth, [record({ sourceId: 'current-history-candidate' })], { source: 'historical-csv' });
 const currentHistoryKey = [...currentHistoryBackend.accepted.keys()][0];
@@ -171,7 +178,7 @@ await currentHistoryBackend.approve(auth, { candidateIds: [currentHistoryStage.c
 assert.equal((await currentHistoryBackend.exportState(auth)).accepted.length, 2);
 const lateHistoryBackend = new ProtectedReviewBackend({
     householdId: 'household-1', allowedUsers: ['reviewer@example.test'],
-    initialState: { transactions: [record({ sourceId: 'late-history', amount: -99.99 })] }
+    initialState: { transactions: [record({ sourceId: 'late-history', amount: -99.99 })], categories: reviewCategories }
 });
 const lateHistoryStage = await lateHistoryBackend.stage(auth, [record({ sourceId: 'late-history-candidate' })], { source: 'historical-csv' });
 const lateHistoryKey = [...lateHistoryBackend.accepted.keys()][0];
@@ -182,7 +189,7 @@ await assert.rejects(() => lateHistoryBackend.approve(auth, {
 
 const legacyOverlapBackend = new ProtectedReviewBackend({
     householdId: 'household-1', allowedUsers: ['reviewer@example.test'],
-    initialState: { transactions: [record({ id: undefined, sourceIdentity: undefined, sourceRevision: undefined })] }
+    initialState: { transactions: [record({ id: undefined, sourceIdentity: undefined, sourceRevision: undefined })], categories: reviewCategories }
 });
 const legacyOverlap = await legacyOverlapBackend.stage(auth, [record({ sourceId: 'legacy-overlap' })], { source: 'historical-csv' });
 assert.deepEqual(legacyOverlap.candidates[0].overlap, ['accepted:0']);
@@ -209,7 +216,7 @@ const fakeDb = {
     }
 };
 const durableRepo = new FirestoreReviewRepository({ db: fakeDb, householdId: 'household-1' });
-const durable = new DurableProtectedReviewBackend({ repository: durableRepo, householdId: 'household-1', allowedUsers: ['reviewer@example.test'] });
+const durable = new DurableProtectedReviewBackend({ repository: durableRepo, householdId: 'household-1', allowedUsers: ['reviewer@example.test'], initialState: { categories: reviewCategories } });
 const durableStage = await durable.stage(auth, [record({ sourceId: 'durable-1' })], { source: 'synthetic', batchId: 'durable-batch' });
 assert.equal(firestoreValues.has('shared/data'), false);
 assert.equal(firestoreValues.get('protectedTransactionReview/household-1').revision, durableStage.revision);
@@ -221,7 +228,7 @@ assert.equal(durableApproval.state.budgets.Restaurants['2026-10'], 125);
 assert.equal((await durable.listPending(auth)).length, 0);
 assert.ok(firestoreValues.has('shared/data'));
 assert.deepEqual(await durable.approve(auth, { candidateIds: [durableStage.candidates[0].id], revisions: [durableStage.candidates[0].revision], idempotencyKey: 'durable-approval' }), durableApproval);
-const durableReload = new DurableProtectedReviewBackend({ repository: durableRepo, householdId: 'household-1', allowedUsers: ['reviewer@example.test'] });
+const durableReload = new DurableProtectedReviewBackend({ repository: durableRepo, householdId: 'household-1', allowedUsers: ['reviewer@example.test'], initialState: { categories: reviewCategories } });
 assert.equal((await durableReload.exportState(auth)).accepted.length, 1);
 const durableBeforeSave = await durableReload.exportState(auth);
 const durableCanonical = {
@@ -276,7 +283,7 @@ assert.deepEqual((await unknownLegacyBackend.exportState(auth)).accepted[0][1], 
 // A staged provider amendment is fenced by a server-owned digest of every
 // accepted target, including split children. An ordinary save that changes a
 // target must force the provider observation back through staging.
-const amendmentFence = new ProtectedReviewBackend({ householdId: 'household-1', allowedUsers: ['reviewer@example.test'] });
+const amendmentFence = new ProtectedReviewBackend({ householdId: 'household-1', allowedUsers: ['reviewer@example.test'], initialState: { categories: reviewCategories } });
 const amendmentOriginal = await amendmentFence.stage(auth, [record({ source: 'bank-provider', sourceIdentity: 'provider:fenced', sourceRevision: '1' })], { source: 'bank-provider', serverIngest: true });
 await amendmentFence.approve(auth, { candidateIds: [amendmentOriginal.candidates[0].id], revisions: [1], idempotencyKey: 'fenced-original' });
 const amendmentPending = await amendmentFence.stage(auth, [record({ source: 'bank-provider', sourceIdentity: 'provider:fenced', sourceRevision: '2', description: 'Provider update', amendment: 'modified' })], { source: 'bank-provider', serverIngest: true });
@@ -293,14 +300,14 @@ assert.equal((await amendmentFence.listPending(auth)).length, 1);
 const amendmentRestaged = await amendmentFence.stage(auth, [record({ source: 'bank-provider', sourceIdentity: 'provider:fenced', sourceRevision: '3', description: 'Provider update after re-review', amendment: 'modified' })], { source: 'bank-provider', serverIngest: true });
 await amendmentFence.approve(auth, { candidateIds: [amendmentRestaged.candidates[0].id], revisions: [amendmentRestaged.candidates[0].revision], idempotencyKey: 'fenced-restaged' });
 assert.equal((await amendmentFence.exportState(auth)).accepted[0][1].description, 'Provider update after re-review');
-const missingDigestBackend = new ProtectedReviewBackend({ householdId: 'household-1', allowedUsers: ['reviewer@example.test'] });
+const missingDigestBackend = new ProtectedReviewBackend({ householdId: 'household-1', allowedUsers: ['reviewer@example.test'], initialState: { categories: reviewCategories } });
 const missingDigestOriginal = await missingDigestBackend.stage(auth, [record({ source: 'bank-provider', sourceIdentity: 'provider:missing-digest', sourceRevision: '1' })], { source: 'bank-provider', serverIngest: true });
 await missingDigestBackend.approve(auth, { candidateIds: [missingDigestOriginal.candidates[0].id], revisions: [1], idempotencyKey: 'missing-digest-original' });
 const missingDigestPending = await missingDigestBackend.stage(auth, [record({ source: 'bank-provider', sourceIdentity: 'provider:missing-digest', sourceRevision: '2', amendment: 'modified' })], { source: 'bank-provider', serverIngest: true });
 delete missingDigestBackend.pending.get(missingDigestPending.candidates[0].id).targetAcceptedDigest;
 await assert.rejects(() => missingDigestBackend.approve(auth, { candidateIds: [missingDigestPending.candidates[0].id], revisions: [1], idempotencyKey: 'missing-digest-approval' }), /Amendment target changed since review/);
 
-const splitFence = new ProtectedReviewBackend({ householdId: 'household-1', allowedUsers: ['reviewer@example.test'] });
+const splitFence = new ProtectedReviewBackend({ householdId: 'household-1', allowedUsers: ['reviewer@example.test'], initialState: { categories: reviewCategories } });
 const splitSource = await splitFence.stage(auth, [record({ source: 'bank-provider', sourceIdentity: 'provider:split-fenced', sourceRevision: '1', amount: -10 })], { source: 'bank-provider', serverIngest: true });
 const splitChildren = await splitFence.split(auth, splitSource.candidates[0].id, [{ category: 'Food', amount: '4.00' }, { category: 'Other', amount: '6.00' }], splitSource.candidates[0].revision);
 await splitFence.approve(auth, { candidateIds: splitChildren.candidates.map(item => item.id), revisions: splitChildren.candidates.map(item => item.revision), idempotencyKey: 'split-fenced-original', allowOverlap: true });
@@ -371,6 +378,39 @@ assert.equal(structuredFailureResponse.statusCode, 500);
 assert.equal(structuredFailureBody.error, 'Approval service request failed.');
 assert.deepEqual(structuredFailureBody.diagnostic, { stage: 'sync', status: 503, http_status: 500, type: 'API_ERROR', code: 'PRODUCT_NOT_READY', request_id: 'synthetic-http-diagnostic' });
 assert.doesNotMatch(structuredFailureResponse.body, /provider secret/);
+const pendingMessageHandler = createHttpHandler({
+    backend: { async approve() { throw new Error('Provider pending observation plaid:chase:checking:long-provider-id@sha256:abcdef must post before approval.'); } },
+    authenticate: async () => auth
+});
+const pendingMessageResponse = { statusCode: 0, headers: {}, setHeader(name, value) { this.headers[name] = value; }, end(body) { this.body = body; } };
+await pendingMessageHandler({ method: 'POST', url: '/approve', headers: {}, on(event, handler) { if (event === 'data') process.nextTick(() => handler(JSON.stringify({ candidateIds: ['provider-id'], revisions: [1], idempotencyKey: 'provider-message' }))); if (event === 'end') process.nextTick(handler); } }, pendingMessageResponse);
+assert.equal(pendingMessageResponse.statusCode, 409);
+assert.equal(JSON.parse(pendingMessageResponse.body).error, 'This transaction is still pending with the bank and cannot be added until it posts.');
+assert.doesNotMatch(pendingMessageResponse.body, /long-provider-id|sha256/);
+const pendingTransportFetch = async (url, requestOptions = {}) => {
+    const parsed = new URL(url);
+    const request = {
+        method: requestOptions.method || 'GET',
+        url: parsed.pathname,
+        headers: requestOptions.headers || {},
+        on(event, handler) {
+            if (event === 'data' && requestOptions.body) process.nextTick(() => handler(requestOptions.body));
+            if (event === 'end') process.nextTick(handler);
+        }
+    };
+    const response = { statusCode: 0, headers: {}, body: '', setHeader(name, value) { this.headers[name] = value; }, end(body) { this.body = body || ''; } };
+    await pendingMessageHandler(request, response);
+    return { ok: response.statusCode >= 200 && response.statusCode < 300, status: response.statusCode, json: async () => JSON.parse(response.body) };
+};
+const pendingTransportClient = new BrowserApprovalClient({
+    endpoint: 'https://approval.test',
+    auth: { currentUser: { getIdToken: async () => 'fresh-token' } },
+    fetch: pendingTransportFetch
+});
+await assert.rejects(() => pendingTransportClient.approve([{ id: 'provider-id', revision: 1, sourceIdentity: 'synthetic:provider-id', sourceRevision: '1' }], { candidateIds: ['provider-id'], revisions: [1], idempotencyKey: 'provider-message-client' }, {}), error => {
+    assert.equal(error.message, 'This transaction is still pending with the bank and cannot be added until it posts.');
+    return true;
+});
 
 const admin = { auth: () => ({ verifyIdToken: async (token, checkRevoked) => { assert.equal(token, 'token'); assert.equal(checkRevoked, true); return { uid: 'user-1', email: 'reviewer@example.test', email_verified: true, auth_time: 123 }; } }) };
 const verified = await verifyFirebaseAuthorization({ headers: { authorization: 'Bearer token' } }, { admin, allowedUsers: ['reviewer@example.test'], householdId: 'household-1' });
