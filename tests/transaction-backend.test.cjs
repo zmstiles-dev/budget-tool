@@ -1,5 +1,5 @@
 const assert = require('node:assert/strict');
-const { ProtectedReviewBackend, DurableProtectedReviewBackend, FirestoreReviewRepository, FirestoreSyncRepository, BrowserApprovalClient, verifyFirebaseAuthorization, createHttpHandler, OnOpenSyncService } = require('../transaction-backend.js');
+const { ProtectedReviewBackend, DurableProtectedReviewBackend, FirestoreReviewRepository, FirestoreSyncRepository, BrowserApprovalClient, verifyFirebaseAuthorization, createHttpHandler, createProtectedSyncSettings, OnOpenSyncService } = require('../transaction-backend.js');
 const review = require('../transaction-review.js');
 
 const auth = { uid: 'user-1', email: 'reviewer@example.test', tokenVerified: true, householdId: 'household-1' };
@@ -35,6 +35,42 @@ const retry = await backend.approve(auth, request);
 assert.deepEqual(retry, approved);
 await assert.rejects(() => backend.approve(auth, { ...request, candidateIds: ['other-id'] }), /already bound/);
 
+// A legacy provider payroll row is corrected only while it is still pending.
+// Hydration bumps its candidate revision, keeps the signed provider snapshot,
+// and leaves accepted history empty until the reviewer explicitly approves.
+const legacyHydrationBackend = new ProtectedReviewBackend({ householdId: 'household-1', allowedUsers: ['reviewer@example.test'] });
+const legacyHydrationCandidate = review.normalizeCandidate(record({
+    source: 'bank-provider', sourceIdentity: 'plaid:chase:Checking:legacy-payroll', sourceRevision: '1',
+    date: '2026-10-08', description: 'Employer Payroll', merchant: 'Employer Payroll',
+    amount: -1250, account: 'Checking Account', payment_method: 'Checking Account', category: 'Transfer,Payroll', type: 'expense'
+}), 'bank-provider', 0, 'legacy-payroll');
+legacyHydrationCandidate.status = review.STATES.PENDING;
+legacyHydrationCandidate.revision = 1;
+legacyHydrationCandidate.reviewedRevision = 1;
+legacyHydrationCandidate.sourceOriginal = { ...legacyHydrationCandidate, amount: -1250 };
+delete legacyHydrationCandidate.sourceOriginal.status;
+delete legacyHydrationCandidate.sourceOriginal.revision;
+delete legacyHydrationCandidate.sourceOriginal.reviewedRevision;
+legacyHydrationBackend.restoreState({
+    pending: [[legacyHydrationCandidate.id, legacyHydrationCandidate]], rejected: [], accepted: [], approvedAmendments: [], receipts: [], batchMeta: [], audit: [], revision: 0,
+    state: { categories: [], budgets: {}, merchantDefaults: {}, categoryGroups: [], categoryColors: {}, categoryOrder: [] }
+});
+const hydratedLegacyRows = await legacyHydrationBackend.listPending(auth);
+assert.deepEqual({ type: hydratedLegacyRows[0].type, amount: hydratedLegacyRows[0].amount, revision: hydratedLegacyRows[0].revision }, { type: 'income', amount: 1250, revision: 2 });
+assert.equal(hydratedLegacyRows[0].sourceOriginal.amount, -1250);
+assert.equal(legacyHydrationBackend.accepted.size, 0);
+const editedHydrated = await legacyHydrationBackend.edit(auth, hydratedLegacyRows[0].id, { description: 'Employer Payroll verified' }, hydratedLegacyRows[0].revision);
+assert.equal(editedHydrated.revision, 3);
+assert.equal(editedHydrated.amount, 1250);
+assert.equal(editedHydrated.sourceOriginal.amount, -1250);
+const toggledHydrated = await legacyHydrationBackend.edit(auth, editedHydrated.id, { type: 'expense', amount: 1250 }, editedHydrated.revision);
+assert.equal(toggledHydrated.revision, 4);
+assert.equal(toggledHydrated.type, 'expense');
+assert.equal(toggledHydrated.amount, -1250, 'type toggle restores the raw negative reimbursement sign');
+const approvedHydrated = await legacyHydrationBackend.approve(auth, { candidateIds: [toggledHydrated.id], revisions: [toggledHydrated.revision], idempotencyKey: 'legacy-payroll-approval' });
+assert.equal(approvedHydrated.accepted[0].type, 'expense');
+assert.equal(approvedHydrated.accepted[0].amount, -1250);
+
 // Imported approval budgets must reject prototype-sensitive map keys before
 // touching state. Exercise all three legacy JavaScript dictionary hazards
 // using own enumerable keys, including an own __proto__ data property.
@@ -62,6 +98,50 @@ assert.deepEqual(duplicateApproved.candidates[0].overlap, [approvedOverlapStage.
 await assert.rejects(() => approvedOverlapBackend.approve(auth, { candidateIds: [duplicateApproved.candidates[0].id], revisions: [1], idempotencyKey: 'duplicate-approved-rejected' }), /Possible duplicate/);
 await approvedOverlapBackend.approve(auth, { candidateIds: [duplicateApproved.candidates[0].id], revisions: [1], idempotencyKey: 'duplicate-approved-allowed', allowOverlap: true });
 assert.equal((await approvedOverlapBackend.exportState(auth)).accepted.length, 2);
+
+const fuzzyBackend = new ProtectedReviewBackend({ householdId: 'household-1', allowedUsers: ['reviewer@example.test'] });
+const fuzzyCsv = await fuzzyBackend.stage(auth, [record({ source: 'bank-csv', sourceId: 'fuzzy-csv', date: '2026-10-09', merchant: 'National Car Rental', description: 'National Car Rental', amount: -147.23 })], { source: 'bank-csv' });
+await fuzzyBackend.approve(auth, { candidateIds: [fuzzyCsv.candidates[0].id], revisions: [fuzzyCsv.candidates[0].revision], idempotencyKey: 'fuzzy-csv-accepted' });
+const fuzzyProvider = await fuzzyBackend.stage(auth, [record({ source: 'bank-provider', sourceId: 'fuzzy-provider', date: '2026-10-10', merchant: 'National Car Rental VenX', description: 'NATIONAL CAR RENTAL #123', amount: -147.23 })], { source: 'bank-provider', serverIngest: true });
+assert.deepEqual(fuzzyProvider.candidates[0].overlap, [fuzzyCsv.candidates[0].id]);
+assert.equal(fuzzyProvider.candidates[0].overlapDetails[0].matched.description, 'National Car Rental');
+await assert.rejects(() => fuzzyBackend.approve(auth, { candidateIds: [fuzzyProvider.candidates[0].id], revisions: [1], idempotencyKey: 'fuzzy-provider-rejected' }), /Possible duplicate/);
+await fuzzyBackend.approve(auth, { candidateIds: [fuzzyProvider.candidates[0].id], revisions: [1], idempotencyKey: 'fuzzy-provider-allowed', allowOverlap: true });
+for (const [, acceptedItem] of fuzzyBackend.accepted.entries()) {
+    assert.equal(Object.prototype.hasOwnProperty.call(acceptedItem, 'overlapDetails'), false, 'derived overlap evidence must not enter canonical accepted rows');
+}
+
+const settingsValues = new Map([
+    ['protectedAppConfig/transactionService', { allowed: true, householdId: 'household-1', cleanupPlan: { enabled: true, targetConnectionKey: 'capital-one' }, syncActivation: { enabled: true, cutoffDate: '2026-10-09', revision: 2, connections: { chase: {}, 'capital-one': {} } } }],
+    ['protectedConnections/chase', { householdId: 'household-1', ownerUid: auth.uid }],
+    ['protectedConnections/capital-one', { householdId: 'household-1', ownerUid: auth.uid }]
+]);
+const settingsDb = {
+    collection(name) { return { doc(id) { const key = `${name}/${id}`; return { key, async get() { return { exists: settingsValues.has(key), data: () => settingsValues.get(key) }; } }; } }; },
+    async runTransaction(callback) {
+        const tx = { get: ref => ref.get(), set: (ref, value) => settingsValues.set(ref.key, value) };
+        return callback(tx);
+    }
+};
+const syncSettings = createProtectedSyncSettings({ db: settingsDb, householdId: 'household-1', clock: () => '2026-10-20T12:00:00.000Z' });
+assert.deepEqual(await syncSettings.read(auth), { ready: true, cutoffDate: '2026-10-09', revision: 2, actor: auth.uid });
+const changedSettings = await syncSettings.update(auth, '2026-10-10', 2);
+assert.deepEqual(changedSettings, { ok: true, cutoffDate: '2026-10-10', revision: 3 });
+assert.equal(settingsValues.get('protectedAppConfig/transactionService').syncActivation.cutoffDate, '2026-10-09');
+assert.deepEqual(settingsValues.get('protectedAppConfig/transactionService').cleanupPlan, { enabled: true, targetConnectionKey: 'capital-one' });
+await assert.rejects(() => syncSettings.update(auth, '2026-10-09', 3), /only move forward/);
+await assert.rejects(() => syncSettings.update(auth, '2026-10-21', 3), /future/);
+await assert.rejects(() => syncSettings.update(auth, '2026-10-11', 2), /changed since/);
+await assert.rejects(() => syncSettings.update({ ...auth, uid: 'other-user' }, '2026-10-11', 3), /not authorized for this provider connection/);
+const settingsHandler = createHttpHandler({ backend: new ProtectedReviewBackend({ householdId: 'household-1', allowedUsers: ['reviewer@example.test'] }), authenticate: async () => auth, syncSettings, allowedOrigins: ['https://budget.example.test'] });
+const settingsGetResponse = await new Promise(async resolve => { const output = { statusCode: 0, headers: {}, body: '', setHeader(name, value) { this.headers[name] = value; }, end(body) { this.body = body || ''; resolve(this); } }; await settingsHandler({ method: 'GET', url: '/sync-settings', headers: { origin: 'https://budget.example.test' } }, output); });
+assert.equal(settingsGetResponse.statusCode, 200);
+assert.equal(JSON.parse(settingsGetResponse.body).cutoffDate, '2026-10-10');
+settingsValues.get('protectedAppConfig/transactionService').syncSettings = { cutoffDate: 'not-a-date', revision: 4 };
+await assert.rejects(() => syncSettings.read(auth), /Sync activation is not ready/);
+settingsValues.get('protectedAppConfig/transactionService').syncSettings = { cutoffDate: '2026-10-10', revision: 3 };
+const numericClockSettings = createProtectedSyncSettings({ db: settingsDb, householdId: 'household-1', clock: () => Date.parse('2026-10-20T12:00:00.000Z') });
+assert.equal((await numericClockSettings.update(auth, '2026-10-11', 3)).revision, 4);
 
 // Matching pending rows are also an explicit duplicate decision. Approval
 // recomputes against current accepted history, rather than trusting the overlap

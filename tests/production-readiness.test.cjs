@@ -575,6 +575,42 @@ function request(method, url, body, origin) {
     const syncReady = await syncReadiness(syncReadinessAuth, 'chase');
     assert.equal(syncReady.ready, true);
     assert.deepEqual(syncReady.connectionKeys, ['capital-one', 'chase']);
+    const activationBeforeRuntimeSetting = clone(syncReadinessDb.docs.get('protectedAppConfig/transactionService').syncActivation);
+    const connectionsBeforeRuntimeSetting = Object.fromEntries(Object.entries(syncConnections).map(([key, value]) => [key, clone(value)]));
+    syncReadinessDb.docs.get('protectedAppConfig/transactionService').syncSettings = { cutoffDate: '2026-10-10', revision: 2 };
+    const runtimeProduction = production.createProductionService({
+        db: syncReadinessDb,
+        householdId: syncReadinessAuth.householdId,
+        allowedUsers: [syncReadinessAuth.uid],
+        authenticate: async () => syncReadinessAuth,
+        connections: new production.FirestoreProviderConnectionRepository({ db: syncReadinessDb, allowedConnectionKeys: ['chase', 'capital-one'] }),
+        tokenStore: { async resolveAccessToken() { return 'synthetic-runtime-token'; } },
+        plaidClient: { async linkTokenCreate() { return { data: { link_token: 'runtime-test-link' } }; } },
+        provider: { async fetchDelta() { return { pages: [{ records: [] }], cursor: 'runtime-test-cursor' }; } },
+        syncEnabled: true,
+        activeConnectionKeys: ['chase'],
+        allowedConnectionKeys: ['chase', 'capital-one'],
+        accountAliases: ['Checking Account', 'CFF', 'CFU', 'CSP', 'Ven X'],
+        expectedInstitutions: { chase: 'ins_56', 'capital-one': 'ins_128026' },
+        syncReadiness
+    });
+    const runtimeReadinessResponse = response();
+    await runtimeProduction.handler(request('GET', '/sync-readiness', undefined, production.PRODUCTION_ORIGIN), runtimeReadinessResponse);
+    assert.deepEqual(JSON.parse(runtimeReadinessResponse.body), { ready: true, revision: 1, cutoffDate: '2026-10-10', cutoffRevision: 2, connectionKeys: ['capital-one', 'chase'] });
+    const runtimeSettingsResponse = response();
+    await runtimeProduction.handler(request('GET', '/sync-settings', undefined, production.PRODUCTION_ORIGIN), runtimeSettingsResponse);
+    assert.deepEqual(JSON.parse(runtimeSettingsResponse.body), { ready: true, cutoffDate: '2026-10-10', revision: 2, actor: syncReadinessAuth.uid });
+    const runtimeSettingsUpdateResponse = response();
+    await runtimeProduction.handler(request('POST', '/sync-settings', { cutoffDate: '2026-10-11', expectedRevision: 2 }, production.PRODUCTION_ORIGIN), runtimeSettingsUpdateResponse);
+    assert.deepEqual(JSON.parse(runtimeSettingsUpdateResponse.body), { ok: true, cutoffDate: '2026-10-11', revision: 3 });
+    assert.deepEqual(syncReadinessDb.docs.get('protectedAppConfig/transactionService').syncActivation, activationBeforeRuntimeSetting, 'runtime cutoff updates must preserve activation proofs and revision');
+    for (const [key, value] of Object.entries(connectionsBeforeRuntimeSetting)) assert.deepEqual(syncReadinessDb.docs.get(`protectedConnections/${key}`), value, `runtime cutoff updates must preserve ${key} mapping data`);
+    syncReadinessDb.docs.get('protectedAppConfig/transactionService').syncSettings = { cutoffDate: 'bad-date', revision: 4 };
+    const malformedRuntimeReadinessResponse = response();
+    await runtimeProduction.handler(request('GET', '/sync-readiness', undefined, production.PRODUCTION_ORIGIN), malformedRuntimeReadinessResponse);
+    assert.equal(malformedRuntimeReadinessResponse.statusCode, 409);
+    assert.match(JSON.parse(malformedRuntimeReadinessResponse.body).error, /not ready/i);
+    syncReadinessDb.docs.get('protectedAppConfig/transactionService').syncSettings = { cutoffDate: '2026-10-11', revision: 3 };
     const reservationWithoutCompletion = clone(syncConnections.chase);
     delete reservationWithoutCompletion.exchangeLedger;
     syncReadinessDb.docs.set('protectedConnections/chase', reservationWithoutCompletion);

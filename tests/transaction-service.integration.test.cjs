@@ -63,6 +63,28 @@ function response() {
     await assert.rejects(() => sync2.runOnOpen(auth, 'chase'), /cooldown/);
     assert.equal(providerCalls, 1);
 
+    let runtimeCutoff = '2026-10-09';
+    let runtimeRevision = 4;
+    const pinnedCutoffs = [];
+    const runtimeSync = new backendApi.OnOpenSyncService({
+        enabled: true,
+        cutoverDate: '2026-10-09',
+        provider: { fetchDelta: async input => { pinnedCutoffs.push({ cutoffDate: input.cutoverDate, cutoffRevision: input.cutoffRevision, cursor: input.cursor }); runtimeCutoff = '2026-10-10'; runtimeRevision = 5; return { pages: [{ records: [] }], cursor: `runtime-${pinnedCutoffs.length}` }; } },
+        repository: new review.InMemorySyncRepository({ cooldownMs: 0 }),
+        reviewBackend: protectedBackend,
+        connectionOwners: { chase: auth.uid },
+        cooldownMs: 0,
+        syncReadiness: async () => ({ ready: true, cutoffDate: runtimeCutoff, cutoffRevision: runtimeRevision, revision: 2 }),
+        clock: () => 100
+    });
+    const pinnedRun = await runtimeSync.runOnOpen(auth, 'chase', { runId: 'runtime-cutoff-1' });
+    assert.deepEqual(pinnedCutoffs[0], { cutoffDate: '2026-10-09', cutoffRevision: 4, cursor: null });
+    assert.equal(pinnedRun.cutoffDate, '2026-10-09');
+    assert.equal(pinnedRun.cutoffRevision, 4);
+    const nextPinnedRun = await runtimeSync.runOnOpen(auth, 'chase', { runId: 'runtime-cutoff-2' });
+    assert.deepEqual(pinnedCutoffs[1], { cutoffDate: '2026-10-10', cutoffRevision: 5, cursor: 'runtime-1' });
+    assert.equal(nextPinnedRun.cursor, 'runtime-2');
+
     const stale = new review.InMemorySyncRepository({ cooldownMs: 0 });
     await stale.acquireLease('chase', 'stale-run', { now: 0, ttlMs: 10 });
     stale.stagePage('stale-run', [{ id: 'stale-id' }]);
@@ -100,7 +122,52 @@ function response() {
         accountMap: { Checking: 'Checking Account' }, classify: ({ id }) => id === 'income' ? 'income' : '',
         client: { sync: async () => ({ added: [{ transaction_id: 'income', date: '2026-10-01', amount: -25, account_id: 'Checking', currency_code: 'USD', name: 'Pay' }], modified: [], removed: [], has_more: false, next_cursor: 'classified-cursor' }) }
     });
-    assert.equal((await classifiedIncome.fetchDelta({ accessToken: 'test', cursor: '', connectionKey: 'chase' })).pages[0].records[0].type, 'income');
+    const classifiedIncomeRecord = (await classifiedIncome.fetchDelta({ accessToken: 'test', cursor: '', connectionKey: 'chase' })).pages[0].records[0];
+    assert.equal(classifiedIncomeRecord.type, 'income');
+    assert.equal(classifiedIncomeRecord.amount, 25, 'checking income is positive after provider normalization');
+    assert.equal(classifiedIncomeRecord.providerSignedAmount, -25, 'raw provider sign remains available only for protected staging');
+    const categoryIncome = new backendApi.PlaidTransactionsSyncAdapter({
+        accountMap: { Checking: 'Checking Account', CFF: 'CFF' },
+        client: { sync: async () => ({ added: [
+            { transaction_id: 'payroll', date: '2026-10-02', amount: -1250, account_id: 'Checking', currency_code: 'USD', name: 'Employer Payroll', category: 'Transfer,Payroll' },
+            { transaction_id: 'reimbursement', date: '2026-10-03', amount: -42, account_id: 'Checking', currency_code: 'USD', name: 'Expense reimbursement', category: 'Transfer,Reimbursement' },
+            { transaction_id: 'checking-expense', date: '2026-10-04', amount: 18, account_id: 'Checking', currency_code: 'USD', name: 'Grocery', category: 'Food' },
+            { transaction_id: 'positive-income-category', date: '2026-10-04', amount: 25, account_id: 'Checking', currency_code: 'USD', name: 'Income tax payment', category: 'INCOME_TAX' },
+            { transaction_id: 'card-refund', date: '2026-10-05', amount: -18, account_id: 'CFF', currency_code: 'USD', name: 'Card refund', category: 'Refund' }
+        ], modified: [], removed: [], has_more: false, next_cursor: 'category-income-cursor' }) }
+    });
+    const categoryRecords = (await categoryIncome.fetchDelta({ accessToken: 'test', cursor: '', connectionKey: 'chase' })).pages[0].records;
+    const byId = id => categoryRecords.find(item => item.sourceIdentity.includes(`:${id}`));
+    assert.deepEqual({ type: byId('payroll').type, amount: byId('payroll').amount }, { type: 'income', amount: 1250 });
+    assert.deepEqual({ type: byId('reimbursement').type, amount: byId('reimbursement').amount }, { type: 'expense', amount: -42 });
+    assert.deepEqual({ type: byId('checking-expense').type, amount: byId('checking-expense').amount }, { type: 'expense', amount: 18 });
+    assert.deepEqual({ type: byId('positive-income-category').type, amount: byId('positive-income-category').amount }, { type: 'expense', amount: 25 });
+    assert.deepEqual({ type: byId('card-refund').type, amount: byId('card-refund').amount }, { type: 'expense', amount: -18 });
+    const explicitExpensePayroll = new backendApi.PlaidTransactionsSyncAdapter({
+        accountMap: { Checking: 'Checking Account' }, classify: () => 'expense',
+        client: { sync: async () => ({ added: [{ transaction_id: 'explicit-expense-payroll', date: '2026-10-06', amount: -30, account_id: 'Checking', currency_code: 'USD', name: 'Payroll reimbursement', category: 'Transfer,Payroll' }], modified: [], removed: [], has_more: false, next_cursor: 'explicit-expense-cursor' }) }
+    });
+    const explicitExpenseRecord = (await explicitExpensePayroll.fetchDelta({ accessToken: 'test', cursor: '', connectionKey: 'chase' })).pages[0].records[0];
+    assert.deepEqual({ type: explicitExpenseRecord.type, amount: explicitExpenseRecord.amount }, { type: 'expense', amount: -30 });
+    const explicitExpenseBackend = new backendApi.ProtectedReviewBackend({ householdId: auth.householdId, allowedUsers: [auth.email] });
+    const explicitExpenseStage = await explicitExpenseBackend.stage(auth, [explicitExpenseRecord], { source: 'bank-provider', serverIngest: true, batchId: 'explicit-expense-payroll' });
+    assert.deepEqual({ type: explicitExpenseStage.candidates[0].type, amount: explicitExpenseStage.candidates[0].amount }, { type: 'expense', amount: -30 });
+    const explicitExpensePending = await explicitExpenseBackend.listPending(auth);
+    assert.deepEqual({ type: explicitExpensePending[0].type, amount: explicitExpensePending[0].amount }, { type: 'expense', amount: -30 }, 'an explicit provider expense classification blocks legacy payroll inference');
+    const explicitCardIncome = new backendApi.PlaidTransactionsSyncAdapter({
+        accountMap: { CFF: 'CFF' }, classify: () => 'income',
+        client: { sync: async () => ({ added: [{ transaction_id: 'card-income', date: '2026-10-07', amount: -30, account_id: 'CFF', currency_code: 'USD', name: 'Card credit' }], modified: [], removed: [], has_more: false, next_cursor: 'card-income-cursor' }) }
+    });
+    const explicitCardIncomeRecord = (await explicitCardIncome.fetchDelta({ accessToken: 'test', cursor: '', connectionKey: 'chase' })).pages[0].records[0];
+    assert.deepEqual({ type: explicitCardIncomeRecord.type, amount: explicitCardIncomeRecord.amount }, { type: 'income', amount: -30 }, 'non-checking explicit income keeps its provider sign');
+    const incomeBackend = new backendApi.ProtectedReviewBackend({ householdId: auth.householdId, allowedUsers: [auth.email] });
+    const stagedIncome = await incomeBackend.stage(auth, [classifiedIncomeRecord], { source: 'bank-provider', serverIngest: true, batchId: 'checking-income' });
+    assert.equal(stagedIncome.candidates[0].amount, 25);
+    assert.equal(stagedIncome.candidates[0].sourceOriginal.amount, -25);
+    const approvedIncome = await incomeBackend.approve(auth, { candidateIds: [stagedIncome.candidates[0].id], revisions: [stagedIncome.candidates[0].revision], idempotencyKey: 'checking-income-approval' });
+    assert.equal(approvedIncome.accepted[0].amount, 25, 'approval keeps checking income positive');
+    assert.equal(approvedIncome.accepted[0].sourceOriginal.amount, -25, 'accepted sourceOriginal retains provider sign');
+    assert.equal(Object.prototype.hasOwnProperty.call(approvedIncome.accepted[0], 'providerSignedAmount'), false, 'provider sign staging metadata is not persisted as a mutable canonical field');
     const sourceRevisionAdapter = amount => new backendApi.PlaidTransactionsSyncAdapter({
         accountMap: { Checking: 'Renamed display account' },
         client: { sync: async () => ({ added: [{ transaction_id: 'same-day', date: '2026-10-01', date_modified: '2026-10-17T12:00:00Z', amount, account_id: 'Checking', currency_code: 'USD', name: 'Same day change' }], modified: [], removed: [], has_more: false, next_cursor: `revision-${amount}` }) }
