@@ -396,6 +396,72 @@ await assert.rejects(() => structuredClient.sync('sandbox-test'), error => {
     assert.deepEqual(error.diagnostic, structuredFailureBody.diagnostic);
     return true;
 });
+
+// Exercise the deployed transport contract end to end: the HTTP handler emits
+// the exact cooldown message and the real browser client preserves it while
+// still redacting an unknown provider failure.
+const transportState = { mode: 'cooldown', settingsMessage: null };
+const transportHandler = createHttpHandler({
+    backend,
+    authenticate: async () => auth,
+    syncService: {
+        async runOnOpen() {
+            if (transportState.mode === 'cooldown') throw new Error('Sync is inside its cooldown window.');
+            throw new Error('provider secret must remain redacted');
+        }
+    },
+    syncSettings: {
+        async update() {
+            throw new Error(transportState.settingsMessage || 'provider settings detail must remain redacted');
+        }
+    }
+});
+const transportFetch = async (url, requestOptions = {}) => {
+    const parsed = new URL(url);
+    const request = {
+        method: requestOptions.method || 'GET',
+        url: parsed.pathname,
+        headers: requestOptions.headers || {},
+        on(event, handler) {
+            if (event === 'data' && requestOptions.body) process.nextTick(() => handler(requestOptions.body));
+            if (event === 'end') process.nextTick(handler);
+        }
+    };
+    const response = { statusCode: 0, headers: {}, body: '', setHeader(name, value) { this.headers[name] = value; }, end(body) { this.body = body || ''; } };
+    await transportHandler(request, response);
+    return { ok: response.statusCode >= 200 && response.statusCode < 300, status: response.statusCode, json: async () => JSON.parse(response.body) };
+};
+const transportClient = new BrowserApprovalClient({
+    endpoint: 'https://approval.test',
+    auth: { currentUser: { getIdToken: async () => 'fresh-token' } },
+    fetch: transportFetch
+});
+await assert.rejects(() => transportClient.sync('chase'), error => {
+    assert.equal(error.message, 'Sync is inside its cooldown window.');
+    return true;
+});
+transportState.mode = 'provider-error';
+await assert.rejects(() => transportClient.sync('chase'), error => {
+    assert.equal(error.message, 'Approval service request failed.');
+    return true;
+});
+for (const settingsMessage of [
+    'Sync activation is not ready.', 'Sync settings are not configured.',
+    'Sync settings revision is required.', 'Sync settings changed since they were loaded.',
+    'Cutoff date must be a real YYYY-MM-DD date.', 'Cutoff date cannot be in the future.',
+    'Cutoff date can only move forward; earlier dates require an explicit backfill operation.'
+]) {
+    transportState.settingsMessage = settingsMessage;
+    await assert.rejects(() => transportClient.updateSyncSettings('2026-10-10', 2), error => {
+        assert.equal(error.message, settingsMessage);
+        return true;
+    });
+}
+transportState.settingsMessage = null;
+await assert.rejects(() => transportClient.updateSyncSettings('2026-10-10', 2), error => {
+    assert.equal(error.message, 'Approval service request failed.');
+    return true;
+});
 const malformedSuccessClient = new BrowserApprovalClient({
     endpoint: 'https://approval.test',
     auth: { currentUser: { getIdToken: async () => 'fresh-token' } },

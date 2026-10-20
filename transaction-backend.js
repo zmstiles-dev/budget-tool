@@ -74,14 +74,19 @@
     }
 
     function safeHttpMessage(error) {
-        const message = text(error && error.message);
+        const message = text(typeof error === 'string' ? error : error && error.message);
         const allowed = new Set([
             'Bearer authentication is required.', 'Firebase Admin authorization is not configured.',
             'Authenticated user is not an approved app user.', 'Authenticated user is not an existing app user.',
             'Authenticated household membership is not configured.', 'User is not a member of this household.',
             'CORS origin is not allowed.', 'Request body is too large.', 'Request body must be valid JSON.',
             'Route not found.', 'Browser staging is limited to CSV observations.',
-            'Approval candidates were already rejected or accepted.', 'A durable review transaction failed.'
+            'Approval candidates were already rejected or accepted.', 'A durable review transaction failed.',
+            'Sync is inside its cooldown window.', 'Sync activation is not ready.',
+            'Sync settings are not configured.', 'Sync settings revision is required.',
+            'Sync settings changed since they were loaded.', 'Cutoff date must be a real YYYY-MM-DD date.',
+            'Cutoff date cannot be in the future.',
+            'Cutoff date can only move forward; earlier dates require an explicit backfill operation.'
         ]);
         if (allowed.has(message) || /^Possible duplicate requires review: [A-Za-z0-9._:/@-]+$/.test(message) || /^Amendment target changed since review: [A-Za-z0-9._:/@-]+$/.test(message)) return message;
         return 'Approval service request failed.';
