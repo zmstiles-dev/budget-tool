@@ -97,6 +97,7 @@ const reviewContext = vm.createContext({
         getElementById: id => reviewNodes[id],
         querySelectorAll: () => [{ dataset: { reviewId: 'candidate-1' } }],
     },
+    bankSyncError: '',
     reviewStore: { list: () => [{ id: 'candidate-1', amount: -4.25, description: 'Coffee', date: '2026-10-01', account: 'CFF', source: 'bank-csv', category: 'Restaurants' }] },
 });
 vm.runInContext(app.slice(app.indexOf('        function escapeHTML'), app.indexOf("        const STORAGE_KEY")), reviewContext);
