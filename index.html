@@ -799,6 +799,7 @@
         let lastPersistenceError = null;
         let syncAttemptGeneration = null;
         let bankSyncState = 'not configured';
+        let bankSyncError = '';
         let syncCutoffRevision = null;
         let syncCutoffDate = '';
         let providerLinkPending = null;
@@ -1324,44 +1325,62 @@
 
         async function runConfiguredOnOpenSync(expectedGeneration) {
             const service = window.transactionApprovalService;
-            if (window.TRANSACTION_SYNC_ENABLED !== true) { bankSyncState = 'not configured'; renderReviewInbox(); return; }
-            if (!service || service.serverBacked !== true || typeof service.sync !== 'function') { bankSyncState = 'disconnected'; renderReviewInbox(); return; }
+            if (window.TRANSACTION_SYNC_ENABLED !== true) { bankSyncError = ''; bankSyncState = 'not configured'; renderReviewInbox(); return; }
+            if (!service || service.serverBacked !== true || typeof service.sync !== 'function') { bankSyncError = ''; bankSyncState = 'disconnected'; renderReviewInbox(); return; }
             const generation = expectedGeneration === undefined ? authGeneration : expectedGeneration;
             const userAtStart = currentUser;
             if (syncAttemptGeneration === generation || !authLoadCurrent(generation, userAtStart)) return;
-            if (navigator.onLine === false) { bankSyncState = 'offline'; renderReviewInbox(); return; }
+            if (navigator.onLine === false) { bankSyncError = ''; bankSyncState = 'offline'; renderReviewInbox(); return; }
             if (typeof service.syncReadiness === 'function') {
                 try {
                     const readiness = await service.syncReadiness();
                     if (!authLoadCurrent(generation, userAtStart)) return;
-                    if (!readiness || readiness.ready !== true) { syncCutoffDate = ''; syncCutoffRevision = null; renderSyncSettings(); bankSyncState = 'not configured'; renderReviewInbox(); return; }
+                    if (!readiness || readiness.ready !== true) { syncCutoffDate = ''; syncCutoffRevision = null; bankSyncError = ''; renderSyncSettings(); bankSyncState = 'not configured'; renderReviewInbox(); return; }
                     syncCutoffDate = String(readiness.cutoffDate || '');
                     syncCutoffRevision = Number.isSafeInteger(readiness.cutoffRevision) ? readiness.cutoffRevision : readiness.revision;
                     renderSyncSettings();
                 } catch (_) {
                     if (!authLoadCurrent(generation, userAtStart)) return;
                     syncCutoffDate = ''; syncCutoffRevision = null; renderSyncSettings();
-                    bankSyncState = 'not configured'; renderReviewInbox(); return;
+                    bankSyncError = ''; bankSyncState = 'not configured'; renderReviewInbox(); return;
                 }
             }
             const connections = Array.isArray(window.TRANSACTION_SYNC_CONNECTIONS) ? window.TRANSACTION_SYNC_CONNECTIONS.map(String).map(value => value.trim()).filter(Boolean) : [];
-            if (!connections.length) { bankSyncState = 'not configured'; renderReviewInbox(); return; }
+            if (!connections.length) { bankSyncError = ''; bankSyncState = 'not configured'; renderReviewInbox(); return; }
             syncAttemptGeneration = generation;
             bankSyncState = 'syncing';
+            bankSyncError = '';
             renderReviewInbox();
+            let syncHadFailure = false;
+            let syncHadCooldown = false;
+            const syncFailures = [];
             for (const connectionKey of connections) {
                 if (!authLoadCurrent(generation, userAtStart)) return;
                 try {
                     await service.sync(connectionKey);
-                    bankSyncState = 'fresh';
                 } catch (error) {
-                    bankSyncState = 'sync error';
+                    const code = String(error && (error.code || error.error_code) || '').trim().toUpperCase();
+                    const message = String(error && error.message || error || '').trim();
+                    if (code === 'SYNC_COOLDOWN' || code === 'SYNC_IN_COOLDOWN' || code === 'COOLDOWN' || /sync is inside its cooldown window/i.test(message)) {
+                        syncHadCooldown = true;
+                        continue;
+                    }
+                    syncHadFailure = true;
                     const wrapped = new Error(`Bank sync failed for ${connectionKey}: ${error.message}`);
+                    syncFailures.push(wrapped.message);
                     if (error && error.diagnostic && typeof error.diagnostic === 'object') Object.defineProperty(wrapped, 'diagnostic', { value: error.diagnostic, enumerable: false, configurable: true });
                     reportPersistenceError(wrapped);
                     renderReviewInbox();
                 }
             }
+            // A cooldown is an expected repeat-open state. Preserve a real
+            // failure if another connection failed in this same pass, and do
+            // not let a later success overwrite that partial failure.
+            if (syncHadFailure) bankSyncState = 'sync error';
+            else if (syncHadCooldown) bankSyncState = 'cooldown';
+            else bankSyncState = 'fresh';
+            bankSyncError = syncFailures.join(' ');
+            renderReviewInbox();
             if (generation === authGeneration && currentUser) await loadProtectedReview(generation);
         }
 
@@ -3034,10 +3053,10 @@
             const selectedSet = new Set(selected);
             if (!candidates.length) {
                 list.innerHTML = '<div style="padding:16px;background:var(--surface-alt);border-radius:8px;color:var(--muted);">No new transactions are waiting for review. Importing or opening the app never adds a transaction automatically.</div>';
-                status.textContent = `No staged transactions. Bank sync: ${syncLabel}.`;
+                status.textContent = `No staged transactions. Bank sync: ${syncLabel}.${bankSyncError ? ` ${bankSyncError}` : ''}`;
             } else {
                 const total = candidates.filter(c => selected.includes(c.id)).reduce((sum, c) => sum + Number(c.amount || 0), 0);
-                status.textContent = `${candidates.length} staged · ${selected.length} selected · selected total ${total < 0 ? '-' : ''}$${Math.abs(total).toFixed(2)}. Review edits and possible overlaps before adding. Bank sync: ${syncLabel}.`;
+                status.textContent = `${candidates.length} staged · ${selected.length} selected · selected total ${total < 0 ? '-' : ''}$${Math.abs(total).toFixed(2)}. Review edits and possible overlaps before adding. Bank sync: ${syncLabel}.${bankSyncError ? ` ${bankSyncError}` : ''}`;
                 list.innerHTML = candidates.map(candidate => {
                     const details = Array.isArray(candidate.overlapDetails) ? candidate.overlapDetails : [];
                     const fallbackOverlap = candidate.overlap && candidate.overlap.length ? `<div style="color:#a65d00;font-size:0.8rem;">Possible overlap: ${candidate.overlap.length} existing observation(s). Review before adding.</div>` : '';

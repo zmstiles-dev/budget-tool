@@ -89,6 +89,38 @@ function createServer() {
     assert.equal(identityPanel.visible, true, 'Authenticated UI must show the current account identity.');
     assert.equal(identityPanel.email, 'captainicebow@gmail.com', 'Authenticated UI must show the verified account email.');
     assert.equal(identityPanel.switchVisible, true, 'Authenticated UI must expose explicit account switching.');
+    const syncCooldownSmoke = await page.evaluate(async () => {
+        const originalEnabled = window.TRANSACTION_SYNC_ENABLED;
+        const originalConnections = window.TRANSACTION_SYNC_CONNECTIONS;
+        const originalService = window.transactionApprovalService;
+        const originalAttempt = syncAttemptGeneration;
+        let mode = 'cooldown';
+        const calls = [];
+        window.TRANSACTION_SYNC_ENABLED = true;
+        window.TRANSACTION_SYNC_CONNECTIONS = ['chase', 'capital-one'];
+        window.transactionApprovalService = {
+            serverBacked: true,
+            async syncReadiness() { return { ready: true, cutoffDate: '2026-10-09', revision: 2 }; },
+            async sync(connectionKey) { calls.push(connectionKey); if (mode === 'cooldown' && connectionKey === 'chase') throw new Error('Sync is inside its cooldown window.'); if (mode === 'failure' && connectionKey === 'chase') throw new Error('Provider unavailable.'); return { staged: 0 }; },
+            async listPending() { return []; }
+        };
+        syncAttemptGeneration = null;
+        await runConfiguredOnOpenSync(authGeneration);
+        const cooldownResult = { state: bankSyncState, status: document.getElementById('reviewStatus').textContent, alerts: window.__alerts.slice(), calls: calls.slice() };
+        mode = 'failure';
+        syncAttemptGeneration = null;
+        await runConfiguredOnOpenSync(authGeneration);
+        const failureResult = { state: bankSyncState, status: document.getElementById('reviewStatus').textContent, alerts: window.__alerts.slice(), calls: calls.slice() };
+        window.TRANSACTION_SYNC_ENABLED = originalEnabled;
+        window.TRANSACTION_SYNC_CONNECTIONS = originalConnections;
+        window.transactionApprovalService = originalService;
+        syncAttemptGeneration = originalAttempt;
+        return { cooldownResult, failureResult };
+    });
+    assert.equal(syncCooldownSmoke.cooldownResult.state, 'cooldown', 'A repeated on-open sync inside the server cooldown is a normal UI state.');
+    assert.equal(syncCooldownSmoke.cooldownResult.alerts.length, 0, 'Expected sync cooldown must not alert or report a bank-sync failure.');
+    assert.equal(syncCooldownSmoke.failureResult.state, 'sync error', 'A genuine provider failure remains visible after another connection succeeds.');
+    assert.match(syncCooldownSmoke.failureResult.status, /Bank sync failed for chase: Provider unavailable/i);
     const reviewEditorSmoke = await page.evaluate(async () => {
         const originalService = window.transactionApprovalService;
         let editCalls = 0;
