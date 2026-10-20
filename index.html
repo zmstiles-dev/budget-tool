@@ -441,6 +441,18 @@
                 </div>
                 <label style="display:flex;align-items:center;gap:8px;margin-top:12px;font-size:0.85rem;color:var(--muted);"><input type="checkbox" id="allowReviewOverlaps"> Allow selected possible overlaps after reviewing them individually</label>
                 <div id="reviewList" style="margin-top:15px;"></div>
+                <div id="reviewBatchSummary" style="display:none;margin-top:14px;padding:14px;background:var(--surface-alt);border:1px solid var(--border);border-radius:8px;" aria-live="polite">
+                    <div style="font-weight:600;">Review summary</div>
+                    <div id="reviewBatchSummaryCounts" style="margin-top:5px;color:var(--muted);font-size:0.9rem;"></div>
+                    <div id="reviewBatchSummaryItems" style="margin-top:8px;font-size:0.86rem;"></div>
+                    <div id="reviewBatchSummaryMessage" style="margin-top:8px;color:var(--muted);font-size:0.85rem;"></div>
+                    <div style="display:flex;gap:8px;flex-wrap:wrap;margin-top:10px;">
+                        <button class="btn btn-primary" id="reviewBatchAdd" disabled>Add Transactions</button>
+                        <button class="btn btn-danger" id="reviewBatchReject" disabled>Reject reviewed</button>
+                        <button class="btn btn-secondary" id="reviewBatchContinue">Review remaining</button>
+                        <button class="btn btn-secondary" id="reviewBatchClose">Close and hold</button>
+                    </div>
+                </div>
             </div>
             <div class="card">
                 <h3>Import Transactions</h3>
@@ -586,8 +598,8 @@
             <div style="display: flex; gap: 10px; justify-content: flex-end; margin-top: 20px;">
                 <button class="btn btn-danger" id="deleteTransaction">Delete</button>
                 <button class="btn btn-secondary" id="splitTransaction">Split</button>
-                <button class="btn btn-secondary" id="reviewSkip" style="display:none;">Hold for later</button>
-                <button class="btn btn-danger" id="reviewReject" style="display:none;">Reject</button>
+                <button class="btn btn-secondary" id="reviewSkip" style="display:none;">Hold &amp; next</button>
+                <button class="btn btn-danger" id="reviewReject" style="display:none;">Mark for rejection</button>
                 <button class="btn btn-secondary" id="reviewClose" style="display:none;">Close</button>
                 <button class="btn btn-success" id="saveTransaction">Approve</button>
             </div>
@@ -1572,6 +1584,7 @@
         let categoryModalCandidateRevision = null;
         let categoryModalSession = 0;
         let categoryModalBusy = false;
+        let reviewBatch = null;
 
         const accountMap = { ...TransactionConfig.legacyAccountAliases };
 
@@ -1594,6 +1607,7 @@
             newImportAccount = '';
             pendingImport = [];
             pendingImportBudgets = {};
+            clearReviewBatch();
             categoryModalMode = 'csv';
             categoryModalReviewIds = [];
             categoryModalGeneration = authGeneration;
@@ -3039,6 +3053,154 @@
 
         const PROVIDER_PENDING_REVIEW_MESSAGE = 'This transaction is still pending with the bank and cannot be added until it posts.';
 
+        function reviewBatchUserKey() {
+            return currentUser && String(currentUser.uid || currentUser.email || '').trim();
+        }
+
+        function ensureReviewBatch() {
+            const userKey = reviewBatchUserKey();
+            if (!userKey) return null;
+            if (!reviewBatch || reviewBatch.userKey !== userKey) {
+                reviewBatch = {
+                    userKey,
+                    generation: authGeneration,
+                    idempotencyKey: '',
+                    approvalFingerprint: '',
+                    add: new Map(),
+                    reject: new Map(),
+                    hold: new Map(),
+                    busy: false,
+                    approvalBlocked: false,
+                    approvalWarning: ''
+                };
+            }
+            return reviewBatch;
+        }
+
+        function reviewBatchFingerprint(batch) {
+            return JSON.stringify(reviewBatchEntries('add').map(entry => [entry.id, entry.revision]).sort((left, right) => `${left[0]}:${left[1]}`.localeCompare(`${right[0]}:${right[1]}`)));
+        }
+
+        function refreshReviewBatchIdempotencyKey(batch) {
+            const fingerprint = reviewBatchFingerprint(batch);
+            if (batch.approvalFingerprint === fingerprint && batch.idempotencyKey) return;
+            batch.approvalFingerprint = fingerprint;
+            batch.idempotencyKey = `review-batch-${providerLinkId()}`;
+        }
+
+        function clearReviewBatch() {
+            reviewBatch = null;
+            if (typeof renderReviewBatchSummary === 'function') renderReviewBatchSummary();
+        }
+
+        function reviewBatchDecisionFor(id) {
+            const batch = typeof reviewBatch !== 'undefined' ? reviewBatch : null;
+            const key = String(id || '');
+            if (!batch || !key) return '';
+            if (batch.add.has(key)) return 'add';
+            if (batch.reject.has(key)) return 'reject';
+            if (batch.hold.has(key)) return 'hold';
+            return '';
+        }
+
+        function reviewBatchQueue(id, decision) {
+            const batch = ensureReviewBatch();
+            const candidate = id && reviewStore.get(id);
+            if (!batch || !candidate || !['pending', 'deferred'].includes(candidate.status)) throw new Error('This review row is no longer available. Reload the review inbox.');
+            if (batch.approvalBlocked) throw new Error(batch.approvalWarning || 'Reload the review inbox before changing this batch.');
+            const key = String(id);
+            batch.add.delete(key);
+            batch.reject.delete(key);
+            batch.hold.delete(key);
+            batch[decision].set(key, { id: key, revision: candidate.revision, candidate: JSON.parse(JSON.stringify(candidate)) });
+            refreshReviewBatchIdempotencyKey(batch);
+            renderReviewBatchSummary();
+        }
+
+        function reviewBatchUnqueue(id) {
+            if (typeof reviewBatch === 'undefined' || !reviewBatch) return;
+            const key = String(id || '');
+            reviewBatch.add.delete(key);
+            reviewBatch.reject.delete(key);
+            reviewBatch.hold.delete(key);
+            renderReviewBatchSummary();
+        }
+
+        function reviewBatchEntries(decision) {
+            const batch = typeof reviewBatch !== 'undefined' ? reviewBatch : null;
+            return batch && batch[decision] ? [...batch[decision].values()] : [];
+        }
+
+        function reviewBatchRemainingCandidates() {
+            return reviewStore.list().filter(candidate => {
+                return (candidate.status === 'pending' || candidate.status === 'deferred') && !reviewBatchDecisionFor(candidate.id);
+            });
+        }
+
+        function reviewBatchSelectionReason(candidate) {
+            if (typeof reviewBatch !== 'undefined' && reviewBatch && reviewBatch.busy) return 'A review action is in progress. Please wait for it to finish.';
+            const decision = reviewBatchDecisionFor(candidate && candidate.id);
+            if (decision === 'add') return 'Already queued to add at the end of this review.';
+            if (decision === 'reject') return 'Already queued for rejection at the end of this review.';
+            if (decision === 'hold') return 'Already held for later in this review.';
+            return reviewCandidateSelectionReason(candidate);
+        }
+
+        function reviewBatchCurrentEntries(decision) {
+            return reviewBatchEntries(decision).map(entry => ({ entry, candidate: reviewStore.get(entry.id) }));
+        }
+
+        function renderReviewBatchSummary() {
+            const panel = document.getElementById('reviewBatchSummary');
+            if (!panel) return;
+            const batch = typeof reviewBatch !== 'undefined' ? reviewBatch : null;
+            if (batch) {
+                ['add', 'reject', 'hold'].forEach(decision => {
+                    [...batch[decision].keys()].forEach(id => {
+                        const candidate = reviewStore.get(id);
+                        if (!candidate || !['pending', 'deferred'].includes(candidate.status)) batch[decision].delete(id);
+                    });
+                });
+            }
+            const add = reviewBatchEntries('add');
+            const reject = reviewBatchEntries('reject');
+            const hold = reviewBatchEntries('hold');
+            if (!batch || (!add.length && !reject.length && !hold.length)) {
+                panel.style.display = 'none';
+                return;
+            }
+            panel.style.display = '';
+            const remaining = reviewBatchRemainingCandidates();
+            const counts = document.getElementById('reviewBatchSummaryCounts');
+            if (counts) counts.textContent = `Add ${add.length} · Reject ${reject.length} · Hold ${hold.length}${remaining.length ? ` · ${remaining.length} remaining` : ''}`;
+            const items = document.getElementById('reviewBatchSummaryItems');
+            if (items) {
+                const section = (label, entries) => entries.length
+                    ? `<div><strong>${label}:</strong> ${entries.map(entry => escapeHTML((entry.candidate && (entry.candidate.description || entry.candidate.merchant)) || entry.id)).join(', ')}</div>`
+                    : '';
+                items.innerHTML = section('Add', add) + section('Reject', reject) + section('Hold', hold);
+            }
+            const message = document.getElementById('reviewBatchSummaryMessage');
+            if (message) {
+                message.textContent = batch.approvalWarning || (remaining.length
+                    ? 'Finish reviewing the remaining rows before applying these decisions.'
+                    : 'These choices are saved for this review session. Budget changes happen only after a final confirmation.');
+            }
+            const canFinalize = remaining.length === 0 && !batch.approvalBlocked;
+            const addButton = document.getElementById('reviewBatchAdd');
+            const rejectButton = document.getElementById('reviewBatchReject');
+            const continueButton = document.getElementById('reviewBatchContinue');
+            const closeButton = document.getElementById('reviewBatchClose');
+            if (addButton) addButton.disabled = batch.busy || !canFinalize || !add.length;
+            if (rejectButton) rejectButton.disabled = batch.busy || !canFinalize || !reject.length;
+            if (continueButton) continueButton.disabled = batch.busy || !remaining.length;
+            if (closeButton) closeButton.disabled = batch.busy;
+            ['reviewOpenEditor', 'addSelectedTransactions', 'deferSelectedTransactions', 'rejectSelectedTransactions', 'cancelReview'].forEach(id => {
+                const button = document.getElementById(id);
+                if (button && batch.busy) button.disabled = true;
+            });
+        }
+
         function reviewCandidateIsProviderPending(candidate) {
             return !!(candidate && (candidate.providerPending === true || candidate.pending === true));
         }
@@ -3084,7 +3246,7 @@
         }
 
         function reviewSelectionIds() {
-            const selectionReasonFor = candidate => typeof reviewCandidateSelectionReason === 'function' ? reviewCandidateSelectionReason(candidate) : '';
+            const selectionReasonFor = candidate => typeof reviewBatchSelectionReason === 'function' ? reviewBatchSelectionReason(candidate) : (typeof reviewCandidateSelectionReason === 'function' ? reviewCandidateSelectionReason(candidate) : '');
             const selectable = candidate => !!(candidate && (!candidate.status || candidate.status === 'pending' || candidate.status === 'deferred') && !selectionReasonFor(candidate));
             const candidateFor = id => typeof reviewStore.get === 'function' ? reviewStore.get(id) : (reviewStore.list() || []).find(item => item && item.id === id);
             return Array.from(document.querySelectorAll('#reviewList input.review-select:checked'))
@@ -3108,7 +3270,7 @@
         function renderReviewInbox() {
             const list = document.getElementById('reviewList');
             if (!list) return;
-            const selectionReasonFor = candidate => typeof reviewCandidateSelectionReason === 'function' ? reviewCandidateSelectionReason(candidate) : '';
+            const selectionReasonFor = candidate => typeof reviewBatchSelectionReason === 'function' ? reviewBatchSelectionReason(candidate) : (typeof reviewCandidateSelectionReason === 'function' ? reviewCandidateSelectionReason(candidate) : '');
             const displayCategoryFor = candidate => typeof reviewDisplayCategory === 'function' ? reviewDisplayCategory(candidate) : (candidate && candidate.category || 'Uncategorized');
             const status = document.getElementById('reviewStatus');
             const syncLabel = typeof bankSyncState === 'undefined' ? 'not configured' : bankSyncState;
@@ -3128,11 +3290,12 @@
                     const selectionReasonText = selectionReasonFor(candidate);
                     const pendingReason = selectionReasonText ? `<div style="color:#a65d00;font-size:0.8rem;">${escapeHTML(selectionReasonText)}</div>` : '';
                     const selectionReason = selectionReasonText ? ` aria-label="${escapeHTML(candidate.description)} — ${escapeHTML(selectionReasonText)}" disabled title="${escapeHTML(selectionReasonText)}"` : ` aria-label="Select ${escapeHTML(candidate.description)}"`;
+                    const batchBusyAttr = typeof reviewBatch !== 'undefined' && reviewBatch && reviewBatch.busy ? ' disabled' : '';
                     return `<div class="review-row" data-review-row="${escapeHTML(candidate.id)}" style="display:grid;grid-template-columns:auto 1fr auto;gap:10px;align-items:start;padding:12px 0;border-bottom:1px solid var(--border);">
                         <input class="review-select" type="checkbox" data-review-id="${escapeHTML(candidate.id)}"${selectionReason}${selectedSet.has(candidate.id) ? ' checked' : ''}>
                         <div style="min-width:0;"><div style="font-weight:600;">${escapeHTML(candidate.description)}</div><div style="font-size:0.82rem;color:var(--muted);">${escapeHTML(candidate.date)} · ${escapeHTML(candidate.account)} · ${escapeHTML(reviewCandidateLabel(candidate))}</div>${pendingReason}${overlap}</div>
                         <div style="text-align:right;white-space:nowrap;"><div style="font-weight:600;">${candidate.amount < 0 ? '-' : ''}$${Math.abs(Number(candidate.amount)).toFixed(2)}</div><div style="font-size:0.82rem;color:var(--muted);">${escapeHTML(displayCategoryFor(candidate))}</div></div>
-                        <div style="grid-column:2 / -1;display:flex;gap:8px;flex-wrap:wrap;"><button class="btn btn-secondary review-edit" data-review-id="${escapeHTML(candidate.id)}" style="padding:4px 9px;">Review</button><button class="btn btn-secondary review-split" data-review-id="${escapeHTML(candidate.id)}" style="padding:4px 9px;">Split</button><button class="btn btn-secondary review-defer" data-review-id="${escapeHTML(candidate.id)}" style="padding:4px 9px;">Defer</button><button class="btn btn-danger review-reject" data-review-id="${escapeHTML(candidate.id)}" style="padding:4px 9px;">Reject</button></div>
+                        <div style="grid-column:2 / -1;display:flex;gap:8px;flex-wrap:wrap;"><button class="btn btn-secondary review-edit" data-review-id="${escapeHTML(candidate.id)}" style="padding:4px 9px;"${batchBusyAttr}>Review</button><button class="btn btn-secondary review-split" data-review-id="${escapeHTML(candidate.id)}" style="padding:4px 9px;"${batchBusyAttr}>Split</button><button class="btn btn-secondary review-defer" data-review-id="${escapeHTML(candidate.id)}" style="padding:4px 9px;"${batchBusyAttr}>Defer</button><button class="btn btn-danger review-reject" data-review-id="${escapeHTML(candidate.id)}" style="padding:4px 9px;"${batchBusyAttr}>Reject</button></div>
                     </div>`;
                 }).join('');
             }
@@ -3142,6 +3305,7 @@
             if (reviewEditor) reviewEditor.disabled = candidates.length === 0;
             const cancel = document.getElementById('cancelReview');
             if (cancel) cancel.disabled = candidates.length === 0;
+            if (typeof renderReviewBatchSummary === 'function') renderReviewBatchSummary();
         }
 
         async function loadProtectedReview(expectedGeneration) {
@@ -3399,6 +3563,7 @@
         }
 
         async function approveSelectedReviewTransactions() {
+            if (reviewBatch && reviewBatch.busy) return;
             const ids = reviewSelectionIds();
             if (!ids.length) return;
             try {
@@ -3437,23 +3602,12 @@
             if (categoryModalMode !== 'review' || categoryModalBusy) return;
             const current = currentReviewModalCandidate();
             if (!current) { closeCategoryReviewModal(); renderReviewInbox(); return; }
-            if (!window.confirm('Reject this transaction? It will stay out of your budget.')) return;
-            const generation = categoryModalGeneration;
-            const user = categoryModalUser;
-            const session = categoryModalSession;
-            const service = window.transactionApprovalService;
-            setReviewModalBusy(true);
             try {
-                if (service && service.serverBacked === true) await service.reject(current.id, current.candidate.revision);
-                if (generation !== authGeneration || user !== currentUser) throw new Error('Authentication changed before review rejection was acknowledged.');
-                if (categoryModalSession !== session || categoryModalMode !== 'review') throw new Error('This review editor was closed before rejection completed. Reload the review inbox.');
-                reviewStore.reject(current.id, currentUser?.email);
+                reviewBatchQueue(current.id, 'reject');
                 renderReviewInbox();
                 advanceReviewModalAfterDecision(current.id);
             } catch (error) {
                 alert(`Reject failed: ${error.message}`);
-            } finally {
-                if (categoryModalSession === session) setReviewModalBusy(false);
             }
         }
 
@@ -3498,6 +3652,7 @@
                 if (generation !== authGeneration || user !== currentUser) throw new Error('Authentication changed before review hold was acknowledged.');
                 if (categoryModalSession !== session || categoryModalMode !== 'review') throw new Error('This review editor was closed before hold completed. Reload the review inbox.');
                 reviewStore.defer(current.id, currentUser?.email);
+                reviewBatchQueue(current.id, 'hold');
                 renderReviewInbox();
                 advanceReviewModalAfterDecision(current.id);
             } catch (error) {
@@ -3508,41 +3663,155 @@
         }
 
         async function approveCurrentReviewCandidate() {
-            if (categoryModalMode !== 'review' || categoryModalBusy) return;
-            const current = currentReviewModalCandidate();
-            if (!current) { closeCategoryReviewModal(); renderReviewInbox(); return; }
-            const reason = reviewCandidateSelectionReason(current.candidate);
-            if (reason) { alert(reason); return; }
-            const details = Array.isArray(current.candidate.overlapDetails) ? current.candidate.overlapDetails : [];
-            const evidence = details.length
-                ? details.map(detail => `${detail.matched.date} · ${detail.matched.description || detail.matched.merchant || 'Existing observation'} · ${detail.amount < 0 ? '-' : ''}$${Math.abs(Number(detail.amount)).toFixed(2)} · ${detail.account}`).join(' | ')
-                : (current.candidate.overlap && current.candidate.overlap.length ? `${current.candidate.overlap.length} existing observation(s)` : '');
-            const confirmation = evidence
-                ? `Possible overlap: ${evidence}. I reviewed this possible overlap and want to add the transaction to my budget.`
-                : 'Add this transaction to your budget? This will change your accepted transaction history.';
-            if (!window.confirm(confirmation)) return;
-            const generation = categoryModalGeneration;
-            const user = categoryModalUser;
-            const session = categoryModalSession;
-            setReviewModalBusy(true);
-            try {
-                const { result } = await approveReviewIds([current.id], {
-                    allowOverlap: !!evidence,
-                    idempotencyKey: `review-${current.id}-${current.candidate.revision}`
-                });
-                if (generation !== authGeneration || user !== currentUser) throw new Error('Authentication changed before approval was acknowledged.');
-                if (categoryModalSession !== session || categoryModalMode !== 'review') throw new Error('This review editor was closed before approval completed. Reload the review inbox.');
-                if (!result || !Array.isArray(result.accepted) || result.accepted.length !== 1) throw new Error('Approval service did not acknowledge this transaction.');
-                advanceReviewModalAfterDecision(current.id);
-            } catch (error) {
-                alert(`${error.durableApprovalAcknowledged ? 'Approval was saved on the server, but this screen could not confirm the local install. Reload before retrying' : 'Nothing was added'}: ${error.message}`);
+            if (categoryModalMode === 'review' && !categoryModalBusy) alert('Save & next queues this reviewed transaction. Add Transactions applies the queued choices at the end.');
+        }
+
+        function reviewBatchValidation(decision) {
+            const batch = ensureReviewBatch();
+            if (!batch) return { batch: null, entries: [], invalid: ['Sign in again before applying the review summary.'] };
+            const entries = reviewBatchCurrentEntries(decision);
+            const invalid = [];
+            entries.forEach(({ entry, candidate }) => {
+                if (!candidate || !['pending', 'deferred'].includes(candidate.status)) {
+                    invalid.push(`${entry.candidate && entry.candidate.description || entry.id} is no longer waiting for review.`);
+                    return;
+                }
+                if (candidate.revision !== entry.revision) {
+                    invalid.push(`${candidate.description || entry.id} changed after it was reviewed. Reopen it before applying the summary.`);
+                    return;
+                }
+                if (decision === 'add') {
+                    const reason = reviewCandidateSelectionReason(candidate);
+                    if (reason) invalid.push(`${candidate.description || entry.id}: ${reason}`);
+                }
+            });
+            return { batch, entries, invalid };
+        }
+
+        function reviewBatchOverlapEvidence(candidate) {
+            const details = Array.isArray(candidate && candidate.overlapDetails) ? candidate.overlapDetails : [];
+            if (details.length) return details.map(detail => `${detail.matched.date} · ${detail.matched.description || detail.matched.merchant || 'Existing observation'} · ${detail.amount < 0 ? '-' : ''}$${Math.abs(Number(detail.amount)).toFixed(2)} · ${detail.account}`).join(' | ');
+            return candidate && candidate.overlap && candidate.overlap.length ? `${candidate.overlap.length} existing observation(s)` : '';
+        }
+
+        async function finalizeReviewBatchAdd() {
+            const validation = reviewBatchValidation('add');
+            if (validation.batch && validation.batch.busy) return;
+            if (validation.batch && validation.batch.approvalBlocked) { alert(validation.batch.approvalWarning || 'Reload the review inbox before retrying this batch.'); return; }
+            if (!validation.batch || validation.invalid.length) {
+                if (validation.invalid.length) alert(validation.invalid.join('\n'));
                 renderReviewInbox();
+                return;
+            }
+            if (reviewBatchRemainingCandidates().length) { alert('Review the remaining transactions before adding the batch.'); return; }
+            const overlapping = validation.entries.filter(({ candidate }) => reviewBatchOverlapEvidence(candidate));
+            for (const { candidate } of overlapping) {
+                const evidence = reviewBatchOverlapEvidence(candidate);
+                if (!window.confirm(`Possible overlap for “${candidate.description}”: ${evidence}. I reviewed this transaction and want to include it in the batch.`)) return;
+            }
+            const ids = validation.entries.map(({ entry }) => entry.id);
+            if (!ids.length) return;
+            if (!window.confirm(`Add ${ids.length} reviewed transaction${ids.length === 1 ? '' : 's'} to your budget? This changes accepted transaction history.`)) return;
+            const batch = validation.batch;
+            refreshReviewBatchIdempotencyKey(batch);
+            batch.busy = true;
+            renderReviewBatchSummary();
+            const generation = authGeneration;
+            const user = currentUser;
+            const addButton = document.getElementById('reviewBatchAdd');
+            const rejectButton = document.getElementById('reviewBatchReject');
+            if (addButton) addButton.disabled = true;
+            if (rejectButton) rejectButton.disabled = true;
+            try {
+                const { result } = await approveReviewIds(ids, {
+                    allowOverlap: overlapping.length > 0,
+                    idempotencyKey: batch.idempotencyKey
+                });
+                if (generation !== authGeneration || user !== currentUser) throw new Error('Authentication changed before the batch approval was acknowledged.');
+                if (!result || !Array.isArray(result.accepted) || result.accepted.length !== ids.length) throw new Error('Approval service did not acknowledge every reviewed transaction.');
+                ids.forEach(id => batch.add.delete(id));
+                batch.approvalWarning = '';
+                renderReviewInbox();
+                alert(`Added ${result.accepted.length} reviewed transaction${result.accepted.length === 1 ? '' : 's'} to the budget.`);
+            } catch (error) {
+                if (error && error.durableApprovalAcknowledged) {
+                    batch.approvalBlocked = true;
+                    batch.approvalWarning = 'The server acknowledged this batch, but this screen could not install the local result. Reload before retrying so it cannot be added twice.';
+                }
+                alert(`${error && error.durableApprovalAcknowledged ? 'The batch was saved on the server, but this screen could not confirm the local install. Reload before retrying' : 'Nothing was added'}: ${error.message}`);
+                renderReviewInbox();
+                if (lastPersistenceError) reportPersistenceError(lastPersistenceError);
             } finally {
-                if (categoryModalSession === session) setReviewModalBusy(false);
+                batch.busy = false;
+                renderReviewInbox();
+                renderReviewBatchSummary();
             }
         }
 
+        async function finalizeReviewBatchReject() {
+            const validation = reviewBatchValidation('reject');
+            if (validation.batch && validation.batch.busy) return;
+            if (!validation.batch || validation.invalid.length) {
+                if (validation.invalid.length) alert(validation.invalid.join('\n'));
+                renderReviewInbox();
+                return;
+            }
+            if (reviewBatchRemainingCandidates().length) { alert('Review the remaining transactions before rejecting the batch.'); return; }
+            const ids = validation.entries.map(({ entry }) => entry.id);
+            if (!ids.length) return;
+            const descriptions = validation.entries.map(({ candidate }) => candidate.description || candidate.merchant || 'Transaction').join(', ');
+            if (!window.confirm(`Reject ${ids.length} reviewed transaction${ids.length === 1 ? '' : 's'}? They will stay out of your budget.\n\n${descriptions}`)) return;
+            const batch = validation.batch;
+            batch.busy = true;
+            renderReviewBatchSummary();
+            const generation = authGeneration;
+            const user = currentUser;
+            const successful = [];
+            const failed = [];
+            let stoppedForAuth = false;
+            for (const { entry } of validation.entries) {
+                const candidate = reviewStore.get(entry.id);
+                try {
+                    if (batch !== reviewBatch || generation !== authGeneration || user !== currentUser) {
+                        stoppedForAuth = true;
+                        break;
+                    }
+                    const service = window.transactionApprovalService;
+                    if (!service || service.serverBacked !== true || typeof service.reject !== 'function') throw new Error('Review rejection service is unavailable. No rows were rejected.');
+                    const acknowledged = await service.reject(entry.id, entry.revision);
+                    if (!acknowledged || acknowledged.status !== 'rejected') throw new Error('Review rejection was not acknowledged by the server.');
+                    if (generation !== authGeneration || user !== currentUser) throw new Error('Authentication changed before review rejection was acknowledged.');
+                    reviewStore.reject(entry.id, currentUser?.email);
+                    batch.reject.delete(entry.id);
+                    successful.push(candidate && (candidate.description || entry.id));
+                } catch (error) {
+                    failed.push({ description: candidate && (candidate.description || entry.id), message: error.message });
+                    if (generation !== authGeneration || user !== currentUser || batch !== reviewBatch) {
+                        stoppedForAuth = true;
+                        break;
+                    }
+                }
+            }
+            batch.busy = false;
+            if (stoppedForAuth) {
+                if (batch === reviewBatch) batch.approvalWarning = 'Authentication changed while rejecting this batch. Reload the review inbox before retrying the remaining choices.';
+                renderReviewInbox();
+                alert('Authentication changed while rejecting the batch. No further rows were sent, and the remaining choices were kept for review.');
+                return;
+            }
+            renderReviewInbox();
+            if (failed.length && successful.length) {
+                alert(`Rejected ${successful.length} transaction${successful.length === 1 ? '' : 's'}. ${failed.length} could not be rejected and remain queued: ${failed.map(item => `${item.description}: ${item.message}`).join(' | ')}`);
+            } else if (failed.length) {
+                alert(`No transactions were rejected. ${failed.map(item => `${item.description}: ${item.message}`).join(' | ')}`);
+            } else {
+                alert(`Rejected ${successful.length} reviewed transaction${successful.length === 1 ? '' : 's'}.`);
+            }
+            renderReviewBatchSummary();
+        }
+
         async function mutateSelectedReviews(action) {
+            if (reviewBatch && reviewBatch.busy) return;
             const ids = reviewSelectionIds();
             if (!ids.length) return;
             for (const id of ids) {
@@ -3558,10 +3827,12 @@
 
         document.getElementById('reviewList').addEventListener('change', renderReviewInbox);
         document.getElementById('reviewOpenEditor').addEventListener('click', () => {
+            if (reviewBatch && reviewBatch.busy) return;
             const selected = reviewSelectionIds();
             openReviewCategoryModal(selected[0]);
         });
         document.getElementById('reviewList').addEventListener('click', async event => {
+            if (reviewBatch && reviewBatch.busy) return;
             const button = event.target.closest('button[data-review-id]');
             if (!button) return;
             const id = button.dataset.reviewId;
@@ -3574,11 +3845,13 @@
                     if (service && service.serverBacked === true) await service.reject(id, item.revision);
                     if (mutationGeneration !== authGeneration || mutationUser !== currentUser) throw new Error('Authentication changed before review mutation was acknowledged.');
                     reviewStore.reject(id, currentUser?.email);
+                    reviewBatchUnqueue(id);
                 }
                 if (button.classList.contains('review-defer')) {
                     if (service && service.serverBacked === true) await service.defer(id, item.revision);
                     if (mutationGeneration !== authGeneration || mutationUser !== currentUser) throw new Error('Authentication changed before review mutation was acknowledged.');
                     reviewStore.defer(id, currentUser?.email);
+                    reviewBatchUnqueue(id);
                 }
                 if (button.classList.contains('review-edit')) {
                     openReviewCategoryModal(id);
@@ -3612,7 +3885,23 @@
             if (service && service.serverBacked === true) await service.reject(id, item.revision);
             reviewStore.reject(id, currentUser?.email);
         }));
+        document.getElementById('reviewBatchAdd').addEventListener('click', finalizeReviewBatchAdd);
+        document.getElementById('reviewBatchReject').addEventListener('click', finalizeReviewBatchReject);
+        document.getElementById('reviewBatchContinue').addEventListener('click', () => {
+            if (reviewBatch && reviewBatch.busy) return;
+            const next = reviewBatchRemainingCandidates()[0];
+            if (next) openReviewCategoryModal(next.id);
+        });
+        document.getElementById('reviewBatchClose').addEventListener('click', () => {
+            if (!reviewBatch || reviewBatch.busy) return;
+            const queued = reviewBatch.add.size + reviewBatch.reject.size;
+            if (queued && !window.confirm(`Close review and leave ${queued} queued choice${queued === 1 ? '' : 's'} pending?`)) return;
+            closeCategoryReviewModal();
+            clearReviewBatch();
+            renderReviewInbox();
+        });
         document.getElementById('cancelReview').addEventListener('click', async () => {
+            if (reviewBatch && reviewBatch.busy) return;
             if (!confirm('Cancel this review? Staged transactions will be discarded and accepted data will remain unchanged.')) return;
             try {
                 const service = window.transactionApprovalService;
@@ -3900,8 +4189,14 @@
         }
 
         function openReviewCategoryModal(id, candidateIds) {
+            if (reviewBatch && reviewBatch.busy) return;
+            if (reviewBatch && reviewBatch.approvalBlocked) {
+                alert(reviewBatch.approvalWarning || 'Reload the review inbox before changing this batch.');
+                return;
+            }
+            if (id && reviewBatchDecisionFor(id)) reviewBatchUnqueue(id);
             const allowedIds = Array.isArray(candidateIds) && candidateIds.length ? new Set(candidateIds.map(String)) : null;
-            const candidates = reviewStore.list().filter(item => (item.status === 'pending' || item.status === 'deferred') && (!allowedIds || allowedIds.has(item.id)));
+            const candidates = reviewStore.list().filter(item => (item.status === 'pending' || item.status === 'deferred') && !reviewBatchDecisionFor(item.id) && (!allowedIds || allowedIds.has(item.id)));
             if (!candidates.length) return;
             categoryModalMode = 'review';
             categoryModalReviewIds = candidates.map(item => item.id);
@@ -3928,6 +4223,11 @@
             const hold = document.getElementById('reviewDecisionHold');
             const reason = document.getElementById('reviewDecisionReason');
             if (!panel || !approve || !reject || !hold) return;
+            if (categoryModalMode === 'review') {
+                panel.style.display = 'none';
+                hideReviewDecisionPanel();
+                return;
+            }
             const selectionReason = reviewCandidateSelectionReason(candidate);
             approve.disabled = !!selectionReason;
             reject.disabled = false;
@@ -3947,6 +4247,11 @@
             if (!categoryModalReviewIds.length) {
                 closeCategoryReviewModal();
                 renderReviewInbox();
+                const summary = document.getElementById('reviewBatchSummary');
+                if (summary && summary.style.display !== 'none') {
+                    summary.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+                    document.getElementById('reviewBatchAdd')?.focus();
+                }
                 return;
             }
             showCategoryModal(Math.min(index < 0 ? currentTransactionIndex : index, categoryModalReviewIds.length - 1));
@@ -3965,11 +4270,12 @@
             document.getElementById('reviewReject').style.display = 'none';
             document.getElementById('reviewClose').style.display = 'none';
             hideReviewDecisionPanel();
+            renderReviewBatchSummary();
         }
 
         function showCategoryModal(index) {
             const reviewMode = categoryModalMode === 'review';
-            const reviewCandidates = reviewMode ? categoryModalReviewIds.map(id => reviewStore.get(id)).filter(item => item && (item.status === 'pending' || item.status === 'deferred')) : [];
+            const reviewCandidates = reviewMode ? categoryModalReviewIds.map(id => reviewStore.get(id)).filter(item => item && (item.status === 'pending' || item.status === 'deferred') && !reviewBatchDecisionFor(item.id)) : [];
             const items = reviewMode ? reviewCandidates : pendingImport;
             if (index >= items.length) {
                 if (reviewMode) closeCategoryReviewModal();
@@ -4042,7 +4348,7 @@
             document.getElementById('reviewSkip').style.display = reviewMode ? '' : 'none';
             document.getElementById('reviewReject').style.display = reviewMode ? '' : 'none';
             document.getElementById('reviewClose').style.display = reviewMode ? '' : 'none';
-            document.getElementById('saveTransaction').textContent = reviewMode ? 'Save & choose action' : 'Approve';
+            document.getElementById('saveTransaction').textContent = reviewMode ? 'Save & next' : 'Approve';
             document.getElementById('saveTransaction').disabled = false;
             setReviewModalBusy(false);
             hideReviewDecisionPanel();
@@ -4087,6 +4393,8 @@
                     alert('Choose an existing budget category for provider transactions. New categories are not added automatically.');
                     return;
                 }
+                const selectionReason = reviewCandidateSelectionReason(current);
+                if (selectionReason) { alert(selectionReason); return; }
                 const patch = { description, merchant: merchant || description, amount, date, category, account, payment_method: account, type };
                 const generation = categoryModalGeneration;
                 const user = categoryModalUser;
@@ -4104,9 +4412,9 @@
                         if (generation !== authGeneration || user !== currentUser) throw new Error('Authentication changed before review edit was acknowledged.');
                         if (categoryModalSession !== session || categoryModalMode !== 'review') throw new Error('This review editor was closed before the save completed. Reload the review inbox.');
                         reviewStore.edit(candidateId, patch, expectedRevision);
+                        reviewBatchQueue(candidateId, 'add');
                         renderReviewInbox();
-                        showCategoryModal(currentTransactionIndex);
-                        showReviewDecisionPanel(reviewStore.get(candidateId));
+                        advanceReviewModalAfterDecision(candidateId);
                     } catch (error) {
                         alert(`Review edit failed: ${error.message}`);
                     } finally {
@@ -4591,6 +4899,7 @@
             refreshAuthIdentityUi();
             pendingReviewBudgets.clear();
             reviewStore.clear();
+            clearReviewBatch();
             if (user) {
                 currentUser = user;
                 refreshAuthIdentityUi();

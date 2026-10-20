@@ -128,6 +128,7 @@ function createServer() {
         let rejectEdit = false;
         window.transactionApprovalService = { serverBacked: true, async edit(id, patch, revision) { editCalls += 1; if (rejectEdit) throw new Error('Synthetic stale review edit.'); successfulEdits += 1; return { id, ...patch, revision: revision + 1 }; }, async defer() {} };
         reviewStore.clear();
+        clearReviewBatch();
         const staged = reviewStore.stage([{
             sourceId: 'ui-review-editor', date: '2026-10-10', description: 'Review me', merchant: 'Review merchant', amount: -12.34,
             category: 'Restaurants', account: 'Checking', payment_method: 'Checking', type: 'expense'
@@ -135,16 +136,16 @@ function createServer() {
         renderReviewInbox();
         document.querySelector('button.review-edit').click();
         await new Promise(resolve => setTimeout(resolve, 0));
-        const opened = document.getElementById('categoryModal').classList.contains('active') && document.getElementById('saveTransaction').textContent === 'Save & choose action';
+        const opened = document.getElementById('categoryModal').classList.contains('active') && document.getElementById('saveTransaction').textContent === 'Save & next';
         document.getElementById('modalDescription').value = 'Edited review row';
         document.getElementById('modalMerchant').value = 'Edited merchant';
         document.getElementById('modalAmount').value = '-13.34';
         document.getElementById('saveTransaction').click();
         await new Promise(resolve => setTimeout(resolve, 0));
         const saved = reviewStore.get(staged.id);
-        const decisionVisible = getComputedStyle(document.getElementById('reviewDecisionPanel')).display !== 'none' && !document.getElementById('reviewDecisionApprove').disabled;
-        document.getElementById('reviewDecisionHold').click();
-        await new Promise(resolve => setTimeout(resolve, 0));
+        const queued = reviewBatch && reviewBatch.add.has(staged.id);
+        const decisionVisible = getComputedStyle(document.getElementById('reviewDecisionPanel')).display !== 'none';
+        const summary = { visible: getComputedStyle(document.getElementById('reviewBatchSummary')).display !== 'none', counts: document.getElementById('reviewBatchSummaryCounts').textContent };
         const acceptedCountBeforeRejectedEdit = transactions.length;
         const rejectedStage = reviewStore.stage([{
             sourceId: 'ui-review-editor-rejected', date: '2026-10-11', description: 'Reject me', merchant: 'Reject merchant', amount: -8.12,
@@ -164,8 +165,9 @@ function createServer() {
             pendingRevision: reviewStore.get(rejectedStage.id).revision
         };
         document.getElementById('reviewClose').click();
-        const result = { opened, decisionVisible, editCalls, successfulEdits, description: saved && saved.description, amount: saved && saved.amount, modalClosed: !document.getElementById('categoryModal').classList.contains('active'), rejected };
+        const result = { opened, decisionVisible, queued, summary, editCalls, successfulEdits, description: saved && saved.description, amount: saved && saved.amount, modalClosed: !document.getElementById('categoryModal').classList.contains('active'), rejected };
         reviewStore.clear();
+        clearReviewBatch();
         renderReviewInbox();
         if (originalService === undefined) delete window.transactionApprovalService;
         else window.transactionApprovalService = originalService;
@@ -176,8 +178,10 @@ function createServer() {
     assert.equal(reviewEditorSmoke.successfulEdits, 1, 'Exactly one pending review edit should be acknowledged in the synthetic flow.');
     assert.equal(reviewEditorSmoke.description, 'Edited review row', 'Pending review description edits must persist in the review inbox.');
     assert.equal(reviewEditorSmoke.amount, -13.34, 'Pending review amount edits must persist in the review inbox.');
-    assert.equal(reviewEditorSmoke.decisionVisible, true, 'Saving a review edit must reveal the in-modal decision actions.');
-    assert.equal(reviewEditorSmoke.modalClosed, true, 'Hold for later must advance after the final pending row.');
+    assert.equal(reviewEditorSmoke.decisionVisible, false, 'Saving a review edit must advance without exposing per-row budget actions.');
+    assert.equal(reviewEditorSmoke.queued, true, 'A saved review row must be queued for the collective Add action.');
+    assert.deepEqual(reviewEditorSmoke.summary, { visible: true, counts: 'Add 1 · Reject 0 · Hold 0' }, 'The end summary must show the queued Add count.');
+    assert.equal(reviewEditorSmoke.modalClosed, true, 'Save & next must advance after the final pending row.');
     assert.equal(reviewEditorSmoke.rejected.modalOpen, true, 'A failed revision-bound edit must keep the review form open.');
     assert.equal(reviewEditorSmoke.rejected.description, 'Rejected edit stays visible', 'A failed review edit must preserve form values.');
     assert.equal(reviewEditorSmoke.rejected.acceptedCount, 1, 'Review-only edits must not write accepted history.');
@@ -187,7 +191,7 @@ function createServer() {
         const confirmations = [];
         const calls = { approve: 0, reject: 0, defer: 0 };
         let failApprove = true;
-        let failEdit = false;
+        let failReject = false;
         const acceptedState = payload => {
             const next = cloneAcceptedState();
             next.transactions = next.transactions.concat(payload.map(item => {
@@ -204,44 +208,160 @@ function createServer() {
                 if (failApprove) throw new Error('Synthetic approval transport failure.');
                 return { ok: true, revision: cloudRevision + 1, state: acceptedState(payload), accepted: payload };
             },
-            async edit() { calls.edit = (calls.edit || 0) + 1; if (failEdit) throw new Error('Synthetic hold edit failure.'); },
-            async reject() { calls.reject += 1; },
+            async edit(id, patch, revision) { calls.edit = (calls.edit || 0) + 1; return { id, ...patch, revision: revision + 1 }; },
+            async reject(id, revision) { calls.reject += 1; if (failReject) throw new Error('Synthetic reject transport failure.'); return { id, revision, status: 'rejected' }; },
             async defer() { calls.defer += 1; }
         };
         reviewStore.clear();
+        clearReviewBatch();
         const pending = reviewStore.stage([{
             sourceId: 'ui-provider-pending', date: '2026-10-14', description: 'Pending provider purchase', merchant: 'Unknown Provider Merchant', amount: -17.25,
             category: 'Plaid Food and Dining', account: 'Checking', payment_method: 'Checking', type: 'expense', providerPending: true
         }], { source: 'bank-provider', batchId: 'ui-provider-pending' })[0];
+        const held = reviewStore.stage([{
+            sourceId: 'ui-hold-row', date: '2026-10-15', description: 'Hold this row', merchant: 'Hold merchant', amount: -6.75,
+            category: 'Restaurants', account: 'Checking', payment_method: 'Checking', type: 'expense'
+        }], { source: 'bank-csv', batchId: 'ui-hold-row' })[0];
+        const addOne = reviewStore.stage([{
+            sourceId: 'ui-batch-add-one', date: '2026-10-16', description: 'Batch add one', merchant: 'Batch merchant one', amount: -9.75,
+            category: 'Restaurants', account: 'Checking', payment_method: 'Checking', type: 'expense'
+        }], { source: 'bank-csv', batchId: 'ui-batch-add-one' })[0];
+        const addTwo = reviewStore.stage([{
+            sourceId: 'ui-batch-add-two', date: '2026-10-17', description: 'Batch add two', merchant: 'Batch merchant two', amount: -10.25,
+            category: 'Restaurants', account: 'Checking', payment_method: 'Checking', type: 'expense'
+        }], { source: 'bank-csv', batchId: 'ui-batch-add-two' })[0];
         const rejected = reviewStore.stage([{
-            sourceId: 'ui-modal-reject', date: '2026-10-15', description: 'Reject from modal', merchant: 'Reject Merchant', amount: -8.5,
+            sourceId: 'ui-batch-reject', date: '2026-10-18', description: 'Batch reject', merchant: 'Reject merchant', amount: -8.5,
             category: 'Restaurants', account: 'Checking', payment_method: 'Checking', type: 'expense'
-        }], { source: 'bank-csv', batchId: 'ui-modal-reject' })[0];
-        const failed = reviewStore.stage([{
-            sourceId: 'ui-modal-failure', date: '2026-10-16', description: 'Approval failure stays open', merchant: 'Failure Merchant', amount: -9.75,
-            category: 'Restaurants', account: 'Checking', payment_method: 'Checking', type: 'expense'
-        }], { source: 'bank-csv', batchId: 'ui-modal-failure' })[0];
+        }], { source: 'bank-csv', batchId: 'ui-batch-reject' })[0];
         renderReviewInbox();
         const pendingInput = document.querySelector(`input.review-select[data-review-id="${pending.id}"]`);
         if (pendingInput) pendingInput.checked = true;
         const pendingSelection = reviewSelectionIds();
         openReviewCategoryModal(pending.id, [pending.id]);
-        showReviewDecisionPanel(pending);
-        const pendingModal = { addDisabled: document.getElementById('reviewDecisionApprove').disabled, reason: document.getElementById('reviewDecisionReason').textContent };
-        hideReviewDecisionPanel();
-        document.getElementById('modalDescription').value = 'Held unmatched provider edit';
+        document.getElementById('modalCategory').value = 'Restaurants';
+        const pendingModal = { reason: reviewCandidateSelectionReason(pending), addButtonVisible: getComputedStyle(document.getElementById('reviewDecisionPanel')).display !== 'none' };
+        document.getElementById('saveTransaction').click();
+        await new Promise(resolve => setTimeout(resolve, 0));
+        const pendingStillOpen = document.getElementById('categoryModal').classList.contains('active');
         document.getElementById('reviewSkip').click();
         await new Promise(resolve => setTimeout(resolve, 0));
-        const pendingHold = { status: reviewStore.get(pending.id).status, category: reviewStore.get(pending.id).category, description: reviewStore.get(pending.id).description, closed: !document.getElementById('categoryModal').classList.contains('active') };
+        const pendingHold = { status: reviewStore.get(pending.id).status, closed: !document.getElementById('categoryModal').classList.contains('active') };
+        openReviewCategoryModal(held.id, [held.id]);
+        document.getElementById('reviewSkip').click();
+        await new Promise(resolve => setTimeout(resolve, 0));
+        const heldResult = { status: reviewStore.get(held.id).status, queued: reviewBatch.hold.has(held.id) };
+        openReviewCategoryModal(addOne.id);
+        document.getElementById('saveTransaction').click();
+        await new Promise(resolve => setTimeout(resolve, 0));
+        document.getElementById('saveTransaction').click();
+        await new Promise(resolve => setTimeout(resolve, 0));
+        document.getElementById('reviewReject').click();
+        await new Promise(resolve => setTimeout(resolve, 0));
+        const queuedSummary = { counts: document.getElementById('reviewBatchSummaryCounts').textContent, addEnabled: !document.getElementById('reviewBatchAdd').disabled, rejectEnabled: !document.getElementById('reviewBatchReject').disabled };
+        window.confirm = message => { confirmations.push(String(message)); return true; };
+        const acceptedBefore = transactions.length;
+        document.getElementById('reviewBatchAdd').click();
+        await new Promise(resolve => setTimeout(resolve, 0));
+        const failedAdd = { calls: calls.approve, pending: reviewBatch.add.size, accepted: transactions.length, failureAlert: window.__alerts.some(message => message.includes('Synthetic approval transport failure.')) };
+        failApprove = false;
+        document.getElementById('reviewBatchAdd').click();
+        await new Promise(resolve => setTimeout(resolve, 0));
+        const approved = { calls: calls.approve, pending: reviewBatch.add.size, accepted: transactions.length, acceptedAfterAdd: transactions.length, confirmations: confirmations.slice() };
+        failReject = true;
+        document.getElementById('reviewBatchReject').click();
+        await new Promise(resolve => setTimeout(resolve, 0));
+        const partialReject = { calls: calls.reject, queued: reviewBatch.reject.size, rejected: reviewStore.get(rejected.id)?.status, reviewKeys: reviewStore.list().map(item => item.id) };
+        failReject = false;
+        document.getElementById('reviewBatchReject').click();
+        await new Promise(resolve => setTimeout(resolve, 0));
+        const finalReject = { calls: calls.reject, queued: reviewBatch.reject.size, rejected: reviewStore.get(rejected.id)?.status, acceptedBefore, acceptedAfter: transactions.length };
+        window.confirm = originalConfirm;
+        reviewStore.clear();
+        clearReviewBatch();
+        renderReviewInbox();
+        window.transactionApprovalService = originalService;
+        return { pendingSelection, pendingModal, pendingStillOpen, pendingHold, heldResult, queuedSummary, failedAdd, approved, partialReject, finalReject };
+    });
+    assert.deepEqual(reviewDecisionSmoke.pendingSelection, [], 'Provider-pending rows cannot enter bulk selection even if a stale checkbox is checked.');
+    assert.equal(reviewDecisionSmoke.pendingModal.addButtonVisible, false, 'The familiar editor must not expose a per-row Add action.');
+    assert.match(reviewDecisionSmoke.pendingModal.reason, /still pending with the bank/i);
+    assert.equal(reviewDecisionSmoke.pendingStillOpen, true, 'Provider-pending Save & next must stay in the editor and preserve the clear blocked reason.');
+    assert.deepEqual(reviewDecisionSmoke.pendingHold, { status: 'deferred', closed: true }, 'A provider-pending row can still be held without adding it.');
+    assert.deepEqual(reviewDecisionSmoke.heldResult, { status: 'deferred', queued: true }, 'Hold & next must persist the defer and count it in the final summary.');
+    assert.equal(reviewDecisionSmoke.queuedSummary.counts, 'Add 2 · Reject 1 · Hold 2', 'The end summary must name all queued decision counts.');
+    assert.equal(reviewDecisionSmoke.queuedSummary.addEnabled, true, 'The final Add action must be enabled only after every row is reviewed.');
+    assert.equal(reviewDecisionSmoke.queuedSummary.rejectEnabled, true, 'The final Reject action must be enabled only after every row is reviewed.');
+    assert.equal(reviewDecisionSmoke.failedAdd.calls, 1, 'A failed collective approval must make one server attempt.');
+    assert.equal(reviewDecisionSmoke.failedAdd.pending, 2, 'A failed collective approval must preserve every queued Add row.');
+    assert.equal(reviewDecisionSmoke.failedAdd.accepted, reviewDecisionSmoke.finalReject.acceptedBefore, 'A failed collective approval must leave accepted history unchanged.');
+    assert.equal(reviewDecisionSmoke.failedAdd.failureAlert, true, 'A failed collective approval must report the server failure.');
+    assert.equal(reviewDecisionSmoke.approved.calls, 2, 'A retried collective approval must use the durable approval path.');
+    assert.equal(reviewDecisionSmoke.approved.pending, 0, 'Acknowledged collective approval must remove all Add choices from review.');
+    assert.equal(reviewDecisionSmoke.approved.accepted, reviewDecisionSmoke.failedAdd.accepted + 2, 'Accepted history must change only after final Add confirmation succeeds.');
+    assert.equal(reviewDecisionSmoke.approved.confirmations.filter(message => message.includes('Add 2 reviewed')).length, 2, 'Each collective Add attempt must require an explicit final confirmation.');
+    assert.equal(reviewDecisionSmoke.partialReject.calls, 1, 'A failed collective rejection must make one server attempt.');
+    assert.equal(reviewDecisionSmoke.partialReject.queued, 1, 'A failed collective rejection must retain the failed remainder.');
+    assert.equal(reviewDecisionSmoke.partialReject.rejected, 'pending', 'A failed collective rejection must leave the row pending.');
+    assert.equal(reviewDecisionSmoke.finalReject.calls, 2, 'A retried collective rejection must use the server path again.');
+    assert.equal(reviewDecisionSmoke.finalReject.queued, 0, 'A successful collective rejection must remove the acknowledged choice.');
+    assert.equal(reviewDecisionSmoke.finalReject.rejected, 'rejected', 'A successful collective rejection must mark the row rejected.');
+    assert.equal(reviewDecisionSmoke.finalReject.acceptedAfter, reviewDecisionSmoke.approved.acceptedAfterAdd, 'Collective rejection must never alter accepted history.');
+    const reviewBatchEdgeSmoke = await page.evaluate(async () => {
+        const originalService = window.transactionApprovalService;
+        const originalConfirm = window.confirm;
+        const confirmations = [];
+        let failEdit = true;
+        let failApprove = false;
+        let approveCalls = 0;
+        let deferCalls = 0;
+        const rejectCalls = [];
+        let rejectFailId = null;
+        let authRejectMode = false;
+        let authRejectStart = 0;
+        let authRejectGate = null;
+        let authRejectStartedResolve = null;
+        let authRejectGeneration = null;
+        let authRejectUser = null;
+        let approveGate = null;
+        const acceptedState = payload => {
+            const next = cloneAcceptedState();
+            next.transactions = next.transactions.concat(payload.map(item => {
+                const accepted = { ...item };
+                ['status', 'fingerprint', 'overlap', 'overlapDetails', 'revision', 'reviewedRevision', 'batchId'].forEach(key => delete accepted[key]);
+                return accepted;
+            }));
+            return next;
+        };
+        window.transactionApprovalService = {
+            serverBacked: true,
+            async edit(id, patch, revision) { if (failEdit) throw new Error('Synthetic hold edit failure.'); return { id, ...patch, revision: revision + 1 }; },
+            async defer() { deferCalls += 1; },
+            async approve(payload) { approveCalls += 1; if (approveGate) await approveGate; if (failApprove) throw new Error('Synthetic busy approval failure.'); return { ok: true, revision: cloudRevision + 1, state: acceptedState(payload), accepted: payload }; },
+            async reject(id, revision) {
+                rejectCalls.push(id);
+                const isAuthFirst = authRejectMode && rejectCalls.length === authRejectStart + 1;
+                if (isAuthFirst) {
+                    if (authRejectStartedResolve) authRejectStartedResolve();
+                    if (authRejectGate) await authRejectGate;
+                    authRejectGeneration = authGeneration;
+                    authRejectUser = currentUser;
+                    authGeneration += 1;
+                    currentUser = { uid: 'synthetic-new-user', email: 'new-user@example.test' };
+                }
+                if (id === rejectFailId) throw new Error('Synthetic reject transport failure.');
+                return { id, revision, status: 'rejected' };
+            }
+        };
+        reviewStore.clear();
+        clearReviewBatch();
         const holdFailure = reviewStore.stage([{
-            sourceId: 'ui-hold-edit-failure', date: '2026-10-15', description: 'Hold edit failure', merchant: 'Hold edit failure merchant', amount: -6.75,
+            sourceId: 'ui-batch-hold-failure', date: '2026-10-20', description: 'Hold edit failure', merchant: 'Hold edit failure merchant', amount: -6.75,
             category: 'Restaurants', account: 'Checking', payment_method: 'Checking', type: 'expense'
-        }], { source: 'bank-csv', batchId: 'ui-hold-edit-failure' })[0];
+        }], { source: 'bank-csv', batchId: 'ui-batch-hold-failure' })[0];
         renderReviewInbox();
         openReviewCategoryModal(holdFailure.id, [holdFailure.id]);
         document.getElementById('modalDescription').value = 'Failed hold edit stays visible';
-        failEdit = true;
-        const deferCallsBeforeFailedHold = calls.defer;
         document.getElementById('reviewSkip').click();
         await new Promise(resolve => setTimeout(resolve, 0));
         const holdFailureResult = {
@@ -249,50 +369,173 @@ function createServer() {
             storedDescription: reviewStore.get(holdFailure.id).description,
             modalDescription: document.getElementById('modalDescription').value,
             modalOpen: document.getElementById('categoryModal').classList.contains('active'),
-            deferCalls: calls.defer - deferCallsBeforeFailedHold
+            deferCalls
         };
         failEdit = false;
         document.getElementById('reviewClose').click();
-        window.confirm = message => { confirmations.push(String(message)); return true; };
-        openReviewCategoryModal(rejected.id, [rejected.id]);
-        document.getElementById('reviewReject').click();
-        await new Promise(resolve => setTimeout(resolve, 0));
-        const rejectedResult = { calls: calls.reject, remaining: reviewStore.get(rejected.id) && reviewStore.get(rejected.id).status, closed: !document.getElementById('categoryModal').classList.contains('active') };
-        openReviewCategoryModal(failed.id, [failed.id]);
-        showReviewDecisionPanel(failed);
-        document.getElementById('reviewDecisionApprove').click();
-        await new Promise(resolve => setTimeout(resolve, 0));
-        const failedResult = { calls: calls.approve, modalOpen: document.getElementById('categoryModal').classList.contains('active'), stillPending: !!reviewStore.get(failed.id), failureAlert: window.__alerts.some(message => message.includes('Synthetic approval transport failure.')) };
-        failApprove = false;
-        const failedCandidate = reviewStore.pending.get(failed.id);
-        failedCandidate.date = '2026-10-01';
-        failedCandidate.description = 'Existing overlap';
-        failedCandidate.merchant = 'Existing overlap';
-        reviewStore.accepted.set('accepted-overlap', { id: 'accepted-overlap', date: '2026-10-01', description: 'Existing overlap', merchant: 'Existing overlap', amount: -9.75, account: 'Checking', category: 'Restaurants', type: 'expense' });
+        reviewStore.clear();
+        clearReviewBatch();
+        const overlap = reviewStore.stage([{
+            sourceId: 'ui-batch-overlap', date: '2026-10-21', description: 'Existing overlap', merchant: 'Existing overlap', amount: -9.75,
+            category: 'Restaurants', account: 'Checking', payment_method: 'Checking', type: 'expense'
+        }], { source: 'bank-csv', batchId: 'ui-batch-overlap' })[0];
+        reviewStore.accepted.set('accepted-overlap', { id: 'accepted-overlap', date: '2026-10-21', description: 'Existing overlap', merchant: 'Existing overlap', amount: -9.75, account: 'Checking', category: 'Restaurants', type: 'expense' });
         reviewStore.recomputeOverlaps();
         renderReviewInbox();
-        openReviewCategoryModal(failed.id, [failed.id]);
-        showReviewDecisionPanel(reviewStore.get(failed.id));
-        document.getElementById('reviewDecisionApprove').click();
+        openReviewCategoryModal(overlap.id, [overlap.id]);
+        document.getElementById('saveTransaction').click();
         await new Promise(resolve => setTimeout(resolve, 0));
-        const approvedResult = { calls: calls.approve, remaining: reviewStore.pending.has(failed.id) ? reviewStore.get(failed.id) : undefined, overlapConfirmation: confirmations.some(message => message.includes('Possible overlap')), closed: !document.getElementById('categoryModal').classList.contains('active') };
+        window.confirm = message => { confirmations.push(String(message)); return true; };
+        document.getElementById('reviewBatchAdd').click();
+        await new Promise(resolve => setTimeout(resolve, 0));
+        const overlapResult = { approveCalls, overlapConfirmation: confirmations.some(message => message.includes('Possible overlap')), finalConfirmation: confirmations.some(message => message.includes('Add 1 reviewed')), remaining: reviewStore.pending.has(overlap.id) };
+        reviewStore.clear();
+        clearReviewBatch();
+        const stale = reviewStore.stage([{
+            sourceId: 'ui-batch-stale', date: '2026-10-22', description: 'Stale batch row', merchant: 'Stale batch merchant', amount: -4.25,
+            category: 'Restaurants', account: 'Checking', payment_method: 'Checking', type: 'expense'
+        }], { source: 'bank-csv', batchId: 'ui-batch-stale' })[0];
+        reviewBatchQueue(stale.id, 'add');
+        reviewStore.edit(stale.id, { description: 'Changed elsewhere' }, stale.revision);
+        renderReviewInbox();
+        const approveCallsBeforeStale = approveCalls;
+        document.getElementById('reviewBatchAdd').click();
+        await new Promise(resolve => setTimeout(resolve, 0));
+        const staleResult = { approveCalls: approveCalls - approveCallsBeforeStale, pending: reviewStore.pending.has(stale.id), alert: window.__alerts.some(message => message.includes('changed after it was reviewed')) };
+        reviewStore.clear();
+        clearReviewBatch();
+        const busy = reviewStore.stage([{
+            sourceId: 'ui-batch-busy', date: '2026-10-23', description: 'Busy batch row', merchant: 'Busy batch merchant', amount: -3.25,
+            category: 'Restaurants', account: 'Checking', payment_method: 'Checking', type: 'expense'
+        }], { source: 'bank-csv', batchId: 'ui-batch-busy' })[0];
+        const busyReject = reviewStore.stage([{
+            sourceId: 'ui-batch-busy-reject', date: '2026-10-24', description: 'Busy reject row', merchant: 'Busy reject merchant', amount: -3.5,
+            category: 'Restaurants', account: 'Checking', payment_method: 'Checking', type: 'expense'
+        }], { source: 'bank-csv', batchId: 'ui-batch-busy-reject' })[0];
+        reviewBatchQueue(busy.id, 'add');
+        reviewBatchQueue(busyReject.id, 'reject');
+        renderReviewInbox();
+        let resolveApprove;
+        approveGate = new Promise(resolve => { resolveApprove = resolve; });
+        failApprove = true;
+        const approveCallsBeforeBusy = approveCalls;
+        document.getElementById('reviewBatchAdd').click();
+        await new Promise(resolve => setTimeout(resolve, 0));
+        document.getElementById('reviewBatchAdd').click();
+        const rejectCallsBeforeBusy = rejectCalls.length;
+        document.getElementById('reviewBatchReject').click();
+        const busyResult = {
+            approveCalls: approveCalls - approveCallsBeforeBusy,
+            rejectCalls: rejectCalls.length - rejectCallsBeforeBusy,
+            addDisabled: document.getElementById('reviewBatchAdd').disabled,
+            rejectDisabled: document.getElementById('reviewBatchReject').disabled
+        };
+        resolveApprove();
+        await new Promise(resolve => setTimeout(resolve, 0));
+        const busyComplete = {
+            pending: reviewStore.pending.has(busy.id),
+            approveCalls: approveCalls - approveCallsBeforeBusy,
+            rejectQueued: reviewBatch.reject.has(busyReject.id),
+            reviewEnabledAfterFailure: !document.querySelector(`button.review-edit[data-review-id="${busyReject.id}"]`).disabled,
+            addDisabledAfterFailure: document.getElementById('reviewBatchAdd').disabled,
+            rejectDisabledAfterFailure: document.getElementById('reviewBatchReject').disabled
+        };
+        approveGate = null;
+        failApprove = false;
+
+        reviewStore.clear();
+        clearReviewBatch();
+        const partialRejectOne = reviewStore.stage([{
+            sourceId: 'ui-batch-partial-reject-one', date: '2026-10-25', description: 'Partial reject one', merchant: 'Partial reject merchant one', amount: -3.75,
+            category: 'Restaurants', account: 'Checking', payment_method: 'Checking', type: 'expense'
+        }], { source: 'bank-csv', batchId: 'ui-batch-partial-reject-one' })[0];
+        const partialRejectTwo = reviewStore.stage([{
+            sourceId: 'ui-batch-partial-reject-two', date: '2026-10-26', description: 'Partial reject two', merchant: 'Partial reject merchant two', amount: -4.5,
+            category: 'Restaurants', account: 'Checking', payment_method: 'Checking', type: 'expense'
+        }], { source: 'bank-csv', batchId: 'ui-batch-partial-reject-two' })[0];
+        reviewBatchQueue(partialRejectOne.id, 'reject');
+        reviewBatchQueue(partialRejectTwo.id, 'reject');
+        renderReviewInbox();
+        rejectFailId = partialRejectTwo.id;
+        const partialCallsBefore = rejectCalls.length;
+        document.getElementById('reviewBatchReject').click();
+        await new Promise(resolve => setTimeout(resolve, 0));
+        const partialRejectResult = {
+            calls: rejectCalls.length - partialCallsBefore,
+            firstStatus: reviewStore.get(partialRejectOne.id)?.status,
+            secondStatus: reviewStore.get(partialRejectTwo.id)?.status,
+            queued: reviewBatch.reject.size,
+            message: window.__alerts.at(-1) || ''
+        };
+        rejectFailId = null;
+        const retryCallsBefore = rejectCalls.length;
+        document.getElementById('reviewBatchReject').click();
+        await new Promise(resolve => setTimeout(resolve, 0));
+        const partialRejectRetry = {
+            calls: rejectCalls.length - retryCallsBefore,
+            secondStatus: reviewStore.get(partialRejectTwo.id)?.status,
+            queued: reviewBatch.reject.size
+        };
+
+        reviewStore.clear();
+        clearReviewBatch();
+        const authRejectOne = reviewStore.stage([{
+            sourceId: 'ui-batch-auth-reject-one', date: '2026-10-27', description: 'Auth reject one', merchant: 'Auth reject merchant one', amount: -5.25,
+            category: 'Restaurants', account: 'Checking', payment_method: 'Checking', type: 'expense'
+        }], { source: 'bank-csv', batchId: 'ui-batch-auth-reject-one' })[0];
+        const authRejectTwo = reviewStore.stage([{
+            sourceId: 'ui-batch-auth-reject-two', date: '2026-10-28', description: 'Auth reject two', merchant: 'Auth reject merchant two', amount: -5.5,
+            category: 'Restaurants', account: 'Checking', payment_method: 'Checking', type: 'expense'
+        }], { source: 'bank-csv', batchId: 'ui-batch-auth-reject-two' })[0];
+        reviewBatchQueue(authRejectOne.id, 'reject');
+        reviewBatchQueue(authRejectTwo.id, 'reject');
+        renderReviewInbox();
+        authRejectMode = true;
+        authRejectStart = rejectCalls.length;
+        let resolveAuthReject;
+        authRejectGate = new Promise(resolve => { resolveAuthReject = resolve; });
+        const authRejectStarted = new Promise(resolve => { authRejectStartedResolve = resolve; });
+        const authRejectBeforeGeneration = authGeneration;
+        const authRejectBeforeUser = currentUser;
+        const authCallsBefore = rejectCalls.length;
+        document.getElementById('reviewBatchReject').click();
+        await authRejectStarted;
+        resolveAuthReject();
+        await new Promise(resolve => setTimeout(resolve, 0));
+        const authRejectResult = {
+            calls: rejectCalls.length - authCallsBefore,
+            firstPending: reviewStore.pending.has(authRejectOne.id),
+            secondPending: reviewStore.pending.has(authRejectTwo.id),
+            firstRejected: reviewStore.rejected.has(authRejectOne.id),
+            secondRejected: reviewStore.rejected.has(authRejectTwo.id),
+            queued: reviewBatch.reject.size,
+            authAlert: window.__alerts.some(message => message.includes('Authentication changed while rejecting the batch')),
+            newUserRowsRejected: currentUser && currentUser.uid === 'synthetic-new-user' && (reviewStore.rejected.has(authRejectOne.id) || reviewStore.rejected.has(authRejectTwo.id))
+        };
+        authRejectMode = false;
+        authRejectGate = null;
+        authRejectStartedResolve = null;
+        authGeneration = authRejectBeforeGeneration;
+        currentUser = authRejectBeforeUser;
         window.confirm = originalConfirm;
         reviewStore.clear();
+        clearReviewBatch();
         renderReviewInbox();
         window.transactionApprovalService = originalService;
-        return { pendingSelection, pendingModal, pendingHold, holdFailureResult, rejectedResult, failedResult, approvedResult };
+        return { holdFailureResult, overlapResult, staleResult, busyResult, busyComplete, partialRejectResult, partialRejectRetry, authRejectResult };
     });
-    assert.deepEqual(reviewDecisionSmoke.pendingSelection, [], 'Provider-pending rows cannot enter bulk selection even if a stale checkbox is checked.');
-    assert.equal(reviewDecisionSmoke.pendingModal.addDisabled, true, 'Provider-pending rows cannot use the modal Add action.');
-    assert.match(reviewDecisionSmoke.pendingModal.reason, /still pending with the bank/i);
-    assert.deepEqual(reviewDecisionSmoke.pendingHold, { status: 'deferred', category: 'Plaid Food and Dining', description: 'Held unmatched provider edit', closed: true }, 'An unmatched provider row can save valid edits and be held without choosing or creating a category.');
-    assert.deepEqual(reviewDecisionSmoke.holdFailureResult, { status: 'pending', storedDescription: 'Hold edit failure', modalDescription: 'Failed hold edit stays visible', modalOpen: true, deferCalls: 0 }, 'A failed hold edit must preserve the editor and avoid deferring or advancing the review row.');
-    assert.deepEqual(reviewDecisionSmoke.rejectedResult, { calls: 1, remaining: 'rejected', closed: true }, 'Modal Reject must confirm, persist, and advance the review queue.');
-    assert.deepEqual(reviewDecisionSmoke.failedResult, { calls: 1, modalOpen: true, stillPending: true, failureAlert: true }, 'An approval failure must preserve the candidate and editor.');
-    assert.equal(reviewDecisionSmoke.approvedResult.calls, 2, 'A retried modal approval must use the durable approval path.');
-    assert.equal(reviewDecisionSmoke.approvedResult.remaining, undefined, 'Acknowledged modal approval must remove the candidate from review.');
-    assert.equal(reviewDecisionSmoke.approvedResult.overlapConfirmation, true, 'Modal overlap approval must require an individual meaningful confirmation.');
-    assert.equal(reviewDecisionSmoke.approvedResult.closed, true, 'Modal approval must advance and close after the final decision.');
+    assert.deepEqual(reviewBatchEdgeSmoke.holdFailureResult, { status: 'pending', storedDescription: 'Hold edit failure', modalDescription: 'Failed hold edit stays visible', modalOpen: true, deferCalls: 0 }, 'A failed Hold edit must preserve the editor and avoid advancing.');
+    assert.deepEqual(reviewBatchEdgeSmoke.overlapResult, { approveCalls: 1, overlapConfirmation: true, finalConfirmation: true, remaining: false }, 'Collective Add must require overlap evidence acknowledgment and a final confirmation.');
+    assert.deepEqual(reviewBatchEdgeSmoke.staleResult, { approveCalls: 0, pending: true, alert: true }, 'A stale revision must block the collective Add before any server approval call.');
+    assert.deepEqual(reviewBatchEdgeSmoke.busyResult, { approveCalls: 1, rejectCalls: 0, addDisabled: true, rejectDisabled: true }, 'A collective Add in flight must block duplicate Add and Reject dispatches.');
+    assert.deepEqual(reviewBatchEdgeSmoke.busyComplete, { pending: true, approveCalls: 1, rejectQueued: true, reviewEnabledAfterFailure: true, addDisabledAfterFailure: false, rejectDisabledAfterFailure: false }, 'After a collective Add failure, queued Reject controls and row controls must be restored.');
+    assert.equal(reviewBatchEdgeSmoke.partialRejectResult.calls, 2, 'A partial collective rejection must attempt each queued row once.');
+    assert.equal(reviewBatchEdgeSmoke.partialRejectResult.firstStatus, 'rejected', 'A successful first rejection must be removed from the pending inbox.');
+    assert.equal(reviewBatchEdgeSmoke.partialRejectResult.secondStatus, 'pending', 'A failed second rejection must remain pending.');
+    assert.equal(reviewBatchEdgeSmoke.partialRejectResult.queued, 1, 'A partial collective rejection must retain only the failed queued row.');
+    assert.match(reviewBatchEdgeSmoke.partialRejectResult.message, /Rejected 1 transaction.*remain queued/i, 'A partial collective rejection must report the successful count and queued remainder.');
+    assert.deepEqual(reviewBatchEdgeSmoke.partialRejectRetry, { calls: 1, secondStatus: 'rejected', queued: 0 }, 'Retrying the retained rejection must make one server call and clear the queue after acknowledgement.');
+    assert.deepEqual(reviewBatchEdgeSmoke.authRejectResult, { calls: 1, firstPending: true, secondPending: true, firstRejected: false, secondRejected: false, queued: 2, authAlert: true, newUserRowsRejected: false }, 'An auth change during the first rejection must stop the batch before a second call and preserve both rows without a new-user mutation.');
     const reviewCategorySmoke = await page.evaluate(() => {
         const originalDefaults = JSON.parse(JSON.stringify(merchantDefaults));
         const originalCategories = categories;
@@ -407,8 +650,8 @@ function createServer() {
     assert.equal(cutoffConflictSmoke.current, '2026-10-10', 'Cutoff conflict handling must refresh the server setting without syncing.');
     assert.equal(cutoffConflictSmoke.revision, 3, 'Cutoff conflict handling must refresh the revision fence.');
     assert.match(cutoffConflictSmoke.status, /changed elsewhere|save again/i);
-    const screenshotDirectory = 'D:\\Documents\\Codex\\.assistant-storage\\budget-tool-verification\\review-decisions-20261020-r1';
-    const screenshotPath = path.join(screenshotDirectory, 'synthetic-review-editor.png');
+    const screenshotDirectory = 'D:\\Documents\\Codex\\.assistant-storage\\budget-tool-verification\\batch-review-decisions-20261020-r1';
+    const screenshotPath = path.join(screenshotDirectory, 'synthetic-review-summary.png');
     await fs.promises.mkdir(screenshotDirectory, { recursive: true });
     await page.evaluate(() => {
         closeCategoryReviewModal();
@@ -424,20 +667,26 @@ function createServer() {
             sourceId: 'ui-review-screenshot-provider', date: '2026-10-13', description: 'Synthetic review purchase #2', merchant: 'Synthetic Merchant VenX', amount: -21.75,
             category: 'Plaid Food and Dining', account: 'Checking', payment_method: 'Checking', type: 'expense', providerPending: true
         }], { source: 'bank-provider', batchId: 'ui-review-screenshot-provider' });
+        reviewBatchQueue(csv[0].id, 'add');
+        reviewStore.defer(provider[0].id, currentUser?.email);
+        reviewBatchQueue(provider[0].id, 'hold');
         renderReviewInbox();
         document.querySelector('.nav-item[data-tab="import"]').click();
         window.__reviewDecisionScreenshot = { csvId: csv[0].id, providerId: provider[0].id };
     });
     await page.screenshot({ path: path.join(screenshotDirectory, 'synthetic-review-inbox.png') });
     assert.equal(fs.existsSync(path.join(screenshotDirectory, 'synthetic-review-inbox.png')), true, 'Synthetic pending review inbox screenshot must be written to the D: evidence directory.');
-    await page.evaluate(() => { openReviewCategoryModal(window.__reviewDecisionScreenshot.csvId, [window.__reviewDecisionScreenshot.csvId]); showReviewDecisionPanel(reviewStore.get(window.__reviewDecisionScreenshot.csvId)); });
-    await page.waitForFunction(() => document.getElementById('categoryModal').classList.contains('active') && getComputedStyle(document.getElementById('reviewDecisionPanel')).display !== 'none');
+    await page.evaluate(() => { renderReviewBatchSummary(); });
+    await page.waitForTimeout(100);
+    const screenshotSummaryState = await page.evaluate(() => ({ display: getComputedStyle(document.getElementById('reviewBatchSummary')).display, counts: document.getElementById('reviewBatchSummaryCounts').textContent, batch: reviewBatch && { add: reviewBatch.add.size, reject: reviewBatch.reject.size, hold: reviewBatch.hold.size } }));
+    assert.equal(screenshotSummaryState.display, 'block', 'Synthetic batch summary must be visible in the evidence fixture.');
+    assert.match(screenshotSummaryState.counts, /Add 1/);
     await page.screenshot({ path: screenshotPath });
-    assert.equal(fs.existsSync(screenshotPath), true, 'Synthetic review editor screenshot must be written to the D: evidence directory.');
+    assert.equal(fs.existsSync(screenshotPath), true, 'Synthetic review summary screenshot must be written to the D: evidence directory.');
     const screenshotBottomPath = path.join(screenshotDirectory, 'synthetic-review-editor-bottom.png');
     await page.evaluate(() => { const content = document.querySelector('#categoryModal .modal-content'); if (content) content.scrollTop = content.scrollHeight; });
     await page.screenshot({ path: screenshotBottomPath });
-    assert.equal(fs.existsSync(screenshotBottomPath), true, 'Synthetic review editor control screenshot must be written to the D: evidence directory.');
+    assert.equal(fs.existsSync(screenshotBottomPath), true, 'Synthetic review summary control screenshot must be written to the D: evidence directory.');
     await page.evaluate(() => {
         closeCategoryReviewModal();
         reviewStore.clear();
