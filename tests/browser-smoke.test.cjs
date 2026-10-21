@@ -591,6 +591,95 @@ function createServer() {
     assert.match(reviewCategorySmoke.historicalResult.hint, /historical merchant category/i);
     assert.deepEqual(reviewCategorySmoke.unmatchedResult, { selected: '', taxonomyOption: false, categoryCountUnchanged: true, hint: 'Choose an existing budget category. Provider categories are not added automatically.' }, 'Unmatched provider reviews require an explicit existing category without auto-creating taxonomy categories.');
     assert.equal(reviewCategorySmoke.deliberateResult.selected, reviewCategorySmoke.deliberateCategory, 'Existing deliberate provider categories must remain selected when the review is reopened.');
+    const reviewProviderSaveSmoke = await page.evaluate(async () => {
+        const originalService = window.transactionApprovalService;
+        const originalCategories = categories;
+        const originalDefaults = merchantDefaults;
+        const existingCategory = (categories.find(category => category && category.name === 'Restaurants') || categories[0]).name;
+        const acceptedCountBefore = transactions.length;
+        categories = [...categories, ...(categories.some(category => category && category.name === 'Other') ? [] : [{ name: 'Other', type: 'expense', color: '#f39c12' }])];
+        merchantDefaults = {};
+        reviewStore.clear();
+        clearReviewBatch();
+        let editCalls = 0;
+        let deferCalls = 0;
+        let approveCalls = 0;
+        window.transactionApprovalService = {
+            serverBacked: true,
+            async edit(id, patch, revision) { editCalls += 1; return { id, ...patch, revision: revision + 1 }; },
+            async defer() { deferCalls += 1; },
+            async approve() { approveCalls += 1; }
+        };
+        const settle = () => new Promise(resolve => setTimeout(resolve, 0));
+        const unmatched = reviewStore.stage([{
+            sourceId: 'ui-provider-save-unmatched', date: '2026-10-20', description: 'Unmatched provider purchase', merchant: 'No Save History Merchant', amount: -11.25,
+            category: 'Plaid Travel', account: 'Checking', payment_method: 'Checking', type: 'expense'
+        }], { source: 'bank-provider', batchId: 'ui-provider-save-unmatched' })[0];
+        renderReviewInbox();
+        openReviewCategoryModal(unmatched.id, [unmatched.id]);
+        const originalSelectionReason = reviewCandidateSelectionReason(unmatched);
+        const blankAlertStart = window.__alerts.length;
+        document.getElementById('saveTransaction').click();
+        await settle();
+        const blankBlocked = {
+            modalOpen: document.getElementById('categoryModal').classList.contains('active'),
+            editCalls,
+            queued: !!(reviewBatch && reviewBatch.add.has(unmatched.id)),
+            alert: window.__alerts.slice(blankAlertStart)
+        };
+        document.getElementById('modalCategory').value = existingCategory;
+        document.getElementById('saveTransaction').click();
+        await settle();
+        const saved = reviewStore.get(unmatched.id);
+        const savedResult = {
+            category: saved && saved.category,
+            revision: saved && saved.revision,
+            queuedOnly: !!(reviewBatch && reviewBatch.add.has(unmatched.id) && !reviewBatch.reject.has(unmatched.id) && !reviewBatch.hold.has(unmatched.id)),
+            modalClosed: !document.getElementById('categoryModal').classList.contains('active'),
+            acceptedUnchanged: transactions.length === acceptedCountBefore
+        };
+        const held = reviewStore.stage([{
+            sourceId: 'ui-provider-save-held', date: '2026-10-21', description: 'Held provider purchase', merchant: 'No Hold History Merchant', amount: -12.25,
+            category: 'Plaid Lodging', account: 'Checking', payment_method: 'Checking', type: 'expense'
+        }], { source: 'bank-provider', batchId: 'ui-provider-save-held' })[0];
+        renderReviewInbox();
+        openReviewCategoryModal(held.id, [held.id]);
+        document.getElementById('reviewSkip').click();
+        await settle();
+        const heldResult = {
+            status: reviewStore.get(held.id).status,
+            queued: !!(reviewBatch && reviewBatch.hold.has(held.id)),
+            modalClosed: !document.getElementById('categoryModal').classList.contains('active')
+        };
+        openReviewCategoryModal(held.id, [held.id]);
+        const resumedOpen = document.getElementById('categoryModal').classList.contains('active');
+        document.getElementById('modalCategory').value = existingCategory;
+        document.getElementById('saveTransaction').click();
+        await settle();
+        const resumed = reviewStore.get(held.id);
+        const resumedResult = {
+            opened: resumedOpen,
+            status: resumed && resumed.status,
+            category: resumed && resumed.category,
+            queuedAdd: !!(reviewBatch && reviewBatch.add.has(held.id)),
+            queuedHold: !!(reviewBatch && reviewBatch.hold.has(held.id)),
+            modalClosed: !document.getElementById('categoryModal').classList.contains('active')
+        };
+        const result = { originalSelectionReason, blankBlocked, savedResult, heldResult, resumedResult, editCalls, deferCalls, approveCalls };
+        reviewStore.clear();
+        clearReviewBatch();
+        merchantDefaults = originalDefaults;
+        categories = originalCategories;
+        renderReviewInbox();
+        window.transactionApprovalService = originalService;
+        return result;
+    });
+    assert.match(reviewProviderSaveSmoke.originalSelectionReason, /existing budget category/i, 'An unmatched provider row must remain blocked until a budget category is selected.');
+    assert.deepEqual(reviewProviderSaveSmoke.blankBlocked, { modalOpen: true, editCalls: 0, queued: false, alert: ['Date, description, account, amount and category are required.'] }, 'Save & next must remain blocked when the provider row has no selected category.');
+    assert.deepEqual(reviewProviderSaveSmoke.savedResult, { category: 'Restaurants', revision: 2, queuedOnly: true, modalClosed: true, acceptedUnchanged: true }, 'Selecting an existing category must save the edit and queue only the review decision.');
+    assert.deepEqual(reviewProviderSaveSmoke.heldResult, { status: 'deferred', queued: true, modalClosed: true }, 'Holding a provider row must defer it and close the editor without adding it.');
+    assert.deepEqual(reviewProviderSaveSmoke.resumedResult, { opened: true, status: 'pending', category: 'Restaurants', queuedAdd: true, queuedHold: false, modalClosed: true }, 'A held provider row must reopen, accept an existing category, and move to the Add queue.');
+    assert.deepEqual({ editCalls: reviewProviderSaveSmoke.editCalls, deferCalls: reviewProviderSaveSmoke.deferCalls, approveCalls: reviewProviderSaveSmoke.approveCalls }, { editCalls: 2, deferCalls: 1, approveCalls: 0 }, 'Save & next and Hold & next must use only the revision-bound edit/defer paths before final approval.');
     const checkingIncomeTypeToggleSmoke = await page.evaluate(async () => {
         const originalService = window.transactionApprovalService;
         const originalCategories = categories;
@@ -650,7 +739,7 @@ function createServer() {
     assert.equal(cutoffConflictSmoke.current, '2026-10-10', 'Cutoff conflict handling must refresh the server setting without syncing.');
     assert.equal(cutoffConflictSmoke.revision, 3, 'Cutoff conflict handling must refresh the revision fence.');
     assert.match(cutoffConflictSmoke.status, /changed elsewhere|save again/i);
-    const screenshotDirectory = 'D:\\Documents\\Codex\\.assistant-storage\\budget-tool-verification\\batch-review-decisions-20261020-r1';
+    const screenshotDirectory = process.env.BUDGET_TOOL_REVIEW_SCREENSHOT_DIR || 'D:\\Documents\\Codex\\.assistant-storage\\budget-tool-verification\\batch-review-decisions-20261020-r1';
     const screenshotPath = path.join(screenshotDirectory, 'synthetic-review-summary.png');
     await fs.promises.mkdir(screenshotDirectory, { recursive: true });
     await page.evaluate(() => {
