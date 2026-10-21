@@ -4393,9 +4393,9 @@
                     alert('Choose an existing budget category for provider transactions. New categories are not added automatically.');
                     return;
                 }
-                const selectionReason = reviewCandidateSelectionReason(current);
-                if (selectionReason) { alert(selectionReason); return; }
                 const patch = { description, merchant: merchant || description, amount, date, category, account, payment_method: account, type };
+                const selectionReason = reviewCandidateSelectionReason({ ...current, ...patch });
+                if (selectionReason) { alert(selectionReason); return; }
                 const generation = categoryModalGeneration;
                 const user = categoryModalUser;
                 const session = categoryModalSession;
