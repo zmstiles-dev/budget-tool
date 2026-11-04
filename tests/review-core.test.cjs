@@ -201,6 +201,35 @@ hydrated.restoreReview(review.restoreBackup(backup).review);
 assert.equal(hydrated.get(correction[0].id).status, 'approved');
 assert.equal(hydrated.exportReview().receipts.length, 1);
 assert.throws(() => review.validateSnapshot({ ...backup, providerTokens: ['secret'] }), /credentials/);
+
+// Merchant-default dictionary keys can be legitimate domain names, including
+// legacy string values. Credential-shaped keys and nested credential fields
+// remain blocked, and the exception does not apply to other snapshot maps.
+const credentialRegressionBase = review.createBackup({
+    transactions: [], categories: [{ name: 'Restaurants', type: 'expense' }],
+    budgets: { Restaurants: { '2026-10': 0 } }, merchantDefaults: {},
+    categoryGroups: [], categoryColors: {}, categoryOrder: []
+});
+assert.equal(review.validateSnapshot({
+    ...credentialRegressionBase,
+    merchantDefaults: {
+        'Token Coffee': 'Restaurants',
+        'Secret Garden': { category: 'Restaurants' },
+        'Password Bar': 'Restaurants',
+        'Access Token Books': 'Restaurants'
+    }
+}), true);
+for (const credentialKey of ['token', 'apiToken', 'idToken', 'refreshToken', 'providerTokens', 'myAccessToken', 'customAccessToken', 'access_key', 'private-key']) {
+    assert.throws(() => review.validateSnapshot({
+        ...credentialRegressionBase, merchantDefaults: { [credentialKey]: 'Restaurants' }
+    }), /credentials/);
+}
+assert.throws(() => review.validateSnapshot({
+    ...credentialRegressionBase, merchantDefaults: { 'Token Market': { customAccessToken: 'synthetic-secret' } }
+}), /credentials/);
+assert.throws(() => review.validateSnapshot({
+    ...credentialRegressionBase, budgets: { token: { '2026-10': 20 } }
+}), /credentials/);
 assert.throws(() => review.validateSnapshot({ ...backup, transactions: [{ date: '2026-02-30', description: 'bad', amount: 1, category: 'X' }] }), /transaction/);
 assert.throws(() => hydrated.restoreReview({ ...backup.review, receipts: [{ ...backup.review.receipts[0], accepted: [] }] }), /receipt candidates/);
 assert.throws(() => review.restoreBackup(backup, { requireApproval: true }), /explicit approval/);

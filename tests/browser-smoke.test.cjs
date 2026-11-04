@@ -185,6 +185,202 @@ function createServer() {
     assert.equal(reviewEditorSmoke.rejected.modalOpen, true, 'A failed revision-bound edit must keep the review form open.');
     assert.equal(reviewEditorSmoke.rejected.description, 'Rejected edit stays visible', 'A failed review edit must preserve form values.');
     assert.equal(reviewEditorSmoke.rejected.acceptedCount, 1, 'Review-only edits must not write accepted history.');
+    const reviewNoopSmoke = await page.evaluate(async () => {
+        const originalService = window.transactionApprovalService;
+        let editCalls = 0;
+        window.transactionApprovalService = { serverBacked: true, async edit(id, patch, revision) { editCalls += 1; await new Promise(resolve => setTimeout(resolve, 150)); return { id, ...patch, revision: revision + 1 }; }, async defer() {} };
+        reviewStore.clear();
+        clearReviewBatch();
+        const acceptedBefore = transactions.length;
+        const staged = reviewStore.stage([{
+            sourceId: 'provider-noop-review', sourceIdentity: 'synthetic:provider-noop-review', sourceRevision: '1',
+            date: '2026-10-12', description: 'Existing category review', merchant: 'Synthetic Market', amount: -7.25,
+            category: 'Restaurants', account: 'Checking', payment_method: 'Checking', type: 'expense'
+        }], { source: 'bank-provider', batchId: 'provider-noop-review' })[0];
+        renderReviewInbox();
+        openReviewCategoryModal(staged.id);
+        await new Promise(resolve => setTimeout(resolve, 0));
+        const modal = document.getElementById('categoryModal');
+        const close = document.getElementById('reviewClose');
+        const closePlacement = {
+            header: close.parentElement.tagName === 'H2',
+            accessible: close.getAttribute('aria-label') === 'Close review',
+            singleControl: document.querySelectorAll('#reviewClose').length === 1
+        };
+        close.click();
+        const xClosed = !modal.classList.contains('active');
+        const xDidNotQueue = !reviewBatchDecisionFor(staged.id);
+        openReviewCategoryModal(staged.id);
+        await new Promise(resolve => setTimeout(resolve, 0));
+        modal.click();
+        const backdropStayedOpen = modal.classList.contains('active');
+        document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }));
+        const escapeStayedOpen = modal.classList.contains('active');
+        const initial = reviewStore.get(staged.id);
+        const originalRevision = initial.revision;
+        const existingProviderCategoryAllowed = !reviewCandidateSelectionReason({ ...initial, category: 'Restaurants' });
+        const startedAt = performance.now();
+        document.getElementById('saveTransaction').click();
+        await new Promise(resolve => setTimeout(resolve, 0));
+        const elapsedMs = performance.now() - startedAt;
+        const after = reviewStore.get(staged.id);
+        const result = {
+            closePlacement, xClosed, xDidNotQueue, backdropStayedOpen, escapeStayedOpen,
+            existingProviderCategoryAllowed, editCalls, elapsedMs, status: after.status,
+            revisionUnchanged: after.revision === originalRevision, queuedAdd: reviewBatch.add.has(staged.id),
+            acceptedCountUnchanged: transactions.length === acceptedBefore,
+            modalClosedAfterReviewCompletion: !modal.classList.contains('active')
+        };
+        reviewStore.clear();
+        clearReviewBatch();
+        renderReviewInbox();
+        if (originalService === undefined) delete window.transactionApprovalService;
+        else window.transactionApprovalService = originalService;
+        return result;
+    });
+    assert.deepEqual(reviewNoopSmoke.closePlacement, { header: true, accessible: true, singleControl: true }, 'The review close control must be one accessible × in the modal header.');
+    assert.equal(reviewNoopSmoke.xClosed, true, 'The review × may close an idle editor.');
+    assert.equal(reviewNoopSmoke.xDidNotQueue, true, 'Closing with × must not decide the transaction.');
+    assert.equal(reviewNoopSmoke.backdropStayedOpen, true, 'Backdrop clicks must not dismiss review.');
+    assert.equal(reviewNoopSmoke.escapeStayedOpen, true, 'Escape must not dismiss review.');
+    assert.equal(reviewNoopSmoke.existingProviderCategoryAllowed, true, 'A provider transaction with an existing budget category remains reviewable.');
+    assert.equal(reviewNoopSmoke.editCalls, 0, 'An unchanged pending row must skip the revision edit request.');
+    assert.equal(reviewNoopSmoke.status, 'pending');
+    assert.equal(reviewNoopSmoke.revisionUnchanged, true, 'An unchanged pending row must not consume a new revision.');
+    assert.equal(reviewNoopSmoke.queuedAdd, true, 'An unchanged pending row still queues the intended Add decision.');
+    assert.equal(reviewNoopSmoke.acceptedCountUnchanged, true, 'Save & next must not commit before the separate final Add action.');
+    assert.equal(reviewNoopSmoke.modalClosedAfterReviewCompletion, true, 'The modal closes automatically when review is complete.');
+    console.log('Synthetic pending no-op Save & next: ' + reviewNoopSmoke.elapsedMs.toFixed(1) + ' ms, ' + reviewNoopSmoke.editCalls + ' edit requests (150 ms artificial edit latency).');
+
+    const delayedReviewEditSmoke = await page.evaluate(async () => {
+        const originalService = window.transactionApprovalService;
+        let resolveEdit;
+        let editCalls = 0;
+        window.transactionApprovalService = { serverBacked: true, edit(id, patch, revision) { editCalls += 1; return new Promise(resolve => { resolveEdit = () => resolve({ id, ...patch, revision: revision + 1 }); }); }, async defer() {} };
+        reviewStore.clear();
+        clearReviewBatch();
+        const acceptedBefore = transactions.length;
+        const staged = reviewStore.stage([{
+            sourceId: 'provider-delayed-edit', sourceIdentity: 'synthetic:provider-delayed-edit', sourceRevision: '1',
+            date: '2026-10-13', description: 'Needs an edit', merchant: 'Synthetic Store', amount: -8.50,
+            category: 'Restaurants', account: 'Checking', payment_method: 'Checking', type: 'expense'
+        }], { source: 'bank-provider', batchId: 'provider-delayed-edit' })[0];
+        renderReviewInbox();
+        openReviewCategoryModal(staged.id);
+        await new Promise(resolve => setTimeout(resolve, 0));
+        document.getElementById('modalDescription').value = 'Edited synthetic review';
+        document.getElementById('saveTransaction').click();
+        await new Promise(resolve => setTimeout(resolve, 0));
+        const modal = document.getElementById('categoryModal');
+        const beforeAck = reviewStore.get(staged.id);
+        const x = document.getElementById('reviewClose');
+        x.click();
+        modal.click();
+        document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }));
+        const guardedBeforeAck = modal.classList.contains('active') && (!reviewBatch || !reviewBatch.add.has(staged.id))
+            && reviewStore.get(staged.id).revision === beforeAck.revision
+            && reviewStore.get(staged.id).description === 'Needs an edit';
+        resolveEdit();
+        await new Promise(resolve => setTimeout(resolve, 0));
+        const after = reviewStore.get(staged.id);
+        const result = {
+            editCalls, guardedBeforeAck, modalClosedAfterAck: modal.classList.contains('active') === false,
+            acknowledgedEditInstalled: after.description === 'Edited synthetic review' && after.revision === beforeAck.revision + 1,
+            queuedAfterAck: reviewBatch.add.has(staged.id), acceptedCountUnchanged: transactions.length === acceptedBefore
+        };
+        reviewStore.clear();
+        clearReviewBatch();
+        renderReviewInbox();
+        if (originalService === undefined) delete window.transactionApprovalService;
+        else window.transactionApprovalService = originalService;
+        return result;
+    });
+    assert.equal(delayedReviewEditSmoke.editCalls, 1);
+    assert.equal(delayedReviewEditSmoke.guardedBeforeAck, true, 'Changed reviews must remain uninstalled and unqueued until durable acknowledgement.');
+    assert.equal(delayedReviewEditSmoke.modalClosedAfterAck, true, 'The modal closes after the acknowledged review edit completes the queue.');
+    assert.equal(delayedReviewEditSmoke.acknowledgedEditInstalled, true);
+    assert.equal(delayedReviewEditSmoke.queuedAfterAck, true);
+    assert.equal(delayedReviewEditSmoke.acceptedCountUnchanged, true);
+
+    const deferredResumeSmoke = await page.evaluate(async () => {
+        const originalService = window.transactionApprovalService;
+        let editCalls = 0;
+        window.transactionApprovalService = { serverBacked: true, async edit(id, patch, revision) { editCalls += 1; return { id, ...patch, revision: revision + 1 }; }, async defer() {} };
+        reviewStore.clear();
+        clearReviewBatch();
+        const staged = reviewStore.stage([{
+            sourceId: 'provider-held-resume', sourceIdentity: 'synthetic:provider-held-resume', sourceRevision: '1',
+            date: '2026-10-14', description: 'Held synthetic review', merchant: 'Synthetic Store', amount: -9.75,
+            category: 'Restaurants', account: 'Checking', payment_method: 'Checking', type: 'expense'
+        }], { source: 'bank-provider', batchId: 'provider-held-resume' })[0];
+        reviewStore.defer(staged.id, currentUser?.email);
+        reviewBatchQueue(staged.id, 'hold');
+        const before = reviewStore.get(staged.id);
+        renderReviewInbox();
+        openReviewCategoryModal(staged.id);
+        await new Promise(resolve => setTimeout(resolve, 0));
+        document.getElementById('saveTransaction').click();
+        await new Promise(resolve => setTimeout(resolve, 0));
+        const after = reviewStore.get(staged.id);
+        const result = {
+            beforeStatus: before.status, editCalls, afterStatus: after.status,
+            revisionAdvanced: after.revision === before.revision + 1,
+            queuedAdd: reviewBatch.add.has(staged.id), holdCleared: !reviewBatch.hold.has(staged.id)
+        };
+        reviewStore.clear();
+        clearReviewBatch();
+        renderReviewInbox();
+        if (originalService === undefined) delete window.transactionApprovalService;
+        else window.transactionApprovalService = originalService;
+        return result;
+    });
+    assert.equal(deferredResumeSmoke.beforeStatus, 'deferred');
+    assert.equal(deferredResumeSmoke.editCalls, 1, 'Re-adding an unchanged deferred row must retain the acknowledged resume edit.');
+    assert.equal(deferredResumeSmoke.afterStatus, 'pending');
+    assert.equal(deferredResumeSmoke.revisionAdvanced, true);
+    assert.equal(deferredResumeSmoke.queuedAdd, true);
+    assert.equal(deferredResumeSmoke.holdCleared, true);
+
+    const unreviewedNoopSmoke = await page.evaluate(async () => {
+        const originalService = window.transactionApprovalService;
+        let editCalls = 0;
+        window.transactionApprovalService = { serverBacked: true, async edit(id, patch, revision) { editCalls += 1; return { id, ...patch, revision: revision + 1 }; }, async defer() {} };
+        reviewStore.clear();
+        clearReviewBatch();
+        const acceptedBefore = transactions.length;
+        const staged = reviewStore.stage([{
+            sourceId: 'unreviewed-noop', sourceIdentity: 'synthetic:unreviewed-noop', sourceRevision: '1',
+            date: '2026-10-15', description: 'Unreviewed synthetic row', merchant: 'Synthetic Store', amount: -5.25,
+            category: 'Restaurants', account: 'Checking', payment_method: 'Checking', type: 'expense'
+        }], { source: 'bank-provider', batchId: 'unreviewed-noop' })[0];
+        const snapshot = reviewStore.exportReview();
+        snapshot.pending[0].revision += 1;
+        reviewStore.restoreReview(snapshot);
+        const before = reviewStore.get(staged.id);
+        renderReviewInbox();
+        openReviewCategoryModal(staged.id);
+        await new Promise(resolve => setTimeout(resolve, 0));
+        document.getElementById('saveTransaction').click();
+        await new Promise(resolve => setTimeout(resolve, 0));
+        const after = reviewStore.get(staged.id);
+        const result = { beforeReviewedRevision: before.reviewedRevision, beforeRevision: before.revision, editCalls,
+            afterStatus: after.status, afterReviewedRevision: after.reviewedRevision, afterRevision: after.revision,
+            queuedAdd: !!(reviewBatch && reviewBatch.add.has(staged.id)), acceptedCountUnchanged: transactions.length === acceptedBefore };
+        reviewStore.clear();
+        clearReviewBatch();
+        renderReviewInbox();
+        if (originalService === undefined) delete window.transactionApprovalService;
+        else window.transactionApprovalService = originalService;
+        return result;
+    });
+    assert.ok(unreviewedNoopSmoke.beforeReviewedRevision < unreviewedNoopSmoke.beforeRevision);
+    assert.equal(unreviewedNoopSmoke.editCalls, 1, 'An unchanged row not yet reviewed at its current revision must retain its acknowledged edit.');
+    assert.equal(unreviewedNoopSmoke.afterStatus, 'pending');
+    assert.ok(unreviewedNoopSmoke.afterReviewedRevision === unreviewedNoopSmoke.afterRevision);
+    assert.ok(unreviewedNoopSmoke.afterRevision > unreviewedNoopSmoke.beforeRevision);
+    assert.equal(unreviewedNoopSmoke.queuedAdd, true);
+    assert.equal(unreviewedNoopSmoke.acceptedCountUnchanged, true);
+
     const reviewDecisionSmoke = await page.evaluate(async () => {
         const originalService = window.transactionApprovalService;
         const originalConfirm = window.confirm;

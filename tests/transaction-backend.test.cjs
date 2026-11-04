@@ -262,6 +262,50 @@ assert.throws(() => legacyBackend.saveAcceptedState(auth, { ...settingsSave.stat
 assert.throws(() => legacyBackend.saveAcceptedState(auth, { ...settingsSave.state, categoryColors: { Restaurants: 'not-a-color' } }, metadataRevision), /category colors are invalid/);
 assert.throws(() => legacyBackend.saveAcceptedState(auth, { ...settingsSave.state, merchantDefaults: { accessToken: 'must-not-persist' } }, metadataRevision), /credentials or provider tokens/);
 assert.equal((await legacyBackend.exportState(auth)).revision, metadataRevision);
+
+// The shared save route accepts valid merchant names containing credential
+// words, so category edits and prior-month budget copies do not fail the same
+// full-state metadata validation.
+const merchantDefaultsBackend = new ProtectedReviewBackend({
+    householdId: 'household-1', allowedUsers: ['reviewer@example.test'],
+    initialState: {
+        transactions: [record({ sourceId: 'merchant-default-route-row' })],
+        categories: reviewCategories,
+        budgets: { Restaurants: { '2026-10': 20 } },
+        merchantDefaults: { 'Token Coffee': 'Restaurants', 'Secret Garden': { category: 'Restaurants' } },
+        categoryGroups: [], categoryColors: {}, categoryOrder: []
+    }
+});
+const merchantDefaultsBefore = await merchantDefaultsBackend.exportState(auth);
+const merchantDefaultsState = {
+    transactions: merchantDefaultsBefore.accepted.map(entry => Array.isArray(entry) ? entry[1] : entry),
+    ...merchantDefaultsBefore.state
+};
+const merchantDefaultsHandler = createHttpHandler({ backend: merchantDefaultsBackend, authenticate: async () => auth });
+const saveAcceptedStateOverHttp = async (state, expectedRevision) => {
+    const response = { statusCode: 0, headers: {}, body: '', setHeader(name, value) { this.headers[name] = value; }, end(body) { this.body = body || ''; } };
+    await merchantDefaultsHandler({
+        method: 'POST', url: '/accepted-state', headers: {},
+        on(event, handler) {
+            if (event === 'data') process.nextTick(() => handler(JSON.stringify({ state, expectedRevision })));
+            if (event === 'end') process.nextTick(handler);
+        }
+    }, response);
+    return response;
+};
+const categoryEditResponse = await saveAcceptedStateOverHttp({
+    ...merchantDefaultsState,
+    transactions: merchantDefaultsState.transactions.map(transaction => ({ ...transaction, category: 'Food' }))
+}, merchantDefaultsBefore.revision);
+assert.equal(categoryEditResponse.statusCode, 200, 'category edit with legitimate merchant names must pass the accepted-state route');
+const categoryEditResult = JSON.parse(categoryEditResponse.body);
+assert.equal(categoryEditResult.state.transactions[0].category, 'Food');
+const budgetCopyResponse = await saveAcceptedStateOverHttp({
+    ...categoryEditResult.state,
+    budgets: { Restaurants: { ...categoryEditResult.state.budgets.Restaurants, '2026-11': 20 } }
+}, categoryEditResult.revision);
+assert.equal(budgetCopyResponse.statusCode, 200, 'budget copy with legitimate merchant names must pass the accepted-state route');
+assert.equal(JSON.parse(budgetCopyResponse.body).state.budgets.Restaurants['2026-11'], 20);
 assert.throws(() => legacyBackend.replaceAccepted(auth, legacyCanonical, settingsSave.revision), /Backup transaction 1 is invalid/);
 const historicalRestore = await legacyBackend.replaceAccepted(auth, { ...legacyCanonical, acceptedHistoryDateCompatibility: true }, settingsSave.revision);
 assert.equal(historicalRestore.ok, true);

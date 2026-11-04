@@ -294,13 +294,28 @@
         if (snapshot.categoryOrder !== undefined && !Array.isArray(snapshot.categoryOrder)) throw new Error('Backup categoryOrder is invalid.');
         if ((snapshot.categoryGroups || []).some(value => typeof value !== 'string') || (snapshot.categoryOrder || []).some(value => typeof value !== 'string')) throw new Error('Backup category ordering is invalid.');
         if (snapshot.review) validateReviewSnapshot(snapshot.review);
-        const containsCredentialKey = value => {
+        const sensitiveKey = /credential|token|secret|password|accesskey/i;
+        const credentialFieldWord = /\b(?:credentials?|tokens?|secrets?|passwords?|access\s*keys?|api\s*keys?|client\s*secrets?|private\s*keys?|secret\s*keys?)\b/i;
+        const compactCredentialField = /^(?:credentials?|tokens?|secrets?|passwords?|access(?:tokens?|keys?)|refresh(?:tokens?|keys?)|provider(?:tokens?|keys?)|api(?:tokens?|keys?)|auth(?:tokens?|keys?)|idtokens?|client(?:secrets?|tokens?|keys?)|plaid(?:tokens?|keys?)|firebase(?:tokens?|keys?)|oauth(?:tokens?|keys?)|session(?:tokens?|keys?)|privatekeys?|secretkeys?)$/i;
+        const isCredentialFieldName = key => {
+            const raw = String(key);
+            if (compactCredentialField.test(raw)) return true;
+            if (/\s/.test(raw)) return false;
+            const words = raw.replace(/([a-z0-9])([A-Z])/g, '$1 $2').replace(/[_-]+/g, ' ').trim();
+            return credentialFieldWord.test(words);
+        };
+        const containsCredentialKey = (value, allowDomainKeysAtRoot) => {
             if (!value || typeof value !== 'object') return false;
-            if (Array.isArray(value)) return value.some(containsCredentialKey);
-            return Object.entries(value).some(([key, child]) => /credential|token|secret|password|accesskey/i.test(key) || containsCredentialKey(child));
+            if (Array.isArray(value)) return value.some(child => containsCredentialKey(child, false));
+            return Object.entries(value).some(([key, child]) => {
+                // merchantDefaults is a dictionary keyed by merchant names. Legacy
+                // values may be category strings; recurse through all nested values.
+                const isDomainKey = allowDomainKeysAtRoot === true && !isCredentialFieldName(key);
+                return (!isDomainKey && (sensitiveKey.test(key) || isCredentialFieldName(key))) || containsCredentialKey(child, false);
+            });
         };
         for (const field of ['transactions', 'categories', 'budgets', 'merchantDefaults', 'categoryGroups', 'categoryColors', 'categoryOrder', 'metadata', 'review']) {
-            if (containsCredentialKey(snapshot[field])) throw new Error('Backups must not contain credentials or provider tokens.');
+            if (containsCredentialKey(snapshot[field], field === 'merchantDefaults')) throw new Error('Backups must not contain credentials or provider tokens.');
         }
         if (snapshot.credentials || snapshot.providerTokens || snapshot.accessTokens) throw new Error('Backups must not contain credentials or provider tokens.');
         return true;

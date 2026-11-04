@@ -537,7 +537,10 @@
 
     <div class="modal" id="categoryModal">
         <div class="modal-content">
-            <h2>Review Transaction <span id="reviewProgress" style="font-size:0.9rem;font-weight:400;color:var(--muted);"></span></h2>
+            <h2 style="display:flex;align-items:center;justify-content:space-between;">
+                <span>Review Transaction <span id="reviewProgress" style="font-size:0.9rem;font-weight:400;color:var(--muted);"></span></span>
+                <button class="btn btn-secondary" id="reviewClose" type="button" aria-label="Close review" title="Close review" style="display:none;padding:4px 10px;font-size:1.2rem;line-height:1;">&times;</button>
+            </h2>
             <div class="form-group">
                 <label>Account</label>
                 <input type="text" id="modalAccount" style="width:100%;padding:8px;border:1px solid var(--border-strong);border-radius:4px;">
@@ -600,7 +603,6 @@
                 <button class="btn btn-secondary" id="splitTransaction">Split</button>
                 <button class="btn btn-secondary" id="reviewSkip" style="display:none;">Hold &amp; next</button>
                 <button class="btn btn-danger" id="reviewReject" style="display:none;">Mark for rejection</button>
-                <button class="btn btn-secondary" id="reviewClose" style="display:none;">Close</button>
                 <button class="btn btn-success" id="saveTransaction">Approve</button>
             </div>
         </div>
@@ -4408,10 +4410,11 @@
                     try {
                         const before = reviewStore.get(candidateId);
                         if (!before || before.revision !== expectedRevision || categoryModalSession !== session || categoryModalMode !== 'review') throw new Error('This review row changed. Close and reopen it before saving.');
-                        if (service && service.serverBacked === true) await service.edit(candidateId, patch, expectedRevision);
+                        const changed = before.status !== 'pending' || before.reviewedRevision !== before.revision || ['description', 'merchant', 'amount', 'date', 'category', 'account', 'payment_method', 'type'].some(key => String(before[key] ?? '') !== String(patch[key] ?? ''));
+                        if (changed && service && service.serverBacked === true) await service.edit(candidateId, patch, expectedRevision);
                         if (generation !== authGeneration || user !== currentUser) throw new Error('Authentication changed before review edit was acknowledged.');
                         if (categoryModalSession !== session || categoryModalMode !== 'review') throw new Error('This review editor was closed before the save completed. Reload the review inbox.');
-                        reviewStore.edit(candidateId, patch, expectedRevision);
+                        if (changed) reviewStore.edit(candidateId, patch, expectedRevision);
                         reviewBatchQueue(candidateId, 'add');
                         renderReviewInbox();
                         advanceReviewModalAfterDecision(candidateId);
@@ -4502,15 +4505,13 @@
 
         document.getElementById('categoryModal').addEventListener('click', event => {
             if (event.target !== event.currentTarget) return;
-            if (categoryModalMode === 'review') closeCategoryReviewModal();
-            else event.currentTarget.classList.remove('active');
+            if (categoryModalMode !== 'review') event.currentTarget.classList.remove('active');
         });
         document.addEventListener('keydown', event => {
             if (event.key !== 'Escape') return;
             const modal = document.getElementById('categoryModal');
             if (!modal || !modal.classList.contains('active')) return;
-            if (categoryModalMode === 'review') closeCategoryReviewModal();
-            else modal.classList.remove('active');
+            if (categoryModalMode !== 'review') modal.classList.remove('active');
         });
 
         function initSplitRows() {
