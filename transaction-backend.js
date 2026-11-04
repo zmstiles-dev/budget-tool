@@ -310,6 +310,39 @@
         return Object.freeze({ read, update });
     }
 
+    // Deterministic import policy. Names alone do not establish a transfer.
+    function providerImportExclusion(item) {
+        const source = item || {};
+        const finance = source.personal_finance_category || source.providerImportCategory || {};
+        const categories = [finance.primary, finance.detailed, ...(Array.isArray(source.category) ? source.category : [source.category])]
+            .map(value => text(value).toUpperCase()).join(' ');
+        const description = text(source.name || source.description).toLowerCase().replace(/[^a-z0-9]+/g, ' ').trim();
+        const merchant = text(source.merchant_name || source.merchant).toLowerCase();
+        if (/(?:^|[_,\s])(?:FEES?|REFUNDS?)(?:[_,\s]|$)/.test(categories) || /\b(?:fee|fees|refund|reversal|purchase)\b/.test(description)) return '';
+        if (/\b(?:LOAN_PAYMENTS_CREDIT_CARD_PAYMENT|TRANSFER_(?:IN|OUT)_CREDIT_CARD_PAYMENT)\b/.test(categories)
+            || /\bPAYMENT[, ]+CREDIT CARD\b/.test(categories)) return 'credit-card-payment';
+        if (/FEE|REFUND|PURCHASE|FOOD|RESTAURANT|SHOPPING|GENERAL_MERCHANDISE|TRANSPORTATION|TRAVEL|RENT_AND_UTILITIES|MEDICAL|PERSONAL_CARE|ENTERTAINMENT|SERVICE/.test(categories)) return '';
+        const transfer = /\bTRANSFER(?:_IN|_OUT)?(?:\b|_)/.test(categories)
+            || /\b(?:transfer|xfer|brokerage contribution|brokerage withdrawal)\b/.test(description);
+        if (/\bmorgan\s*stanley\b/.test(`${description} ${merchant}`) && transfer) return 'morgan-stanley-transfer';
+        if (/^(?:(?:credit )?card (?:auto )?payment(?: (?:to|from) [a-z0-9 ]+)?|payment (?:to|for) (?:credit )?card(?: [a-z0-9 ]+)?|(?:automatic )?payment (?:received )?thank you)(?: \d+)?$/.test(description)) return 'credit-card-payment';
+        if (/^(?:capital one|chase|citi|citibank|amex|american express|discover) (?:credit card )?(?:(?:online|mobile|auto) )?(?:payment|pmt|pymt|autopay)(?: (?:received|thank you|autopay))?(?: \d+)?$/.test(description)) return 'credit-card-payment';
+        const account = text(source.account || source.payment_method);
+        const unknownCategory = !categories.trim() || /^(?:UNCATEGORIZED|PAYMENT|TRANSFER|TRANSFER_IN|TRANSFER_OUT|TRANSFER_IN_TRANSFER_IN_FROM_ACCOUNT|TRANSFER_OUT_TRANSFER_OUT_TO_ACCOUNT)(?:[\s,]|$)/.test(categories.trim());
+        if (account && account !== review.CHECKING_ACCOUNT_ALIAS && Number(source.amount) < 0 && unknownCategory
+            && (!merchant || merchant === description)
+            && /^(?:(?:automatic|auto|online|mobile) (?:payment|pmt|pymt)(?: (?:received|thank you))?|payment received)$/.test(description)) return 'credit-card-payment';
+        return '';
+    }
+
+    function excludedProviderCandidate(candidate) {
+        if (!candidate) return false;
+        const original = candidate.sourceOriginal || candidate;
+        if (candidate.source !== 'bank-provider' && original.source !== 'bank-provider') return false;
+        // Original source evidence survives edits; saved history is untouched.
+        return !!providerImportExclusion(original);
+    }
+
     function observationDigest(kind, item) {
         const source = item || {};
         // Keep this projection explicit. Provider payloads can contain access
@@ -734,7 +767,7 @@
         async listPending(auth) {
             this.authorize(auth);
             this.normalizeHydratedPending();
-            return [...this.pending.values()].map(clone);
+            return [...this.pending.values()].filter(candidate => !excludedProviderCandidate(candidate)).map(clone);
         }
 
         normalizeHydratedPending() {
@@ -947,6 +980,7 @@
                 if (selected.some(candidate => !candidate)) throw new Error('Every candidate must remain pending for approval.');
                 this.recomputeOverlaps();
                 selected.forEach((candidate, index) => {
+                    if (excludedProviderCandidate(candidate)) throw new Error('Provider transfer is excluded from transaction imports.');
                     if (candidate.revision !== revisions[index]) throw new Error(`Candidate ${candidate.id} changed since review.`);
                     if (candidate.status !== review.STATES.PENDING && candidate.status !== review.STATES.DEFERRED) throw new Error(`Candidate ${candidate.id} is not approvable.`);
                     if (candidate.providerPending === true || candidate.pending === true) throw new Error(`Provider pending observation ${candidate.id} must post before approval.`);
@@ -1116,7 +1150,7 @@
             }).filter(Boolean);
             return {
                 schemaVersion: review.VERSION,
-                pending: [...this.pending.values()].map(clone),
+                pending: [...this.pending.values()].filter(candidate => !excludedProviderCandidate(candidate)).map(clone),
                 rejected: [...this.rejected.values()].map(clone),
                 accepted,
                 audit: clone(this.audit),
@@ -1821,8 +1855,12 @@
             const amount = Number(item.amount);
             if (!Number.isFinite(amount)) throw new Error('Plaid transaction amount is invalid.');
             const signedAmount = amount;
+            const excludedImport = providerImportExclusion({ ...item, account });
+            // Retain modifications and linked posted replacements so they can
+            // supersede stale suggestions while remaining hidden/unapprovable.
+            if (kind === 'added' && excludedImport && !text(item.pending_transaction_id)) return null;
             const category = text(item.category || item.personal_finance_category && (item.personal_finance_category.primary || item.personal_finance_category.detailed) || 'Uncategorized');
-            const classifierResult = this.classify ? text(await this.classify({ kind, id, amount: signedAmount, category, name: text(item.name), merchantName: text(item.merchant_name), accountId, currency: 'USD', pending: item.pending === true })) : '';
+            const classifierResult = !excludedImport && this.classify ? text(await this.classify({ kind, id, amount: signedAmount, category, name: text(item.name), merchantName: text(item.merchant_name), accountId, currency: 'USD', pending: item.pending === true })) : '';
             // Durable removal hydration may carry a server-only historical
             // type marker. It is intentionally ignored when supplied as an
             // enumerable provider field, so raw provider data cannot inject a
@@ -1848,7 +1886,11 @@
                 ...(checkingIncome ? { providerSignedAmount: signedAmount } : {}),
                 ...(classified === 'income' || classified === 'expense' ? { providerClassification: classified } : {}),
                 ...(text(item.pending_transaction_id) ? { pendingTransactionId: text(item.pending_transaction_id) } : {}),
-                providerPending: item.pending === true
+                providerPending: item.pending === true,
+                providerImportCategory: {
+                    primary: text(item.personal_finance_category && item.personal_finance_category.primary),
+                    detailed: text(item.personal_finance_category && item.personal_finance_category.detailed)
+                }
             };
             if (!candidate.date) throw new Error('Provider transaction is missing a reviewable date.');
             candidate.id = `${candidate.sourceIdentity}@${candidate.sourceRevision}`;
@@ -2116,6 +2158,7 @@
         FirestoreSyncRepository,
         BrowserApprovalClient,
         PlaidTransactionsSyncAdapter,
+        providerImportExclusion,
         createProtectedSyncSettings,
         verifyFirebaseAuthorization,
         createHttpHandler,

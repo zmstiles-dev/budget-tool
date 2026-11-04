@@ -299,7 +299,7 @@
         const compactCredentialField = /^(?:credentials?|tokens?|secrets?|passwords?|access(?:tokens?|keys?)|refresh(?:tokens?|keys?)|provider(?:tokens?|keys?)|api(?:tokens?|keys?)|auth(?:tokens?|keys?)|idtokens?|client(?:secrets?|tokens?|keys?)|plaid(?:tokens?|keys?)|firebase(?:tokens?|keys?)|oauth(?:tokens?|keys?)|session(?:tokens?|keys?)|privatekeys?|secretkeys?)$/i;
         const isCredentialFieldName = key => {
             const raw = String(key);
-            if (compactCredentialField.test(raw)) return true;
+            if (compactCredentialField.test(raw.replace(/[\s_-]+/g, ''))) return true;
             if (/\s/.test(raw)) return false;
             const words = raw.replace(/([a-z0-9])([A-Z])/g, '$1 $2').replace(/[_-]+/g, ' ').trim();
             return credentialFieldWord.test(words);
@@ -308,8 +308,12 @@
             if (!value || typeof value !== 'object') return false;
             if (Array.isArray(value)) return value.some(child => containsCredentialKey(child, false));
             return Object.entries(value).some(([key, child]) => {
-                // merchantDefaults is a dictionary keyed by merchant names. Legacy
-                // values may be category strings; recurse through all nested values.
+                // merchantDefaults is a dictionary keyed by merchant names.
+                // Legacy entries may store the category as a string. Exempt
+                // ordinary multiword names that happen to contain a sensitive
+                // word, but keep credential-shaped property names such as
+                // "customAccessToken" blocked even when they appear as keys.
+                // Every entry value is still scanned recursively.
                 const isDomainKey = allowDomainKeysAtRoot === true && !isCredentialFieldName(key);
                 return (!isDomainKey && (sensitiveKey.test(key) || isCredentialFieldName(key))) || containsCredentialKey(child, false);
             });
