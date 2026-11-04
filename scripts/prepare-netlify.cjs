@@ -49,7 +49,8 @@ function assertSourceFile(source, label) {
 for (const file of allowlist) {
     const source = path.join(root, file);
     const sourceReal = assertSourceFile(source, file);
-    let data = fs.readFileSync(sourceReal);
+    // Canonical Git text/runtime bytes are LF; historical receipts retain raw ZIP hashes.
+    let data = Buffer.from(fs.readFileSync(sourceReal, 'utf8').replace(/\r\n/g, '\n'), 'utf8');
     if (file === 'transaction-backend.js') {
         const sourceText = data.toString('utf8');
         const legacyRoster = /const EXISTING_ALLOWED_USERS = Object\.freeze\(\[[^\]]*\]\);/;

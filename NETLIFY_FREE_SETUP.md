@@ -1,5 +1,10 @@
 # Netlify Free setup guide
 
+The canonical provenance/retention/operator workflow is now
+[BACKEND_RELEASES.md](BACKEND_RELEASES.md). Use its guarded commands for future
+production releases. The setup/reference material below does not bypass its
+clean-source, retained-artifact, rollback and one-use requirements.
+
 This guide is for a later authorized operator. The approved future site
 display name is `Stiles-Budget-Tool`, with proposed normalized slug
 `stiles-budget-tool` is the approved existing site with the reviewed ID and production hostname recorded below; runtime checks still reject any different binding. The guide is intentionally written without actual user IDs, emails,

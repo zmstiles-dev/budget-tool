@@ -1,0 +1,33 @@
+{
+  "schemaVersion": 1,
+  "siteId": "a429bdf1-47c9-4bb0-9e9d-7f5cdf8d416d",
+  "siteHost": "stiles-budget-tool.netlify.app",
+  "functionName": "budgetTransactions",
+  "runtime": "nodejs24.x",
+  "runtimeAPIVersion": 2,
+  "bootstrapVersion": "2.24.0",
+  "invocationMode": "stream",
+  "memory": 1024,
+  "region": "us-east-2",
+  "siteRegion": "cmh",
+  "defaultStore": "D:/Documents/Codex/budget-tool-releases",
+  "publishedRef": "refs/remotes/origin/main",
+  "officialCliVersion": "27.13.0",
+  "sourceFiles": [
+    "production-service.js",
+    "transaction-backend.js",
+    "transaction-service.js",
+    "transaction-review.js",
+    "transaction-config.js",
+    "netlify/functions/budgetTransactions.mjs",
+    "netlify/package.json",
+    "netlify/package-lock.json",
+    "scripts/prepare-netlify.cjs",
+    "scripts/bundle-netlify.cjs",
+    "scripts/backend-build-paths.cjs",
+    "scripts/backend-release.cjs",
+    "scripts/backend-release-guard.cjs",
+    "scripts/netlify-release-transport.cjs",
+    "backend-release.policy.json"
+  ]
+}

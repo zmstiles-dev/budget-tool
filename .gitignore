@@ -21,3 +21,13 @@ netlify/.netlify/
 netlify/.artifact/
 netlify/public/*
 !netlify/public/.gitkeep
+
+# Private release evidence and local tools must never enter Git or Pages.
+.local/
+.backend-releases/
+*.zip
+*.release.log
+node_modules/
+.netlify-auth/
+deploy-ledger*.json
+release-receipt*.json

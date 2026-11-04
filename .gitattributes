@@ -1,0 +1,11 @@
+production-service.js text eol=lf
+transaction-backend.js text eol=lf
+transaction-service.js text eol=lf
+transaction-review.js text eol=lf
+transaction-config.js text eol=lf
+netlify/functions/*.mjs text eol=lf
+netlify/package*.json text eol=lf
+scripts/*.cjs text eol=lf
+tests/*.cjs text eol=lf
+backend-release.policy.json text eol=lf
+.github/workflows/*.yml text eol=lf

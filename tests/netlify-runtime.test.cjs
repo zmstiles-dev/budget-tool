@@ -668,7 +668,7 @@ function assertRedactedDiagnostic(records, expectedStage, expectedErrorCode = 'u
     // A caller may have an unrelated NODE_PATH (for example the verification
     // browser/runtime dependency tree). Bundling must resolve only the pinned
     // Netlify package and its isolated production staging closure.
-    const ambientParent = path.resolve('D:/Documents/Codex/.assistant-storage/temp');
+    const ambientParent = require('../scripts/backend-build-paths.cjs').buildPaths(projectRoot).temp;
     const ambientRoot = path.join(ambientParent, `budget-tool-netlify-ambient-node-path-${process.pid}`);
     const ambientPackage = path.join(ambientRoot, 'node_modules', '@firebase', 'app-compat');
     fs.mkdirSync(ambientPackage, { recursive: true });
@@ -719,7 +719,7 @@ function assertRedactedDiagnostic(records, expectedStage, expectedErrorCode = 'u
     assert.equal(artifactManifest.archive.bundler, '@netlify/zip-it-and-ship-it');
     const archivePath = path.join(projectRoot, 'netlify', '.artifact', artifactManifest.archive.file);
     assert.equal(fs.existsSync(archivePath), true);
-    const proofParent = path.resolve('D:/Documents/Codex/.assistant-storage/temp');
+    const proofParent = require('../scripts/backend-build-paths.cjs').buildPaths(projectRoot).temp;
     const proofRoot = path.join(proofParent, `budget-tool-netlify-archive-${process.pid}`);
     fs.mkdirSync(proofParent, { recursive: true });
     fs.mkdirSync(proofRoot, { recursive: true });
