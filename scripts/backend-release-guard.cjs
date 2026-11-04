@@ -184,7 +184,16 @@ function verify({ root, storeRoot, manifestPath, published = false }) {
     if (stable(archiveBinding(root, archive)) !== stable(manifest.runtime)) fail('Runtime proof changed.');
     const baseline = receipt(root, store, manifest.baseline?.deployId);
     if (baseline.receiptSha256 !== manifest.baseline.receiptSha256 || stable(baseline.artifact) !== stable(manifest.baseline.artifact) || manifest.rollback?.deployId !== baseline.deployId || stable(manifest.rollback.artifact) !== stable(baseline.artifact)) fail('Baseline or rollback binding changed.');
-    return { manifest, store, manifestSha256: hash(fs.readFileSync(manifestPath)), archivePath: path.join(store, 'sha256', manifest.artifact.sha256, 'budgetTransactions.zip') };
+    const manifestSha256 = hash(fs.readFileSync(manifestPath)), claim = siteClaim(store, manifest.settings.siteId);
+    if (published && claim && claim.manifestSha256 !== manifestSha256) fail('Another release for this site is unresolved; GET-only reconciliation is required.');
+    return { manifest, store, manifestSha256, archivePath: path.join(store, 'sha256', manifest.artifact.sha256, 'budgetTransactions.zip') };
+}
+function siteClaim(store, siteId) {
+    const file = path.join(store, 'claims', `${siteId}.json`);
+    if (!fs.existsSync(file)) return null;
+    safeFile(store, file); const value = json(file);
+    if (value.schemaVersion !== 1 || value.siteId !== siteId || !ID.test(value.releaseId || '') || !SHA.test(value.manifestSha256 || '')) fail('Invalid persistent site release claim.');
+    return value;
 }
 function locked(store, siteId, callback) {
     const file = path.join(directory(store, 'locks'), `${siteId}.lock`); let fd;
@@ -219,17 +228,23 @@ async function deploy(options) {
     if (!options.transport) fail('Approved transport required after local guard verification.');
     return locked(store, m.settings.siteId, async () => {
         const file = path.join(path.dirname(options.manifestPath), 'journal.json'); let events = journal(file, manifestSha256);
-        if (events.at(-1)?.phase === 'success') return receipt(options.root, store, events.at(-1).deployId);
+        const claimFile = path.join(directory(store, 'claims'), `${m.settings.siteId}.json`), claim = siteClaim(store, m.settings.siteId);
+        if (claim && claim.manifestSha256 !== manifestSha256) fail('Another release for this site is unresolved; GET-only reconciliation is required.');
+        if (events.at(-1)?.phase === 'success') {
+            if (claim) { await observed(options.transport, m.settings, events.at(-1).deployId, m.artifact); fs.unlinkSync(claimFile); }
+            return receipt(options.root, store, events.at(-1).deployId);
+        }
         if (options.reconcile) {
             const id = events.at(-1)?.deployId; if (!ID.test(id || '') || !['ambiguous', 'uploaded', 'upload-started'].includes(events.at(-1)?.phase)) fail('No bound deployment can be reconciled.');
             await observed(options.transport, m.settings, id, m.artifact);
             return finish(id);
         }
-        if (events.length) fail('A prior release attempt exists; no automatic mutation retry.');
+        if (events.length || claim) fail('A prior release attempt exists; no automatic mutation retry.');
         await observed(options.transport, m.settings, m.baseline.deployId, m.baseline.artifact);
         verify({ ...options, published: true });
         if (options.preflight) return { ready: true, manifestSha256, writes: 0 };
         if (options.confirmation !== m.releaseId) fail('Exact release ID confirmation required.');
+        immutable(claimFile, { schemaVersion: 1, siteId: m.settings.siteId, releaseId: m.releaseId, manifestSha256 });
         events = append(file, events, manifestSha256, 'create-started'); let id;
         try {
             const created = await options.transport.create({ draft: false, functions: { [m.settings.functionName]: m.artifact.sha256 }, functions_config: { [m.settings.functionName]: { build_data: { runtimeAPIVersion: m.settings.runtimeAPIVersion, bootstrapVersion: m.settings.bootstrapVersion } } } });
@@ -244,6 +259,7 @@ async function deploy(options) {
             await observed(options.transport, m.settings, id, m.artifact);
             return finish(id);
         } catch (error) {
+            if (events.at(-1)?.phase === 'success') throw error; // Verified success with a leftover claim requires GET-only cleanup.
             id = id || (ID.test(error?.deployId || '') ? error.deployId : undefined);
             append(file, events, manifestSha256, 'ambiguous', { ...(id ? { deployId: id } : {}), ...(Number.isInteger(error.httpStatus) ? { httpStatus: error.httpStatus } : {}), requiresReadOnlyReconciliation: true });
             fail('Release did not produce complete proof. Stop mutations and reconcile with GET only.');
@@ -251,7 +267,9 @@ async function deploy(options) {
         function finish(deployId) {
             const value = { schemaVersion: 1, kind: 'release', verified: true, releaseId: m.releaseId, deployId, siteId: m.settings.siteId, siteHost: m.settings.siteHost, sourceCommit: m.source.commit, source: m.source, runtime: m.runtime, artifact: m.artifact, manifestSha256, rollback: m.rollback };
             seal(path.join(directory(store, 'receipts'), `${deployId}.json`), value);
-            events = append(file, events, manifestSha256, 'success', { deployId }); return value;
+            events = append(file, events, manifestSha256, 'success', { deployId });
+            if (fs.existsSync(claimFile)) fs.unlinkSync(claimFile);
+            return value;
         }
     });
 }

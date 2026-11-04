@@ -155,3 +155,13 @@ test('single-attempt transport never retries ambiguous network failures', async 
     let calls = 0; const api = transport(settings, 'synthetic-secret', async () => { calls++; throw Object.assign(new Error('synthetic reset'), { code: 'ECONNRESET' }); });
     await assert.rejects(() => api.create({}), /synthetic reset/); assert.equal(calls, 1);
 });
+test('persistent site claim blocks another release ID after an ambiguous create', async () => {
+    const f = fixture(), first = f.prepare(), api = fake(f);
+    api.create = async () => { api.calls.push('POST'); throw new Error('synthetic lost create acknowledgement'); };
+    await assert.rejects(() => guard.deploy({ ...f, manifestPath: first.manifestPath, confirmation: f.releaseId, transport: api }), /reconcile/);
+    const second = guard.prepare({ ...f.options, releaseId: 'another-release-12345' }), other = fake(f);
+    await assert.rejects(() => guard.deploy({ ...f, manifestPath: second.manifestPath, confirmation: 'another-release-12345', transport: other }), /Another release.*unresolved/);
+    await assert.rejects(() => guard.deploy({ ...f, manifestPath: second.manifestPath, preflight: true, transport: other }), /Another release.*unresolved/);
+    assert.deepEqual(other.calls, []); assert.equal(api.calls.filter(value => value === 'POST').length, 1);
+    assert.equal(fs.existsSync(path.join(f.storeRoot, 'claims', `${settings.siteId}.json`)), true);
+});

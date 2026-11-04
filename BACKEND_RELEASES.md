@@ -25,6 +25,7 @@ releases/<release-id>/journal.json
 receipts/<deploy-id>.json[.sha256]
 adoption-evidence/<deploy-id>/original-{proof,manifest}.json
 locks/<site-id>.lock
+claims/<site-id>.json
 ```
 
 Initialize the external D: root before first use; commands fail if it is missing,
@@ -111,6 +112,12 @@ D: auth root with appdata/localappdata/temp children. Never put credentials in
 arguments, source, manifests, output, or a CI environment. Local provenance
 verification runs before importing the CLI authentication bootstrap.
 
+If an independently reviewed checkout was created under another Windows user,
+an operator may need a process-scoped Git `safe.directory` entry for that exact
+checkout (using `GIT_CONFIG_COUNT`/`GIT_CONFIG_KEY_0`/`GIT_CONFIG_VALUE_0`). Do not
+add universal trust or change global Git configuration. This addresses Git's
+ownership check and does not authorize a deployment.
+
 ```powershell
 node scripts/backend-release.cjs preflight --manifest <retained-manifest.json>
 node scripts/backend-release.cjs apply --manifest <retained-manifest.json> --confirm <exact-release-id>
@@ -124,7 +131,12 @@ streaming, 1024 MB and us-east-2. Creation uses the known accepted minimal
 `draft/functions/build_data` body. Memory/region are inherited, with effective
 pre/post checks, because this site's Free plan rejects region overrides.
 
-The site lock and hash-chained journal prevent concurrent or repeated writes.
+The canonical store's site lock and hash-chained journal prevent concurrent or
+repeated writes. A persistent site claim is written before POST and binds the
+site, release ID and manifest checksum. It survives ambiguity, blocks other
+release IDs before authentication, and is cleared only after exact verified
+publication/GET reconciliation. Changing the release ID cannot bypass a failed
+or unresolved attempt.
 One POST can be followed by at most one exact-byte PUT. Any failure or missing
 proof is terminal for mutation attempts; no automatic mutation retry occurs.
 GET-only reconciliation can finish a bound upload only after fresh publication
@@ -133,6 +145,10 @@ binding source commit, manifest checksum, exact ZIP, new deployment ID, and
 rollback. An interrupted lock is never automatically stolen. Investigate it
 and the journal before an authorized operator removes it; never reset a
 consumed journal to obtain another attempt.
+
+A known rejected create (including HTTP 422) still requires read-only operator
+verification and an explicit reviewed recovery action. There is no automatic
+claim reset or new-release retry, even when a failed deployment ID is known.
 
 ## CI and limits
 
