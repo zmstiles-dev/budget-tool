@@ -7,6 +7,7 @@ const path = require('node:path');
 const { pathToFileURL } = require('node:url');
 const { execFileSync } = require('node:child_process');
 const Module = require('node:module');
+const { buildPaths } = require('./backend-build-paths.cjs');
 
 const root = path.resolve(__dirname, '..');
 const netlifyDir = path.join(root, 'netlify');
@@ -17,6 +18,8 @@ const artifactFunctions = path.join(artifact, 'functions');
 const artifactRuntime = path.join(artifactFunctions, '_runtime');
 const artifactPublic = path.join(artifact, 'public');
 const rootReal = fs.realpathSync(root);
+const storage = buildPaths(root);
+for (const key of ['TEMP', 'TMP', 'TMPDIR']) process.env[key] = storage.temp;
 
 function safeRealPath(target, label, mustExist = false) {
     const absolute = path.resolve(target);
@@ -193,7 +196,7 @@ async function main() {
     // The source and output inventories above are fixed before invoking it so
     // an unexpected file cannot silently become part of the deployment.
     const zipItPath = path.join(netlifyDir, 'node_modules', '@netlify', 'zip-it-and-ship-it', 'dist', 'main.js');
-    const stagingParent = path.resolve('D:/Documents/Codex/.assistant-storage/temp');
+    const stagingParent = storage.temp;
     fs.mkdirSync(stagingParent, { recursive: true });
     const staging = path.join(stagingParent, `budget-tool-netlify-staging-${process.pid}`);
     if (fs.existsSync(staging)) throw new Error('Netlify staging path already exists.');
@@ -216,7 +219,7 @@ async function main() {
             : 'npm';
         execFileSync(process.platform === 'win32' ? process.execPath : npmCommand, [
             ...(process.platform === 'win32' ? [npmCommand] : []),
-            'ci', '--omit=dev', '--ignore-scripts', '--offline', '--cache', 'D:/Documents/Codex/.assistant-storage/npm-cache'
+            'ci', '--omit=dev', '--ignore-scripts', '--offline', '--cache', storage.cache
         ], {
             cwd: staging,
             stdio: 'pipe',

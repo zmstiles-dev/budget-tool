@@ -1,0 +1,27 @@
+name: Backend provenance
+on:
+  pull_request:
+  push:
+    branches: [main]
+permissions:
+  contents: read
+jobs:
+  offline-provenance:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+          fetch-depth: 0
+          sparse-checkout-cone-mode: false
+          sparse-checkout: |
+            /*
+            !/*.csv
+      - uses: actions/setup-node@v6
+        with:
+          node-version: '24'
+          package-manager-cache: false
+      - name: Source and release guard checks
+        run: node --test --test-concurrency=1 tests/review-core.test.cjs tests/transaction-backend.test.cjs tests/transaction-service.integration.test.cjs tests/provider-import-exclusions.test.cjs tests/merchant-defaults-regression.test.cjs tests/backend-release-guard.test.cjs
+      - name: Validate public deployment/source association
+        run: node scripts/backend-release.cjs verify-public
