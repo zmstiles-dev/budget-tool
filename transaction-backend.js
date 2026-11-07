@@ -87,13 +87,21 @@
             'Sync settings changed since they were loaded.', 'Cutoff date must be a real YYYY-MM-DD date.',
             'Cutoff date cannot be in the future.',
             'Cutoff date can only move forward; earlier dates require an explicit backfill operation.',
+            'Accepted state revision is required.', 'Accepted state changed since it was loaded.',
+            'Accepted state is invalid.', 'Accepted history compatibility marker is invalid.',
+            'Backup budgets are invalid.', 'Backup category colors are invalid.',
+            'Backup category ordering is invalid.', 'Backups must not contain credentials or provider tokens.',
             'This transaction is still pending with the bank and cannot be added until it posts.',
             'Provider transactions must use an existing budget category.'
         ]);
         if (/^Provider pending observation .+ must post before approval\.$/.test(message)) {
             return 'This transaction is still pending with the bank and cannot be added until it posts.';
         }
-        if (allowed.has(message) || /^Possible duplicate requires review: [A-Za-z0-9._:/@-]+$/.test(message) || /^Amendment target changed since review: [A-Za-z0-9._:/@-]+$/.test(message)) return message;
+        if (allowed.has(message)
+            || /^Backup category \d+ (?:is invalid|color is invalid)\.$/.test(message)
+            || /^Accepted transaction \d+ is invalid or changed\.$/.test(message)
+            || /^Possible duplicate requires review: [A-Za-z0-9._:/@-]+$/.test(message)
+            || /^Amendment target changed since review: [A-Za-z0-9._:/@-]+$/.test(message)) return message;
         return 'Approval service request failed.';
     }
 

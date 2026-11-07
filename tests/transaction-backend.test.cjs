@@ -422,6 +422,50 @@ assert.equal(structuredFailureResponse.statusCode, 500);
 assert.equal(structuredFailureBody.error, 'Approval service request failed.');
 assert.deepEqual(structuredFailureBody.diagnostic, { stage: 'sync', status: 503, http_status: 500, type: 'API_ERROR', code: 'PRODUCT_NOT_READY', request_id: 'synthetic-http-diagnostic' });
 assert.doesNotMatch(structuredFailureResponse.body, /provider secret/);
+
+// Accepted-state validation failures expose only bounded static messages or
+// index-only validation labels. Arbitrary service text remains redacted.
+for (const expectedMessage of [
+    'Accepted state revision is required.',
+    'Accepted state changed since it was loaded.',
+    'Accepted state is invalid.',
+    'Accepted transaction 1 is invalid or changed.',
+    'Backup budgets are invalid.',
+    'Backup category colors are invalid.',
+    'Backup category ordering is invalid.',
+    'Backup category 1 is invalid.',
+    'Backup category 1 color is invalid.',
+    'Backups must not contain credentials or provider tokens.'
+]) {
+    const acceptedStateFailureHandler = createHttpHandler({
+        backend: { async saveAcceptedState() { throw new Error(expectedMessage); } },
+        authenticate: async () => auth
+    });
+    const acceptedStateFailureResponse = { statusCode: 0, headers: {}, body: '', setHeader(name, value) { this.headers[name] = value; }, end(body) { this.body = body || ''; } };
+    await acceptedStateFailureHandler({
+        method: 'POST', url: '/accepted-state', headers: {},
+        on(event, handler) {
+            if (event === 'data') process.nextTick(() => handler(JSON.stringify({ state: {}, expectedRevision: 0 })));
+            if (event === 'end') process.nextTick(handler);
+        }
+    }, acceptedStateFailureResponse);
+    assert.equal(JSON.parse(acceptedStateFailureResponse.body).error, expectedMessage);
+}
+const unknownAcceptedStateFailureHandler = createHttpHandler({
+    backend: { async saveAcceptedState() { throw new Error('provider secret must never cross the HTTP boundary'); } },
+    authenticate: async () => auth
+});
+const unknownAcceptedStateFailureResponse = { statusCode: 0, headers: {}, body: '', setHeader(name, value) { this.headers[name] = value; }, end(body) { this.body = body || ''; } };
+await unknownAcceptedStateFailureHandler({
+    method: 'POST', url: '/accepted-state', headers: {},
+    on(event, handler) {
+        if (event === 'data') process.nextTick(() => handler(JSON.stringify({ state: {}, expectedRevision: 0 })));
+        if (event === 'end') process.nextTick(handler);
+    }
+}, unknownAcceptedStateFailureResponse);
+assert.equal(JSON.parse(unknownAcceptedStateFailureResponse.body).error, 'Approval service request failed.');
+assert.doesNotMatch(unknownAcceptedStateFailureResponse.body, /provider secret/);
+
 const pendingMessageHandler = createHttpHandler({
     backend: { async approve() { throw new Error('Provider pending observation plaid:chase:checking:long-provider-id@sha256:abcdef must post before approval.'); } },
     authenticate: async () => auth
