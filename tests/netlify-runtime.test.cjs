@@ -630,6 +630,8 @@ function assertRedactedDiagnostic(records, expectedStage, expectedErrorCode = 'u
     assert.equal((await settingsRouteHandler(new Request('https://synthetic.example/.netlify/functions/budgetTransactions/sync-settings', { method: 'OPTIONS', headers: { origin: 'https://zmstiles-dev.github.io' } }), trustedContext())).status, 204, 'sync settings must be exposed to browser preflight');
     assert.equal((await settingsRouteHandler(new Request('https://synthetic.example/.netlify/functions/budgetTransactions/sync-settings', { method: 'GET', headers: { origin: 'https://zmstiles-dev.github.io' } }), trustedContext())).status, 418, 'sync settings must reach the production runtime after edge routing');
     assert.equal(settingsRouteFactoryCalls, 1, 'sync settings OPTIONS must not initialize the runtime');
+    assert.equal((await settingsRouteHandler(new Request('https://synthetic.example/.netlify/functions/budgetTransactions/accepted-transaction', { method: 'OPTIONS', headers: { origin: 'https://zmstiles-dev.github.io' } }), trustedContext())).status, 204, 'accepted transaction edits must be exposed to browser preflight');
+    assert.equal((await settingsRouteHandler(new Request('https://synthetic.example/.netlify/functions/budgetTransactions/accepted-transaction', { method: 'POST', headers: { origin: 'https://zmstiles-dev.github.io', 'content-type': 'application/json' }, body: '{}' }), trustedContext())).status, 418, 'accepted transaction edits must reach the production runtime after edge routing');
     const stalledBody = new ReadableStream({ start() {} });
     const stalledHandler = runtime.createNetlifyHandler({
         maxBodyReadMs: 20,

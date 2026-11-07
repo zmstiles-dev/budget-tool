@@ -1336,14 +1336,19 @@
                 return;
             }
             if (!authLoadCurrent(generation, userAtStart)) return;
-            try { await loadProtectedReview(generation); await runConfiguredOnOpenSync(generation); }
-            catch (error) { reportPersistenceError(error); }
+            // Paint the authoritative shared snapshot before waiting on the
+            // auxiliary review and bank-sync services. Those calls can be
+            // slow or unavailable, but they must not delay the user's saved
+            // transaction list. Rendering remains read-only.
+            populateDateFilters();
+            initializeCumulativeBanks();
+            renderAll();
+            try {
+                const reviewHydrated = await runConfiguredOnOpenSync(generation);
+                if (authLoadCurrent(generation, userAtStart) && reviewHydrated !== true) await loadProtectedReview(generation);
+            } catch (error) { reportPersistenceError(error); }
             if (!authLoadCurrent(generation, userAtStart)) return;
             populateDateFilters();
-            // Rendering an authenticated snapshot must stay read-only. The
-            // cumulative-bank initializer may derive missing display values,
-            // but loading a user must never enqueue a cloud save for that
-            // derived state.
             initializeCumulativeBanks();
             renderAll();
         }
@@ -1407,6 +1412,7 @@
             bankSyncError = syncFailures.join(' ');
             renderReviewInbox();
             if (generation === authGeneration && currentUser) await loadProtectedReview(generation);
+            return true;
         }
 
         function validSyncDate(value) {
@@ -1618,9 +1624,18 @@
             categoryModalSession += 1;
             categoryModalBusy = false;
             document.getElementById('categoryModal')?.classList.remove('active');
+            document.getElementById('editTransactionModal')?.classList.remove('active');
+            editingTransactionIndex = -1;
+            editingTransactionExpected = null;
             document.getElementById('importPreview')?.classList.add('hidden');
             document.getElementById('loginScreen').style.display = 'flex';
             document.querySelector('.app-layout').style.display = 'none';
+            selectedMonth = '';
+            calendarYear = new Date().getFullYear();
+            availableMonths.clear();
+            dateFiltersInitialized = false;
+            document.getElementById('monthFilter').value = '';
+            document.getElementById('yearFilter').innerHTML = '';
             transactions = [];
             categories = [];
             budgets = {};
@@ -1751,12 +1766,12 @@
         }
 
         function migrateTransactions() {
-            transactions = transactions.map(t => {
-                if (t.account === undefined) {
-                    t.account = t.payment_method || '';
-                }
-                return t;
-            });
+            // Keep loaded transaction objects byte-for-byte stable. Older
+            // accepted rows may intentionally omit account while retaining a
+            // payment_method fallback; adding account here changes the full
+            // state sent by an unrelated edit and makes that legacy row look
+            // modified to the protected save validator. Read the fallback at
+            // render/edit time instead of mutating the persisted row.
         }
 
          function initializeCumulativeBanks() {
@@ -2182,8 +2197,14 @@
         let calendarYear = new Date().getFullYear();
         let selectedMonth = '';
         let availableMonths = new Set();
+        let dateFiltersInitialized = false;
 
         function populateDateFilters() {
+            const yearFilter = document.getElementById('yearFilter');
+            const previousYear = yearFilter ? yearFilter.value : '';
+            const previousMonth = selectedMonth || (document.getElementById('monthFilter') || {}).value || '';
+            const previousCalendarYear = calendarYear;
+            const preserveCalendarYear = dateFiltersInitialized;
             availableMonths.clear();
             const years = new Set();
 
@@ -2198,19 +2219,20 @@
             const sortedMonths = Array.from(availableMonths).sort();
 
             const yearOptions = sortedYears.map(y => `<option value="${y}">${y}</option>`).join('');
-            document.getElementById('yearFilter').innerHTML = yearOptions;
-            if (sortedYears.length > 0) document.getElementById('yearFilter').value = sortedYears[0];
+            yearFilter.innerHTML = yearOptions;
+            if (sortedYears.length > 0) yearFilter.value = sortedYears.includes(previousYear) ? previousYear : sortedYears[0];
 
             if (sortedMonths.length > 0) {
-                selectedMonth = sortedMonths[sortedMonths.length - 1];
-                calendarYear = parseInt(selectedMonth.substring(0, 4));
+                selectedMonth = sortedMonths.includes(previousMonth) ? previousMonth : sortedMonths[sortedMonths.length - 1];
+                calendarYear = preserveCalendarYear && Number.isInteger(previousCalendarYear) ? previousCalendarYear : parseInt(selectedMonth.substring(0, 4));
             } else {
                 selectedMonth = '';
-                calendarYear = new Date().getFullYear();
+                calendarYear = preserveCalendarYear && Number.isInteger(previousCalendarYear) ? previousCalendarYear : new Date().getFullYear();
             }
 
             document.getElementById('monthFilter').value = selectedMonth;
             renderCalendar();
+            dateFiltersInitialized = true;
         }
 
         function renderCalendar() {
@@ -2275,6 +2297,70 @@
             }
         }
 
+        async function commitAcceptedTransactionEdit(nextState, previousState, transactionIndex) {
+            const before = previousState || cloneAcceptedState();
+            const snapshot = JSON.parse(JSON.stringify(nextState));
+            const generation = authGeneration;
+            const user = currentUser;
+            const service = window.transactionApprovalService;
+            const saveEpoch = acceptedStateEpoch;
+            const editableFields = ['date', 'description', 'merchant', 'amount', 'category', 'account', 'payment_method', 'type'];
+            if (!(user && service && service.serverBacked === true && typeof service.updateAcceptedTransaction === 'function')) return commitAcceptedState(snapshot, before);
+            const write = async () => {
+                if (generation !== authGeneration || user !== currentUser) throw new Error('Authentication changed before the transaction edit started.');
+                if (saveEpoch !== acceptedStateEpoch) {
+                    const error = new Error('Accepted-state save was superseded by a newer durable change.');
+                    error.code = 'STALE_ACCEPTED_SAVE';
+                    throw error;
+                }
+                const previousTransaction = before.transactions[transactionIndex];
+                const nextTransaction = snapshot.transactions[transactionIndex];
+                if (!previousTransaction || !nextTransaction) throw new Error('Accepted transaction edit target is invalid.');
+                const patch = {};
+                editableFields.forEach(field => {
+                    if (JSON.stringify(previousTransaction[field]) !== JSON.stringify(nextTransaction[field])) patch[field] = nextTransaction[field];
+                });
+                if (!Object.keys(patch).length) return true;
+                const acknowledged = await service.updateAcceptedTransaction(transactionIndex, previousTransaction, patch, cloudRevision);
+                if (!acknowledged || acknowledged.ok !== true || !acknowledged.state) throw new Error('Protected state service did not acknowledge the transaction edit.');
+                if (generation !== authGeneration || user !== currentUser) throw new Error('Authentication changed before the transaction edit was acknowledged.');
+                if (saveEpoch !== acceptedStateEpoch) {
+                    const error = new Error('Accepted-state save was superseded by a newer durable change.');
+                    error.code = 'STALE_ACCEPTED_SAVE';
+                    throw error;
+                }
+                if (acceptedStateSignature() !== JSON.stringify(before)) throw new Error('Accepted data changed during the transaction edit; reload before saving.');
+                if (!Number.isSafeInteger(acknowledged.revision) || acknowledged.revision < 0) throw new Error('Protected state service returned an invalid transaction revision.');
+                acceptedStateEpoch += 1;
+                cloudRevision = acknowledged.revision;
+                lastPersistenceError = null;
+                restoreAcceptedState(acknowledged.state);
+                return true;
+            };
+            const queued = firestoreSaveQueue.then(write, write);
+            firestoreSaveQueue = queued.catch(() => undefined);
+            try {
+                return await queued;
+            } catch (error) {
+                if (acceptedStateSignature() === JSON.stringify(before)) restoreAcceptedState(before);
+                throw error;
+            }
+        }
+
+        function stableTransactionValue(value) {
+            if (Array.isArray(value)) return value.map(stableTransactionValue);
+            if (value && typeof value === 'object') {
+                return Object.keys(value).sort().reduce((result, key) => {
+                    result[key] = stableTransactionValue(value[key]);
+                    return result;
+                }, {});
+            }
+            return value;
+        }
+
+        function sameTransactionSnapshot(left, right) {
+            return JSON.stringify(stableTransactionValue(left)) === JSON.stringify(stableTransactionValue(right));
+        }
         function saveMerchantDefault(merchant, category, type) {
             if (merchant) {
                 const entry = { category, type };
@@ -2455,18 +2541,20 @@
                             ${amountPrefix}$${Math.abs(amountVal).toFixed(2)}
                         </div>
                         <span class="category">${escapeHTML(t.category || 'Uncategorized')}</span>
-                        ${t.account ? `<div style="color:var(--muted-light);font-size:0.75rem;margin-top:2px;">${escapeHTML(t.account)}</div>` : ''}
+                        ${(t.account || t.payment_method) ? `<div style="color:var(--muted-light);font-size:0.75rem;margin-top:2px;">${escapeHTML(t.account || t.payment_method)}</div>` : ''}
                     </div>
                 </div>
             `}).join('');
         }
 
         let editingTransactionIndex = -1;
+        let editingTransactionExpected = null;
 
         function openEditModal(index) {
-            editingTransactionIndex = index;
             const t = transactions[index];
             if (!t) return;
+            editingTransactionIndex = index;
+            editingTransactionExpected = JSON.parse(JSON.stringify(t));
 
             document.getElementById('editTransDate').value = t.date || '';
             document.getElementById('editTransDescription').value = t.description || '';
@@ -2488,10 +2576,15 @@
 
         document.getElementById('editTransCancel').addEventListener('click', () => {
             document.getElementById('editTransactionModal').classList.remove('active');
+            editingTransactionExpected = null;
         });
 
         document.getElementById('editTransDelete').addEventListener('click', async () => {
             if (editingTransactionIndex < 0) return;
+            if (!editingTransactionExpected || !sameTransactionSnapshot(transactions[editingTransactionIndex], editingTransactionExpected)) {
+                alert('Delete failed: Transaction changed while the editor was open; reload before deleting.');
+                return;
+            }
             if (!confirm('Delete this transaction?')) return;
             const previous = cloneAcceptedState();
             const next = JSON.parse(JSON.stringify(previous));
@@ -2499,12 +2592,17 @@
             try {
                 await commitAcceptedState(next, previous);
                 document.getElementById('editTransactionModal').classList.remove('active');
+                editingTransactionExpected = null;
                 renderAll();
             } catch (error) { alert('Delete failed: ' + error.message); }
         });
 
         document.getElementById('editTransSave').addEventListener('click', async () => {
             if (editingTransactionIndex < 0) return;
+            if (!editingTransactionExpected || !sameTransactionSnapshot(transactions[editingTransactionIndex], editingTransactionExpected)) {
+                alert('Save failed: Transaction changed while the editor was open; reload before saving.');
+                return;
+            }
             const previous = cloneAcceptedState();
             const next = JSON.parse(JSON.stringify(previous));
             const t = next.transactions[editingTransactionIndex];
@@ -2518,8 +2616,9 @@
             t.payment_method = t.account;
             t.type = document.getElementById('editTransType').value || t.type;
             try {
-                await commitAcceptedState(next, previous);
+                await commitAcceptedTransactionEdit(next, previous, editingTransactionIndex);
                 document.getElementById('editTransactionModal').classList.remove('active');
+                editingTransactionExpected = null;
                 renderAll();
             } catch (error) { alert('Save failed: ' + error.message); }
         });

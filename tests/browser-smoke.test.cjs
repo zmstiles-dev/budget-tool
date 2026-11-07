@@ -89,6 +89,192 @@ function createServer() {
     assert.equal(identityPanel.visible, true, 'Authenticated UI must show the current account identity.');
     assert.equal(identityPanel.email, 'captainicebow@gmail.com', 'Authenticated UI must show the verified account email.');
     assert.equal(identityPanel.switchVisible, true, 'Authenticated UI must expose explicit account switching.');
+    const migrationSmoke = await page.evaluate(() => {
+        const originalTransactions = transactions;
+        const legacy = { date: '2025-02-??', description: 'Synthetic legacy observation', amount: -2.5, category: 'Restaurants', merchant: 'Synthetic merchant', payment_method: 'Test Card', type: 'expense' };
+        const before = JSON.stringify(legacy);
+        transactions = [legacy];
+        migrateTransactions();
+        const result = { serializedUnchanged: JSON.stringify(legacy) === before, accountWasAdded: Object.prototype.hasOwnProperty.call(legacy, 'account'), fallback: legacy.account || legacy.payment_method };
+        transactions = originalTransactions;
+        return result;
+    });
+    assert.deepEqual(migrationSmoke, { serializedUnchanged: true, accountWasAdded: false, fallback: 'Test Card' }, 'Loading must not mutate legacy transaction rows; account fallback remains available for display/editing.');
+
+    const filterSelectionSmoke = await page.evaluate(() => {
+        const originalTransactions = transactions;
+        const originalMonth = selectedMonth;
+        const originalYear = calendarYear;
+        const originalInitialized = dateFiltersInitialized;
+        const originalMonths = availableMonths;
+        const originalYearFilter = document.getElementById('yearFilter').value;
+        const originalMonthFilter = document.getElementById('monthFilter').value;
+        transactions = [
+            { date: '2024-02-14', description: 'Synthetic older row', amount: -1, category: 'Restaurants', type: 'expense' },
+            { date: '2025-06-03', description: 'Synthetic selected row', amount: -2, category: 'Restaurants', type: 'expense' }
+        ];
+        populateDateFilters();
+        document.getElementById('yearFilter').value = '2024';
+        selectedMonth = '2024-02';
+        calendarYear = 2024;
+        document.getElementById('monthFilter').value = selectedMonth;
+        renderCalendar();
+        transactions.push({ date: '2026-12-01', description: 'Synthetic newly loaded row', amount: -3, category: 'Restaurants', type: 'expense' });
+        populateDateFilters();
+        const result = {
+            yearFilter: document.getElementById('yearFilter').value,
+            monthFilter: document.getElementById('monthFilter').value,
+            selectedMonth,
+            calendarYear
+        };
+        transactions = originalTransactions;
+        selectedMonth = originalMonth;
+        calendarYear = originalYear;
+        dateFiltersInitialized = originalInitialized;
+        availableMonths = originalMonths;
+        document.getElementById('yearFilter').value = originalYearFilter;
+        document.getElementById('monthFilter').value = originalMonthFilter;
+        return result;
+    });
+    assert.deepEqual(filterSelectionSmoke, { yearFilter: '2024', monthFilter: '2024-02', selectedMonth: '2024-02', calendarYear: 2024 }, 'Background refresh must preserve active date selections.');
+
+    const initialLoadTimingSmoke = await page.evaluate(async () => {
+        const originalService = window.transactionApprovalService;
+        const originalRenderAll = window.renderAll;
+        const originalSyncEnabled = window.TRANSACTION_SYNC_ENABLED;
+        const reviewSnapshot = reviewStore.exportReview();
+        let reviewStarted = false;
+        let firstRenderAt = null;
+        window.TRANSACTION_SYNC_ENABLED = false;
+        window.transactionApprovalService = {
+            serverBacked: true,
+            async loadReview() { reviewStarted = true; await new Promise(resolve => setTimeout(resolve, 100)); return reviewSnapshot; },
+            async listPending() { return []; }
+        };
+        window.renderAll = function () { if (firstRenderAt === null) firstRenderAt = performance.now(); return originalRenderAll(); };
+        const startedAt = performance.now();
+        const pending = loadFromFirestore(authGeneration);
+        await new Promise(resolve => setTimeout(resolve, 10));
+        const firstPaintBeforeAuxiliaryHydration = firstRenderAt !== null && reviewStarted;
+        await pending;
+        const elapsed = performance.now() - startedAt;
+        window.renderAll = originalRenderAll;
+        window.TRANSACTION_SYNC_ENABLED = originalSyncEnabled;
+        window.transactionApprovalService = originalService;
+        return { firstPaintBeforeAuxiliaryHydration, elapsed, firstPaintOffset: firstRenderAt === null ? null : firstRenderAt - startedAt };
+    });
+    assert.equal(initialLoadTimingSmoke.firstPaintBeforeAuxiliaryHydration, true, 'Initial transaction data must render while delayed review hydration is still pending.');
+    assert.ok(initialLoadTimingSmoke.elapsed >= 90, 'Synthetic delay must prove the auxiliary hydration path was exercised.');
+
+    const acceptedTransactionEditSmoke = await page.evaluate(async () => {
+        const originalService = window.transactionApprovalService;
+        const originalState = cloneAcceptedState();
+        const originalRevision = cloudRevision;
+        const originalEpoch = acceptedStateEpoch;
+        const originalCategories = categories;
+        const calls = [];
+        categories = [...categories, { name: 'Food', type: 'expense', color: '#2ecc71' }];
+        window.transactionApprovalService = {
+            serverBacked: true,
+            async updateAcceptedTransaction(index, expectedTransaction, patch, expectedRevision) {
+                calls.push({ index, expectedTransaction: JSON.parse(JSON.stringify(expectedTransaction)), patch: { ...patch }, expectedRevision });
+                const state = cloneAcceptedState();
+                state.transactions[index] = { ...state.transactions[index], ...patch };
+                return { ok: true, revision: expectedRevision + 1, state };
+            }
+        };
+        openEditModal(0);
+        document.getElementById('editTransCategory').value = 'Food';
+        document.getElementById('editTransSave').click();
+        await new Promise(resolve => setTimeout(resolve, 0));
+        const result = { callCount: calls.length, index: calls[0] && calls[0].index, patchCategory: calls[0] && calls[0].patch.category, revision: calls[0] && calls[0].expectedRevision, category: transactions[0] && transactions[0].category, modalClosed: !document.getElementById('editTransactionModal').classList.contains('active') };
+        restoreAcceptedState(originalState);
+        cloudRevision = originalRevision;
+        acceptedStateEpoch = originalEpoch;
+        categories = originalCategories;
+        window.transactionApprovalService = originalService;
+        return result;
+    });
+    assert.deepEqual(acceptedTransactionEditSmoke, { callCount: 1, index: 0, patchCategory: 'Food', revision: 0, category: 'Food', modalClosed: true }, 'Saved transaction edits must use the targeted revision-bound endpoint.');
+    const staleEditorSmoke = await page.evaluate(async () => {
+        const originalService = window.transactionApprovalService;
+        const originalState = cloneAcceptedState();
+        const originalRevision = cloudRevision;
+        const originalEpoch = acceptedStateEpoch;
+        const originalCategories = categories;
+        const originalConfirm = window.confirm;
+        const syntheticTarget = { sourceId: 'synthetic-editor-target', date: '2025-03-01', description: 'Synthetic target', merchant: 'Synthetic merchant', amount: -4.25, category: 'Restaurants', account: 'Test Card', payment_method: 'Test Card', type: 'expense' };
+        const syntheticReplacement = { sourceId: 'synthetic-editor-replacement', date: '2025-03-02', description: 'Synthetic replacement', merchant: 'Other synthetic merchant', amount: -5.5, category: 'Restaurants', account: 'Test Card', payment_method: 'Test Card', type: 'expense' };
+        categories = [...categories, { name: 'Food', type: 'expense', color: '#2ecc71' }];
+        restoreAcceptedState({ transactions: [syntheticTarget, syntheticReplacement], categories, budgets: {}, merchantDefaults: {}, categoryGroups: [], categoryColors: {}, categoryOrder: [] });
+        const calls = [];
+        window.transactionApprovalService = { serverBacked: true, async updateAcceptedTransaction(...args) { calls.push(args); return { ok: true, revision: cloudRevision + 1, state: cloneAcceptedState() }; } };
+        openEditModal(0);
+        document.getElementById('editTransCategory').value = 'Food';
+        restoreAcceptedState({ transactions: [syntheticReplacement, syntheticTarget], categories, budgets: {}, merchantDefaults: {}, categoryGroups: [], categoryColors: {}, categoryOrder: [] });
+        document.getElementById('editTransSave').click();
+        await new Promise(resolve => setTimeout(resolve, 0));
+        const saveResult = { calls: calls.length, alert: window.__alerts[window.__alerts.length - 1], modalOpen: document.getElementById('editTransactionModal').classList.contains('active') };
+        document.getElementById('editTransCancel').click();
+        window.__alerts.length = 0;
+        restoreAcceptedState({ transactions: [syntheticTarget, syntheticReplacement], categories, budgets: {}, merchantDefaults: {}, categoryGroups: [], categoryColors: {}, categoryOrder: [] });
+        openEditModal(0);
+        restoreAcceptedState({ transactions: [syntheticReplacement, syntheticTarget], categories, budgets: {}, merchantDefaults: {}, categoryGroups: [], categoryColors: {}, categoryOrder: [] });
+        window.confirm = () => { throw new Error('Delete confirmation must not be reached for a stale editor.'); };
+        document.getElementById('editTransDelete').click();
+        await new Promise(resolve => setTimeout(resolve, 0));
+        const deleteResult = { calls: calls.length, alert: window.__alerts[window.__alerts.length - 1], modalOpen: document.getElementById('editTransactionModal').classList.contains('active') };
+        document.getElementById('editTransCancel').click();
+        restoreAcceptedState(originalState);
+        cloudRevision = originalRevision;
+        acceptedStateEpoch = originalEpoch;
+        categories = originalCategories;
+        window.confirm = originalConfirm;
+        window.transactionApprovalService = originalService;
+        window.__alerts.length = 0;
+        return { saveResult, deleteResult };
+    });
+    assert.equal(staleEditorSmoke.saveResult.calls, 0, 'A reordered target must not reach the targeted save endpoint.');
+    assert.match(staleEditorSmoke.saveResult.alert, /changed while the editor was open/i);
+    assert.equal(staleEditorSmoke.saveResult.modalOpen, true);
+    assert.equal(staleEditorSmoke.deleteResult.calls, 0, 'A reordered target must not reach the delete save path.');
+    assert.match(staleEditorSmoke.deleteResult.alert, /changed while the editor was open/i);
+    assert.equal(staleEditorSmoke.deleteResult.modalOpen, true);
+    const targetedQueueSmoke = await page.evaluate(async () => {
+        const originalService = window.transactionApprovalService;
+        const originalState = cloneAcceptedState();
+        const originalRevision = cloudRevision;
+        const originalEpoch = acceptedStateEpoch;
+        const originalCategories = categories;
+        const queueCategory = 'Queue Synthetic';
+        categories = [...categories, { name: queueCategory, type: 'expense', color: '#f39c12' }];
+        let releaseSettings;
+        let settingsStarted = false;
+        const targetRevisions = [];
+        window.transactionApprovalService = {
+            serverBacked: true,
+            async saveAcceptedState(state, expectedRevision) { settingsStarted = true; await new Promise(resolve => { releaseSettings = resolve; }); return { ok: true, revision: expectedRevision + 1, state }; },
+            async updateAcceptedTransaction(index, expectedTransaction, patch, expectedRevision) { targetRevisions.push(expectedRevision); const state = cloneAcceptedState(); state.transactions[index] = { ...state.transactions[index], ...patch }; return { ok: true, revision: expectedRevision + 1, state }; }
+        };
+        const before = cloneAcceptedState();
+        const settingsPromise = saveToFirestore({ snapshot: before });
+        await new Promise(resolve => setTimeout(resolve, 0));
+        const next = JSON.parse(JSON.stringify(before));
+        next.transactions[0].category = queueCategory;
+        const editPromise = commitAcceptedTransactionEdit(next, before, 0);
+        await new Promise(resolve => setTimeout(resolve, 0));
+        const targetBlockedBehindSettings = targetRevisions.length === 0;
+        releaseSettings();
+        const result = { settings: await settingsPromise, edit: await editPromise, targetBlockedBehindSettings, targetRevision: targetRevisions[0], revision: cloudRevision, epoch: acceptedStateEpoch };
+        restoreAcceptedState(originalState);
+        cloudRevision = originalRevision;
+        acceptedStateEpoch = originalEpoch;
+        categories = originalCategories;
+        window.transactionApprovalService = originalService;
+        return result;
+    });
+    assert.deepEqual(targetedQueueSmoke, { settings: true, edit: true, targetBlockedBehindSettings: true, targetRevision: 1, revision: 2, epoch: 1 }, 'Targeted edits must serialize behind queued settings and use the acknowledged revision.');
+
     const syncCooldownSmoke = await page.evaluate(async () => {
         const originalEnabled = window.TRANSACTION_SYNC_ENABLED;
         const originalConnections = window.TRANSACTION_SYNC_CONNECTIONS;
