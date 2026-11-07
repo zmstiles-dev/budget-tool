@@ -21,6 +21,37 @@ jobs:
         with:
           node-version: '24'
           package-manager-cache: false
+      - name: Hydrate pinned historical source blobs
+        shell: bash
+        env:
+          GIT_NO_LAZY_FETCH: '0'
+        run: |
+          node <<'NODE'
+          const fs = require('node:fs');
+          const { execFileSync } = require('node:child_process');
+
+          const readJson = file => JSON.parse(fs.readFileSync(file, 'utf8'));
+          const current = readJson('backend-release.current.json');
+          const policy = readJson('backend-release.policy.json');
+          const commit = current?.sourceCommit;
+          if (!/^[a-f0-9]{40}$/.test(commit || '')) {
+            throw new Error('Invalid pinned historical source commit.');
+          }
+          if (!Array.isArray(policy?.sourceFiles) || !policy.sourceFiles.length) {
+            throw new Error('Pinned source closure is missing.');
+          }
+          const seen = new Set();
+          for (const file of policy.sourceFiles) {
+            const parts = typeof file === 'string' ? file.split('/') : [];
+            if (typeof file !== 'string' || !file || file.includes('\\') || file.includes(':') || /[\u0000-\u001f\u007f]/.test(file) || file.startsWith('/') || /^[A-Za-z]:/.test(file) || file.toLowerCase().endsWith('.csv') || parts.some(part => !part || part === '.' || part === '..') || seen.has(file)) {
+              throw new Error(`Unsafe pinned source closure path: ${String(file)}`);
+            }
+            seen.add(file);
+            const type = execFileSync('git', ['cat-file', '-t', `${commit}:${file}`], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'inherit'], env: { ...process.env, GIT_NO_LAZY_FETCH: '0' } }).trim();
+            if (type !== 'blob') throw new Error(`Pinned source closure path is not a file: ${file}`);
+          }
+          console.log(`Hydrated ${seen.size} pinned source blobs for ${commit}.`);
+          NODE
       - name: Source and release guard checks
         run: node --test --test-concurrency=1 tests/review-core.test.cjs tests/transaction-backend.test.cjs tests/transaction-service.integration.test.cjs tests/provider-import-exclusions.test.cjs tests/merchant-defaults-regression.test.cjs tests/backend-release-guard.test.cjs
       - name: Validate public deployment/source association
