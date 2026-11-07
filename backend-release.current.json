@@ -1,24 +1,24 @@
 {
-  "adoption": "imported-and-committed-after-deployment",
+  "adoption": "clean-commit-before-build",
   "artifact": {
-    "sha256": "caedecc78d5ace9e64208dd7bee3bdc8cc79fac197f99d013af1e2e1cb60a6ee",
-    "size": 22707220
+    "sha256": "1e2f354a063ae44eb161bbbb55862750836f71a0c8e723ffc71bb663209b3f74",
+    "size": 22708014
   },
-  "deployId": "6aeb92490f0a886f2a755723",
-  "functionEntryNormalizedSha256": "6a3f982fed20e943d2015c21a4394d0c67662698008184a645948ddce48cdb24",
+  "deployId": "6aef42a719b719c3af877fcc",
+  "functionEntryNormalizedSha256": "0d3e3e7fbb54aec3ff0f673c89d0e42501ba850f0efec30bd5b71c11216e16b4",
   "kind": "verified-backend-association",
   "normalization": "UTF-8 CRLF to LF; standalone legacy roster replaced with empty array in transaction-backend.js",
-  "privateReceiptSha256": "47909434ff886f803530b9803cf3ab5b43e0a6bfcbc7ea6848d405a1a0d04ba5",
+  "privateReceiptSha256": "cfccee03c316f4ea0c3afbb2819c3872679aa74a3f93daf3a1c94efcd0b77787",
   "rollback": {
     "artifact": {
-      "sha256": "96c61020f17f575885fb30e83e7509eb66325aee689b39da4a52555998d37f0f",
-      "size": 22706632
+      "sha256": "71703c4d4e835eb4992ae7bd64820c05767280650c77526c1af85823725d95df",
+      "size": 22706860
     },
-    "deployId": "6ae64e8c8fc979cb849af66f"
+    "deployId": "6aee92fb4553792f304d7c03"
   },
   "runtimeFiles": {
     "production-service.js": "7c9a496a8ba3e072dc1d982cd299377f968836ba347a3f4081388522308fcd9b",
-    "transaction-backend.js": "9cb15da93462712e0dfe7cfd0fd50851494aa590065a26b5c8d70fce37ddb667",
+    "transaction-backend.js": "325ef6db0bf65dd2235920c2827ab71d4aeef4ed43b36aa862c46d07ca5dea27",
     "transaction-config.js": "d1694d124584ecb06006a17bacb6c4e4c24eee0102966fbb3222d257f1fa39d5",
     "transaction-review.js": "302142c6b319cbf42efc2aebe77a3852c75fd598038eb1bba016a148af45553c",
     "transaction-service.js": "2875414a591b613f8bdf119a9a917145a548835ffc34318443633ebf00cdcf90"
@@ -26,5 +26,5 @@
   "schemaVersion": 1,
   "siteHost": "stiles-budget-tool.netlify.app",
   "siteId": "a429bdf1-47c9-4bb0-9e9d-7f5cdf8d416d",
-  "sourceCommit": "a84e406aa1e8cca3646b843efe5ae67da84118a8"
+  "sourceCommit": "b8364809c92827863f7bb6fbc6e03a4c24f73aa5"
 }
