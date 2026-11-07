@@ -88,7 +88,7 @@
             'Cutoff date cannot be in the future.',
             'Cutoff date can only move forward; earlier dates require an explicit backfill operation.',
             'Accepted state revision is required.', 'Accepted state changed since it was loaded.',
-            'Accepted state is invalid.', 'Accepted history compatibility marker is invalid.',
+            'Accepted state is invalid.', 'Accepted history compatibility marker is invalid.', 'Accepted transaction edit is invalid.', 'Accepted transaction edit contains immutable fields.', 'Accepted transaction edit target is invalid.',
             'Backup budgets are invalid.', 'Backup category colors are invalid.',
             'Backup category ordering is invalid.', 'Backups must not contain credentials or provider tokens.',
             'This transaction is still pending with the bank and cannot be added until it posts.',
@@ -565,6 +565,42 @@
         return JSON.stringify(left) === JSON.stringify(right);
     }
 
+    // The browser and Admin SDK may enumerate one target row's JSON fields in
+    // different orders. Use a canonical comparison only for the explicit
+    // expected-row guard on the targeted edit route.
+    function stableSerialized(value) {
+        if (value === undefined) return undefined;
+        if (value === null || typeof value !== 'object') return JSON.stringify(value);
+        if (Array.isArray(value)) return '[' + value.map(item => {
+            const encoded = stableSerialized(item);
+            return encoded === undefined ? 'null' : encoded;
+        }).join(',') + ']';
+        return '{' + Object.keys(value).filter(key => value[key] !== undefined).sort().map(key => JSON.stringify(key) + ':' + stableSerialized(value[key])).join(',') + '}';
+    }
+
+    function sameStableSerialized(left, right) {
+        return stableSerialized(left) === stableSerialized(right);
+    }
+
+    function sameExpectedAcceptedTransaction(current, expected) {
+        if (sameStableSerialized(current, expected)) return true;
+        const source = clone(expected);
+        if (!source || typeof source !== 'object' || Array.isArray(source)) return false;
+        // Older browser loads may add this display fallback without changing
+        // the stored row. Tolerate only the exact counterpart value.
+        if (current && current.account === undefined && source.account === current.payment_method) delete source.account;
+        if (current && current.payment_method === undefined && source.payment_method === current.account) delete source.payment_method;
+        return sameStableSerialized(current, source);
+    }
+
+    const ACCEPTED_TRANSACTION_EDIT_FIELDS = new Set(['date', 'description', 'merchant', 'amount', 'category', 'account', 'payment_method', 'type']);
+
+    function acceptedTransactionEditFields(patch) {
+        if (!patch || typeof patch !== 'object' || Array.isArray(patch)) throw new Error('Accepted transaction edit is invalid.');
+        const fields = Object.keys(patch);
+        if (!fields.length || fields.some(field => !ACCEPTED_TRANSACTION_EDIT_FIELDS.has(field))) throw new Error('Accepted transaction edit contains immutable fields.');
+        return fields;
+    }
     function acceptedStorageKey(transaction, index) {
         const source = transaction || {};
         return text(source.sourceIdentity) && text(source.sourceRevision)
@@ -933,6 +969,27 @@
             return { ok: true, revision: this.revision, state: this.canonicalState() };
         }
 
+        updateAcceptedTransaction(auth, index, expectedTransaction, patch, expectedRevision) {
+            this.authorize(auth);
+            requireAcceptedRevision(expectedRevision, this.revision);
+            if (!Number.isSafeInteger(index) || index < 0) throw new Error('Accepted transaction edit target is invalid.');
+            const entries = [...this.accepted.entries()].filter(([, transaction]) => !transaction.reviewHistory && transaction.amendment !== 'removed');
+            if (index >= entries.length) throw new Error('Accepted transaction edit target is invalid.');
+            const [key, current] = entries[index];
+            if (!sameExpectedAcceptedTransaction(current, expectedTransaction)) throw new Error('Accepted state changed since it was loaded.');
+            const fields = acceptedTransactionEditFields(patch);
+            const next = clone(current);
+            fields.forEach(field => { next[field] = clone(patch[field]); });
+            try {
+                review.validateSnapshot(acceptedStateValidationSnapshot(this.canonicalState(), [next]));
+            } catch (_) {
+                throw new Error('Accepted transaction edit is invalid.');
+            }
+            this.accepted.set(key, next);
+            this.revision += 1;
+            this.audit.push({ action: 'update-accepted-transaction', actor: text(auth.email).toLowerCase(), index, at: this.clock() });
+            return { ok: true, revision: this.revision, state: this.canonicalState() };
+        }
         resetAccepted(auth, expectedRevision) {
             this.authorize(auth);
             requireAcceptedRevision(expectedRevision, this.revision);
@@ -1314,6 +1371,7 @@
         async cancel(auth) { return this.mutate(auth, memory => memory.cancel(auth), { writeAccepted: false }); }
         async replaceAccepted(auth, state, expectedRevision) { return this.mutate(auth, memory => memory.replaceAccepted(auth, state, expectedRevision)); }
         async saveAcceptedState(auth, state, expectedRevision) { return this.mutate(auth, memory => memory.saveAcceptedState(auth, state, expectedRevision)); }
+        async updateAcceptedTransaction(auth, index, expectedTransaction, patch, expectedRevision) { return this.mutate(auth, memory => memory.updateAcceptedTransaction(auth, index, expectedTransaction, patch, expectedRevision)); }
         async resetAccepted(auth, expectedRevision) { return this.mutate(auth, memory => memory.resetAccepted(auth, expectedRevision)); }
         async approve(auth, request) {
             const input = { ...(request || {}) };
@@ -1607,6 +1665,7 @@
         async restore(state, expectedRevision) { return this.request('restore', { state, expectedRevision }); }
         async reset(expectedRevision) { return this.request('reset', { expectedRevision }); }
         async saveAcceptedState(state, expectedRevision) { return this.request('accepted-state', { state, expectedRevision }); }
+        async updateAcceptedTransaction(index, expectedTransaction, patch, expectedRevision) { return this.request('accepted-transaction', { index, expectedTransaction, patch, expectedRevision }); }
 
         async approve(payload, receipt, context) {
             if (this.pendingStage) await this.pendingStage;
@@ -1690,6 +1749,7 @@
                 else if (url.pathname === '/defer' && request.method === 'POST') result = await backend.defer(auth, body.candidateId, body.expectedRevision);
                 else if (url.pathname === '/cancel' && request.method === 'POST') result = await backend.cancel(auth);
                 else if (url.pathname === '/restore' && request.method === 'POST') result = await backend.replaceAccepted(auth, body.state, body.expectedRevision);
+                else if (url.pathname === '/accepted-transaction' && request.method === 'POST' && typeof backend.updateAcceptedTransaction === 'function') result = await backend.updateAcceptedTransaction(auth, body.index, body.expectedTransaction, body.patch, body.expectedRevision);
                 else if (url.pathname === '/accepted-state' && request.method === 'POST' && typeof backend.saveAcceptedState === 'function') result = await backend.saveAcceptedState(auth, body.state, body.expectedRevision);
                 else if (url.pathname === '/reset' && request.method === 'POST') result = await backend.resetAccepted(auth, body.expectedRevision);
                 else if (url.pathname === '/sync' && request.method === 'POST' && opts.syncService) result = await opts.syncService.runOnOpen(auth, body.connectionKey, body);

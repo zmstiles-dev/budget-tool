@@ -239,6 +239,11 @@ await assert.rejects(() => durableReload.saveAcceptedState(auth, durableCanonica
 assert.equal((await durableReload.exportState(auth)).revision, durableBeforeSave.revision);
 await durableReload.stage(auth, [record({ sourceId: 'pending-after-accepted' })], { source: 'historical-csv', batchId: 'pending-after-accepted' });
 assert.equal((await durableReload.exportState(auth)).revision, durableApproval.revision);
+const durableTargetBefore = await durableReload.exportState(auth);
+const durableTargetEdit = await durableReload.updateAcceptedTransaction(auth, 0, durableTargetBefore.accepted[0][1], { category: 'Food' }, durableTargetBefore.revision);
+assert.equal(durableTargetEdit.ok, true, 'Durable backend must persist targeted accepted edits.');
+const durableTargetReload = new DurableProtectedReviewBackend({ repository: durableRepo, householdId: 'household-1', allowedUsers: ['reviewer@example.test'], initialState: { categories: reviewCategories } });
+assert.equal((await durableTargetReload.exportState(auth)).accepted[0][1].category, 'Food');
 assert.ok(transactionCalls >= 2);
 
 // Ordinary accepted-state saves use a CAS and preserve unchanged legacy rows.
@@ -263,6 +268,31 @@ assert.throws(() => legacyBackend.saveAcceptedState(auth, { ...settingsSave.stat
 assert.throws(() => legacyBackend.saveAcceptedState(auth, { ...settingsSave.state, merchantDefaults: { accessToken: 'must-not-persist' } }, metadataRevision), /credentials or provider tokens/);
 assert.equal((await legacyBackend.exportState(auth)).revision, metadataRevision);
 
+// A targeted accepted edit validates only the requested row. This lets a
+// valid category edit proceed even when an unrelated strict-invalid legacy
+// row remains in accepted history, while revision, identity and field fences
+// prevent stale or provenance-changing updates.
+const targetedRows = Array.from({ length: 84 }, (_, index) => record({ sourceId: 'target-row-' + (index + 1) }));
+const targetedLegacyRow = record({ sourceId: 'target-legacy-row-84', date: 'Unknown', description: 'Synthetic legacy observation', payment_method: 'Test Card' });
+delete targetedLegacyRow.account;
+targetedRows[83] = targetedLegacyRow;
+const targetedBackend = new ProtectedReviewBackend({ householdId: 'household-1', allowedUsers: ['reviewer@example.test'], initialState: { transactions: targetedRows, categories: reviewCategories, budgets: {}, merchantDefaults: {}, categoryGroups: [], categoryColors: {}, categoryOrder: [] } });
+const targetedBefore = await targetedBackend.exportState(auth);
+const targetedState = { transactions: targetedBefore.accepted.map(entry => entry[1]), ...targetedBefore.state };
+const targetedEdit = await targetedBackend.updateAcceptedTransaction(auth, 0, targetedState.transactions[0], { category: 'Food' }, targetedBefore.revision);
+assert.equal(targetedEdit.ok, true, 'A targeted category edit must not scan unrelated legacy rows.');
+assert.equal(targetedEdit.state.transactions[0].category, 'Food');
+assert.deepEqual(targetedEdit.state.transactions[83], targetedLegacyRow);
+assert.throws(() => targetedBackend.updateAcceptedTransaction(auth, 0, targetedState.transactions[0], { category: 'Other' }, targetedBefore.revision), /changed since/);
+assert.throws(() => targetedBackend.updateAcceptedTransaction(auth, 0, targetedEdit.state.transactions[0], { sourceIdentity: 'attacker-change' }, targetedEdit.revision), /immutable fields/);
+const targetedInvalidBefore = await targetedBackend.exportState(auth);
+assert.throws(() => targetedBackend.updateAcceptedTransaction(auth, 83, targetedInvalidBefore.accepted[83][1], { category: 'Food' }, targetedInvalidBefore.revision), /Accepted transaction edit is invalid/);
+const reorderedTargetBackend = new ProtectedReviewBackend({ householdId: 'household-1', allowedUsers: ['reviewer@example.test'], initialState: { transactions: targetedRows.map(row => ({ ...row })), categories: reviewCategories, budgets: {}, merchantDefaults: {}, categoryGroups: [], categoryColors: {}, categoryOrder: [] } });
+const reorderedTargetBefore = await reorderedTargetBackend.exportState(auth);
+const reorderedExpected = Object.fromEntries(Object.entries(reorderedTargetBefore.accepted[0][1]).reverse());
+const reorderedEdit = await reorderedTargetBackend.updateAcceptedTransaction(auth, 0, reorderedExpected, { category: 'Food' }, reorderedTargetBefore.revision);
+assert.equal(reorderedEdit.ok, true, 'Expected-row matching must tolerate SDK key-order differences.');
+assert.deepEqual(reorderedEdit.state.transactions[0], { ...reorderedTargetBefore.accepted[0][1], category: 'Food' });
 // The shared save route accepts valid merchant names containing credential
 // words, so category edits and prior-month budget copies do not fail the same
 // full-state metadata validation.
@@ -306,6 +336,12 @@ const budgetCopyResponse = await saveAcceptedStateOverHttp({
 }, categoryEditResult.revision);
 assert.equal(budgetCopyResponse.statusCode, 200, 'budget copy with legitimate merchant names must pass the accepted-state route');
 assert.equal(JSON.parse(budgetCopyResponse.body).state.budgets.Restaurants['2026-11'], 20);
+const targetedRouteResponse = { statusCode: 0, headers: {}, body: '', setHeader(name, value) { this.headers[name] = value; }, end(body) { this.body = body || ''; } };
+const targetedRouteRow = JSON.parse(budgetCopyResponse.body).state.transactions[0];
+await merchantDefaultsHandler({ method: 'POST', url: '/accepted-transaction', headers: {}, on(event, handler) { if (event === 'data') process.nextTick(() => handler(JSON.stringify({ index: 0, expectedTransaction: targetedRouteRow, patch: { category: 'Other' }, expectedRevision: JSON.parse(budgetCopyResponse.body).revision }))); if (event === 'end') process.nextTick(handler); } }, targetedRouteResponse);
+assert.equal(targetedRouteResponse.statusCode, 200, 'The targeted accepted-transaction route must acknowledge a valid category edit.');
+assert.equal(JSON.parse(targetedRouteResponse.body).state.transactions[0].category, 'Other');
+
 assert.throws(() => legacyBackend.replaceAccepted(auth, legacyCanonical, settingsSave.revision), /Backup transaction 1 is invalid/);
 const historicalRestore = await legacyBackend.replaceAccepted(auth, { ...legacyCanonical, acceptedHistoryDateCompatibility: true }, settingsSave.revision);
 assert.equal(historicalRestore.ok, true);
@@ -429,6 +465,9 @@ for (const expectedMessage of [
     'Accepted state revision is required.',
     'Accepted state changed since it was loaded.',
     'Accepted state is invalid.',
+    'Accepted transaction edit is invalid.',
+    'Accepted transaction edit contains immutable fields.',
+    'Accepted transaction edit target is invalid.',
     'Accepted transaction 1 is invalid or changed.',
     'Backup budgets are invalid.',
     'Backup category colors are invalid.',
@@ -622,6 +661,9 @@ const saveClient = new BrowserApprovalClient({
 await saveClient.saveAcceptedState({ transactions: [], categories: [], budgets: {}, merchantDefaults: {}, categoryGroups: [], categoryColors: {}, categoryOrder: [] }, 0);
 assert.equal(new URL(saveClientCalls[0].url).pathname, '/accepted-state');
 assert.equal(JSON.parse(saveClientCalls[0].requestOptions.body).expectedRevision, 0);
+await saveClient.updateAcceptedTransaction(2, { date: '2026-10-01', description: 'Synthetic target', amount: -4.25, category: 'Restaurants', account: 'Test Card', payment_method: 'Test Card', type: 'expense' }, { category: 'Food' }, 0);
+assert.equal(new URL(saveClientCalls[1].url).pathname, '/accepted-transaction');
+assert.deepEqual(JSON.parse(saveClientCalls[1].requestOptions.body), { index: 2, expectedTransaction: { date: '2026-10-01', description: 'Synthetic target', amount: -4.25, category: 'Restaurants', account: 'Test Card', payment_method: 'Test Card', type: 'expense' }, patch: { category: 'Food' }, expectedRevision: 0 });
 
 const failedBackend = new ProtectedReviewBackend({ householdId: 'household-1', allowedUsers: ['reviewer@example.test'] });
 const failedStage = await failedBackend.stage(auth, [record({ sourceId: 'provider-fail' })], { source: 'synthetic', batchId: 'batch-fail' });
